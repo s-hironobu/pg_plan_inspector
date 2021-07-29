@@ -1,0 +1,9 @@
+--- SIGUSR2 {si_signo=SIGUSR2, si_code=SI_USER, si_pid=22471, si_uid=1000} ---
+rt_sigprocmask(SIG_SETMASK, ~[QUIT ILL TRAP ABRT BUS FPE SEGV CONT SYS RTMIN RT_1], NULL, 8) = 0
+kill(22465, SIG_0)                      = 0
+kill(22465, SIG_0)                      = 0
+kill(22471, SIGUSR1)                    = 0
+rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0
+kill(22465, SIG_0)                      = 0
+kill(22465, SIG_0)                      = 0
+rt_sigreturn({mask=[]})                 = 8192

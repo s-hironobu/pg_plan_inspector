@@ -1,0 +1,12 @@
+/*.so
+/*.o
+/*~
+/src/*~
+/src/*.o
+/pgpi/*~
+/pgpi/__pycache__/
+/tools/*~
+/tools/nn/
+/tools/*dat
+/pg_stat_statements/*.o
+/pg_stat_statements/*~
