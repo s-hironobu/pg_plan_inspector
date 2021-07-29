@@ -63,7 +63,7 @@ Refer to [README-pg_query_plan.md](./README-pg_query_plan.md) in detail.
 
 
 In this tutorial, we assume that the hostname is `10.0.2.15` and no-password.
-Also, we set the parameter pg_query_plan.log_min_duration to 3 in the postgresql.conf.
+In addition, we set the parameter pg_query_plan.log_min_duration to 3 in the postgresql.conf.
 
 
 ```
@@ -79,7 +79,7 @@ Create `testdb` database.
 $ createdb testdb
 ```
 
-After that, create three tables and insert data into the tables.
+Then, create three tables and insert data into the tables.
 
 ```
 $ psql testdb
@@ -116,8 +116,7 @@ https://user-images.githubusercontent.com/7246769/126769064-225be309-a665-42e5-8
 
 
 
-Before using query_progress.py, we need the pid of the backend connected to `testdb`,
-so, issue the pg_backend_pid() function.
+Before using query_progress.py, we need the pid of the backend connected to `testdb`.
 
 ```
 testdb=# SELECT pg_backend_pid();
