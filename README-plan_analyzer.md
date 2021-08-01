@@ -133,7 +133,7 @@ Now, we will do the first experiment.
 Create another console, and issue the query_progress.py command with the following option, so you can see the message shown below.
 
 ```
-$ cd ~/postgresql/contrib/pg_query_pogress
+$ cd ~/postgresql/contrib/pg_plan_inspector
 
 $ ./query_progress.py --host 10.0.2.15 --port 5432 --username postgres --pid 25261
 
