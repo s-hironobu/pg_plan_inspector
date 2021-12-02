@@ -54,7 +54,7 @@ Many methods I learned in statistics as a student are now classified as Machine 
 ## 1. Supported Versions
 
 
-This framework supports PostgreSQL versions 13 and 14 beta2.
+This framework supports PostgreSQL versions 13 and 14.
 
 ## 2. Installation and Usage
 

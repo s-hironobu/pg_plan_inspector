@@ -316,7 +316,7 @@ class Analyze(Repository, ExtendedStatistics, NN, Histogram):
     def __write_data(self, prefix, database, queryid, ret, query):
         _str = "Candidate:\ndatabase=" + str(database)
         _str += "\nqueryid=" + str(queryid)
-        _str += "\nCondiftion:" + str(ret)
+        _str += "\nCondition:" + str(ret)
         _str += "\nquery:" + str(query)
         _str += "\n\n"
         _file = self.__get_file_name(prefix)
