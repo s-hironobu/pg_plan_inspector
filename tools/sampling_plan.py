@@ -61,7 +61,7 @@ if __name__ == "__main__":
         pid = args.pid
 
         sql = (
-            "SELECT pid, database, worker_type, nested_level, queryid, query, plan, plan_json FROM pg_query_plan("
+            "SELECT pid, database, worker_type, nested_level, queryid, query, planid, plan, plan_json FROM pg_query_plan("
             + pid
             + ")"
         )
@@ -101,10 +101,10 @@ if __name__ == "__main__":
                 _worker_type = row[2]
                 _nested_level = row[3]
                 _queryid = row[4]
-                # _planid = row[5]
                 _query = row[5]
-                _plan = row[6]
-                _plan_json = row[7]
+                _planid = int(row[6])
+                _plan = row[7]
+                _plan_json = row[8]
 
                 print(
                     "[{}]----------------------------------------------------".format(i)
@@ -115,10 +115,9 @@ if __name__ == "__main__":
                 print("nested_level   :{}".format(_nested_level))
                 print("queryid        :{}".format(_queryid))
                 print("query          :\n{}".format(_query))
+                print("planid         :{}".format(_planid))
                 print("plan           :\n{}".format(_plan))
                 i += 1
-
-                _planid = c.calc_planId(_plan_json)
 
                 if _worker_type == "leader":
                     if count == 1:

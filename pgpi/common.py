@@ -69,10 +69,14 @@ class Common:
     """regression directory"""
     REGRESSION_DIR = "regression"
 
+    """formatted regression parameter directory"""
+    FORMATTED_REGRESSION_PARAMS_DIR = "reg_params"
+
     """pg_query_plan"""
     SCHEMA = "query_plan"
-    INFO_TABLE = "info"
     LOG_TABLE = "log"
+
+    REG_PARAMS_TABLE = "reg"
 
     """
     Various methods
@@ -224,88 +228,6 @@ class Common:
             if _i in plan:
                 _rr += plan[_i]
         return _rr
-
-    def calc_planId(self, plan_json):
-        """Calculate 64bit planId of plan_json."""
-
-        MASK = int(18446744073709551615)  # 2 ** 64 - 1
-
-        NECESSARY_OBJECTS = (
-            "Plan",
-            "Plans",
-            "Node Type",
-            "Parent Relationship",
-            "Relation Name",
-            "Function Name",
-            "Index Name",
-            "CTE Name",
-            "Relation",
-            "Schema",
-            "Alias",
-            "Output",
-            "Scan Direction",
-            "Strategy",
-            "Join Type",
-            "Sort Method",
-            "Sort Key",
-            "Operation",
-            "Subplan Name",
-            "Command",
-            "Triggers",
-            "Trigger",
-            "Trigger Name",
-            "Constraint Name",
-            "Group Key",
-            "Grouping Sets",
-            "Group Keys",
-            "Hash Keys",
-            "Hash Key",
-            "Partial Mode",
-            "Inner Unique",
-            "Filter",
-            "Join Filter",
-            "Conflict Filter",
-            "Merge Cond",
-            "Hash Cond",
-            "Index Cond",
-            "TID Cond",
-            "Recheck Cond",
-        )
-
-        NONE_VALUE_OBJECTS = (
-            "Filter",
-            "Join Filter",
-            "Conflict Filter",
-            "Merge Cond",
-            "Hash Cond",
-            "Index Cond",
-            "TID Cond",
-            "Recheck Cond",
-        )
-
-        def delete_objects(plan):
-            for k in list(plan):
-                if k not in NECESSARY_OBJECTS:
-                    plan.pop(k)
-                if k in NONE_VALUE_OBJECTS:
-                    plan.update({k: None})
-
-        def delete_unnecessary_objects(Plans):
-            if isinstance(Plans, list):
-                for plan in Plans:
-                    delete_objects(plan)
-                    if "Plans" in plan:
-                        delete_unnecessary_objects(plan["Plans"])
-                return
-            else:
-                delete_objects(Plans)
-                if "Plans" in Plans:
-                    delete_unnecessary_objects(Plans["Plans"])
-                return
-
-        _json_dict = json.loads(plan_json)
-        delete_unnecessary_objects(_json_dict["Plan"])
-        return int(hashlib.md5(str(_json_dict).encode()).hexdigest(), 16) & MASK
 
     def get_inputs(self, plan):
         """Get outer and inter actual rows."""

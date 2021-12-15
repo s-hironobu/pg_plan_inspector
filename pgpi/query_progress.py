@@ -546,16 +546,23 @@ class QueryProgress(MergePlan, Replace, Rules, CalcNode):
             _reg_param = None
 
         if _reg_param is not None:
-            _regression = True
-            """
-            If there are already the regression parameters of this query,
-            replace the Plan Rows with the estimated rows using the regression parameters.
-            """
-            self.replace_plan_rows(
-                merged_plan["Plan"], _reg_param["Plan"], _numNode, queryid, planid
-            )
-            if Log.info <= self.LogLevel:
-                print("Info: Using regression params.")
+
+            if self.check_formatted_regression_params(serverId, queryid):
+                if Log.info <= self.LogLevel:
+                    print("Info: Using formatted regression params.")
+
+            else:
+                _regression = True
+                """
+                If there are already the regression parameters of this query,
+                replace the Plan Rows with the estimated rows using the regression parameters.
+                """
+                self.replace_plan_rows(
+                    merged_plan["Plan"], _reg_param["Plan"], _numNode, queryid, planid
+                )
+                if Log.info <= self.LogLevel:
+                    print("Info: Using regression params.")
+
         else:
             if Log.info <= self.LogLevel:
                 print("Info: Using rules.")

@@ -151,6 +151,7 @@ typedef struct queryPlanData
 	 * Identifires section
 	 */
 	uint64		queryId[MAX_NESTED_LEVEL];
+	uint64		planId[MAX_NESTED_LEVEL];
 
 	/*
 	 * These are used to link the relationship between the leader and the

@@ -404,7 +404,7 @@ class AddRows(Repository, PrepareMergeRows):
             self.__add_rows(_plan)
 
         # Delete 'MergeFlag' objects from _plan.
-        self.delete_unnecessary_objects(self.delete_flags, _plan)
+        ####self.delete_unnecessary_objects(self.delete_flags, _plan)
 
         # Write _plan.
         _jpath = self.path(_jdirpath, str(seqid))

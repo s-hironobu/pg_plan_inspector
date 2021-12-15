@@ -6,6 +6,7 @@ This is a repository management tool for the plan_analyzer module.
 Usage:
  repo_mgr.py create [--basedir XXX]
  repo_mgr.py get    [--basedir XXX] serverid
+ repo_mgr.py push   [--basedir XXX] serverid
  repo_mgr.py show   [--basedir XXX] [--verbose]
  repo_mgr.py check  [--basedir XXX]
  repo_mgr.py rename [--basedir XXX] old_serverid new_serverid
@@ -20,7 +21,7 @@ Usage:
 
 import argparse
 import sys
-from pgpi import Common, Repository, GetTables, Grouping, Regression, Log
+from pgpi import Common, Repository, GetTables, Grouping, Regression, Log, PushParam
 
 if __name__ == "__main__":
 
@@ -51,6 +52,14 @@ if __name__ == "__main__":
             rg.regression(serverId)
             del gp, rg
         del gt
+
+    def push_data(args):
+        base_dir = args.basedir
+        serverId = args.serverid
+        print("Use {}:".format(base_dir + "/" + REPOSITORY))
+        pp = PushParam(base_dir, log_level=LOG_LEVEL)
+        pp.push_param(serverId)
+        del pp
 
     def check_data(args):
         base_dir = args.basedir
@@ -155,6 +164,15 @@ if __name__ == "__main__":
     parser_get.add_argument("--basedir", nargs="?", default=".", help=msg_basedir)
     parser_get.add_argument("serverid", help=msg_serverid)
     parser_get.set_defaults(handler=get_data)
+
+    # push command.
+    parser_push = subparsers.add_parser(
+        "push",
+        help="Push the regression params to the specified server",
+    )
+    parser_push.add_argument("--basedir", nargs="?", default=".", help=msg_basedir)
+    parser_push.add_argument("serverid", help=msg_serverid)
+    parser_push.set_defaults(handler=push_data)
 
     # show command.
     parser_show = subparsers.add_parser(

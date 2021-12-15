@@ -8,4 +8,5 @@ from .regression import CalcRegression
 from .repository import Repository
 from .replace import Replace
 from .rules import Rules
+from .push_param import PushParam
 from .query_progress import QueryProgress

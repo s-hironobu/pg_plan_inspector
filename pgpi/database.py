@@ -36,7 +36,7 @@ class Database(Repository):
     Public methods
     """
 
-    def get_connection_param(self, serverId):
+    def get_connection_param(self, serverId, database="postgres"):
         """Return a connection param using the values in the hosts.conf."""
 
         if self.check_serverId(serverId) == False:
@@ -55,7 +55,12 @@ class Database(Repository):
                     + " port="
                     + str(_config[_section]["port"])
                 )
-                _conn += " dbname=postgres user=" + str(_config[_section]["username"])
+                _conn += (
+                    " dbname="
+                    + database
+                    + " user="
+                    + str(_config[_section]["username"])
+                )
 
                 """
                 If 'input_password' is True, prompt to enter the password.
@@ -76,10 +81,10 @@ class Database(Repository):
 
         return _conn
 
-    def connect(self, serverId):
+    def connect(self, serverId, database="postgres"):
         """Connect to the database server specified by serverId."""
 
-        _conn = self.get_connection_param(serverId)
+        _conn = self.get_connection_param(serverId, database)
         try:
             _connection = psycopg2.connect(_conn)
         except psycopg2.OperationalError as e:

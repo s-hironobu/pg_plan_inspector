@@ -200,6 +200,7 @@ initialize_pg_query_plan(void)
 						 "       nested_level	INT,"
 						 "       queryid		TEXT,"
 						 "       query		    TEXT,"
+						 "       planid		    TEXT,"
 						 "       plan		    TEXT,"
 						 "       plan_json	    TEXT"
 						 ");",
@@ -243,6 +244,7 @@ initialize_pg_query_plan(void)
 						 "    OUT queryid      TEXT,"
 						 "    OUT query_start  TIMESTAMP WITH TIME ZONE,"
 						 "    OUT query        TEXT,"
+						 "    OUT planid       TEXT,"
 						 "    OUT plan         TEXT,"
 						 "    OUT plan_json    TEXT"
 						 ")"
@@ -250,6 +252,16 @@ initialize_pg_query_plan(void)
 						 "  AS \'pg_query_plan\'"
 						 "LANGUAGE C;",
 						 "PUBLIC"
+			);
+
+		appendStringInfo(&buf,
+						 "CREATE OR REPLACE FUNCTION %s.get_planid("
+						 "    IN  plan_json    TEXT"
+						 ")"
+						 "  RETURNS TEXT"
+						 "  AS \'pg_query_plan\'"
+						 "LANGUAGE C;",
+						 SCHEMA
 			);
 
 		pgstat_report_activity(STATE_RUNNING, buf.data);

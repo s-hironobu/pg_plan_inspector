@@ -71,7 +71,7 @@ class GetTables(MergePlan):
             return 0
 
         _sql = "SELECT seqid, starttime, endtime, database, pid,"
-        _sql += " nested_level, queryid, query, plan, plan_json"
+        _sql += " nested_level, queryid, query, planid, plan, plan_json"
         _sql += "   FROM " + self.SCHEMA + "." + self.LOG_TABLE
         _sql += "     WHERE " + str(current_seqid) + " < seqid AND seqid <= "
         _sql += str(max_seqid) + " ORDER BY seqid"
@@ -90,11 +90,9 @@ class GetTables(MergePlan):
             _nested_level = _row[5]
             _queryid = int(_row[6])
             _query = _row[7]
-            _plan = _row[8]
-            _plan_json = _row[9]
-
-            # Calculate planId.
-            _planid = self.calc_planId(_plan_json)
+            _planid = int(_row[8])
+            _plan = _row[9]
+            _plan_json = _row[10]
 
             # Write query info into log.csv.
             _logfp.write(

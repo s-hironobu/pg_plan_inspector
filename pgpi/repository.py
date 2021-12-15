@@ -247,7 +247,12 @@ class Repository(Common):
                             _dirpath, oct(self.DEFAULT_DIR_MODE)
                         )
                     )
-                for subdir in (self.TABLES_DIR, self.GROUPING_DIR, self.REGRESSION_DIR):
+                for subdir in (
+                    self.TABLES_DIR,
+                    self.GROUPING_DIR,
+                    self.REGRESSION_DIR,
+                    self.FORMATTED_REGRESSION_PARAMS_DIR,
+                ):
                     _subdirpath = _dirpath + "/" + subdir
                     if self.secure_check(_subdirpath, self.DEFAULT_DIR_MODE) == True:
                         print("\tReport: {} is secure.".format(_subdirpath))
@@ -481,3 +486,30 @@ class Repository(Common):
             return self.read_plan_json(_path)
         else:
             return None
+
+    """
+    formatted regression parameter subdir
+    """
+
+    def check_formatted_regression_params_dir(self, serverId):
+        self.__check_dir(serverId, self.FORMATTED_REGRESSION_PARAMS_DIR, [])
+
+    def get_formatted_regression_params_subdir_path(self, serverId):
+        return self.dirpath([serverId, self.FORMATTED_REGRESSION_PARAMS_DIR])
+
+    def truncate_formatted_regression_params(self, serverId):
+        _dir = self.get_formatted_regression_params_subdir_path(serverId)
+        for _file_name in os.listdir(_dir):
+            os.remove(str(_dir) + "/" + str(_file_name))
+
+    def write_formatted_regression_params(self, serverId, queryid, param):
+        _dir = self.get_formatted_regression_params_subdir_path(serverId)
+        with open(str(_dir) + "/" + str(queryid), mode="w") as _fp:
+            _fp.write(param)
+
+    def check_formatted_regression_params(self, serverId, queryid):
+        _dir = self.get_formatted_regression_params_subdir_path(serverId)
+        for _file in os.listdir(_dir):
+            if str(_file) == str(queryid):
+                return True
+        return False

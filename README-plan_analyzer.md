@@ -256,6 +256,21 @@ Notice that, in this experiment, the progress screen shows "Info: Using regressi
 It means that the query progress is calculated using the regression parameters stored in the repository, not rules.
 
 
+### 2.7. Push the regression parameters to server
+
+`Push` command, which has been introduced since version 0.2, pushes the regression parameters to the specified server. The parameters are stored in the query_plan.reg table in each database.
+
+```
+$ ./repo_mgr.py push --basedir test_repo server_1
+```
+
+When planning, the optimizer checks the query_plan.reg table and if found the regression parameter of the current processing query, the optimizer adjusts the planning rows using the parameters.
+
+
+Note that, this command is for a feasibility study to intervene in the optimizer's processing,
+almost all users do not need this command.
+
+
 ## 3. Usage
 
 
@@ -290,6 +305,7 @@ Even if you do not set the --verbose option when query_progress.py starts, you c
 ```
   repo_mgr.py create [--basedir XXX]
   repo_mgr.py get    [--basedir XXX] serverid
+  repo_mgr.py push   [--basedir XXX] serverid
   repo_mgr.py show   [--basedir XXX] [--verbose]
   repo_mgr.py check  [--basedir XXX]
   repo_mgr.py rename [--basedir XXX] old_serverid new_serverid
@@ -304,6 +320,8 @@ Even if you do not set the --verbose option when query_progress.py starts, you c
 Create a repository.
 + get command  
 Get the rows from the query_plan.log table of the specified server.
++ push command  
+Push the regression parameters to the specified server.
 + check command  
 Check the security of the repository and the validation of the server-ids in the hosts.conf.
 + rename command  

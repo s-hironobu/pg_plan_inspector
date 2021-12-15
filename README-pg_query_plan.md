@@ -284,11 +284,12 @@ nested_level | integer | Nested Level of this query
 queryid | text | Query id of this query
 query_start | timestamp with tz | Timestamp when this query starts
 query | text | Query
+planid | text | Plan id of this query plan
 plan | text | Query plan with text format
 plan_json | text | Query plan with json format
 
 
-*Note*: Although a queryid is internally treated as uint64, the value of queryid is stored into the text column because Postgres only supports int64 (bigint).
+*Note*: Although queryid and planid are internally treated as uint64, their values are stored into the text columns because Postgres only supports int64 (bigint).
 
 
 ## 6. Table Definition
@@ -307,11 +308,12 @@ pid | integer | Pid of the backend that runs this query
 nested_level | integer | Nested Level of this query
 queryid | text | Query id of this query
 query | text | Query
+planid | text | Plan id of this query plan
 plan | text | Executed plan with text format
 plan_json | text | Executed plan with json format
 
 
-*Note*: Although a queryid is internally treated as uint64, the value of queryid is stored into the text column because Postgres only supports int64 (bigint).
+*Note*: Although queryid and planid are internally treated as uint64, their values are stored into the text columns because Postgres only supports int64 (bigint).
 
 ## 7. Limitations and Warning
 

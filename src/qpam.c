@@ -20,6 +20,7 @@
 
 #include "common.h"
 #include "pgqp_explain.h"
+#include "planid.h"
 
 
 /* Link to shared memory state */
@@ -28,6 +29,7 @@ extern pgqpSharedState * pgqp;
 /* Links to QueryDesc and ExplainState */
 extern QueryDesc *qp_qd[MAX_NESTED_LEVEL];
 extern ExplainState *qp_es[MAX_NESTED_LEVEL];
+
 
 /*
  * Function declarations
@@ -194,6 +196,26 @@ set_plan(struct queryPlanData *qpd, const int nested_level,
 				qp_es[nested_level]->str->len,
 				level,
 				format);
+
+	/*
+	 * Set planId
+	 */
+	if (format == PRINT_PLAN_JSON)
+	{
+		uint64		planid;
+
+		pgqp_json_plan = qp_es[nested_level]->str->data;
+		pre_plan_parse(qp_es[nested_level]->str->len);
+		if (plan_parse() != 0)
+			elog(WARNING, "Warning: Parse error in the json plan.");
+		planid = get_planId();
+		qpd->planId[nested_level] = planid;
+
+#ifdef __DEBUG__
+		elog(LOG, "planid = %lu  plan=%s", planid, qp_es[nested_level]->str->data);
+#endif
+	}
+
 	qp_es[nested_level]->analyze = _analyze;
 	qp_es[nested_level]->verbose = _verbose;
 }
@@ -229,7 +251,10 @@ init_qpd(struct queryPlanData *qpd)
 	}
 
 	for (i = 0; i < MAX_NESTED_LEVEL; i++)
+	{
 		qpd->queryId[i] = 0;
+		qpd->planId[i] = 0;
+	}
 
 	qpd->pid = InvalidPid;
 }

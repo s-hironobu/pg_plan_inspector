@@ -8,16 +8,15 @@ I demonstrate that a tool provided by this framework shows the progress of a run
 Watch this: [query-progress-example01.mp4](https://user-images.githubusercontent.com/7246769/126768623-d02a3bea-edb1-4776-adaf-ce871ce526e5.mp4)
 
 
-
 https://user-images.githubusercontent.com/7246769/126768623-d02a3bea-edb1-4776-adaf-ce871ce526e5.mp4
-
 
 
 
 This is a POC model, and the primary purposes of this framework are:
 
-1. To implement an external module that monitors the state of the running queries. (Refer to [[3](#references)].)
+1. To implement an external module that monitors the state of the running queries. (Refer to [[6](#references)].)
 2. To show that the PostgreSQL optimizer can be improved from providing feedback on the analysis of the executed plans.
+3. To study the possibilities of the concept of Self-Driving DBMS. (Refer to [[2,3](#references)].)
 
 
 To achieve these purposes, I am currently developing two modules: `pg_query_plan` and `plan_analyzer`.
@@ -63,16 +62,15 @@ This framework is composed of two modules: `pg_query_plan` and `plan_analyzer`.
 The installations and their usages are described in [README-pg_query_plan.md](./README-pg_query_plan.md) and [README-plan_analyzer.md](./README-plan_analyzer.md), respectively.
 
 
-## 3. Tentative Conclusion
+## 3. Tentative Conclusions
 
-### pg_query_plan
+### Version 0.1:
 
+#### pg_query_plan
 As shown in [README-pg_query_plan.md](./README-pg_query_plan.md), the pg_query_plan module can be monitored through the state of running queries.
 In other words, the first main purpose has been achieved by this module.
 
-
-### plan_analyzer
-
+#### plan_analyzer
 In [README-tools.md](./README-tools.md),
 I introduced an example that a tool, called analyze.py, detects the functional dependency between the attributes of the table by applying a simple heuristics rule to the executed plans.
 This is an ad hoc; however, at least it shows that the second main purpose is not wrong and is possible.
@@ -84,44 +82,69 @@ otherwise the results will be inaccurate, for example, if the distribution of th
 In addition, the linear regression for correction of the estimated rows is generally often inaccurate when hash or merge joins are included.
 These causes are due to the validity limit of the linear regression model for the correction of the estimated rows.
 
-
 Considering these, it is obvious that the essential task is to improve the cardinality estimation of the PostgreSQL optimizer.
+
+### Version 0.2:
+
+To deal with the improvement of cardinality estimation, I made a development plan consisting of two steps. This version implements the first step and will implement the second step in the next version.
+
+
+This version feedbacks the regression parameters of the stored plans, which are calculated by the repo_mgr.py, to the optimizer.
+Note that, because of a feasibility study to intervene in the optimizer's processing, this version only adjusts the plan rows estimated by the optimizer and does not improve the cardinality estimation.
+
+
+In this feasibility study, I found that the number of parallel workers is greatly affected by the changes in rows.
+This is unexpected and has a negative effect on the processing of query_progress.py, however, I have decided to go to the next step because I have achieved the goal of the first step.
+(Of course, I can cheat by re-adjusting the rows after planning, but it is not essential.)
+
+
+In developing this version, I referred to [pg_hint_plan](https://github.com/ossc-db/pg_hint_plan) and [pg_plan_advsr](https://github.com/ossc-db/pg_plan_advsr).
+This version is by standing on the shoulders of these products.
+
+
+![alt text](./img/fig-current-status.png "current status")
 
 
 ## 4. Future Work
 
 ### Step 1
 
+Almost Achieved in version 0.2.
+
+<s>
 In the first step, I will implement a bridge software between the plan_analyzer module and PostgreSQL server to feedback the analysis results of the executed plan to the optimizer.
 
-A naive approach is that the plan_analyzer module sends the regression parameters stored in the repository to the PostgreSQL optimizer, and the optimizer corrects the estimated Plan Rows using the regression parameters.
-PostgreSQL fortunately already has a mechanism to intervene in the optimizer's processing and at least two modules have been made to improve the optimizer's processing for better results:
-[pg_dbms_stats](https://github.com/ossc-db/pg_dbms_stats) and [pg_plan_advsr](https://github.com/ossc-db/pg_plan_advsr).
-
-
 In addition, I will improve the algorithm of finding functional dependency in the first step.
-
-
-##### Info:
-`pg_plan_advsr` has already achieved one of the goals of this step using another approach.
+</s>
 
 
 ### Step 2
 
-The approach mentioned above works to a certain extent if the linear regression model for the correction of the estimated rows is valid, otherwise it will not work.
-
-
-Recently, lot of research to improve DBMS functions using AI technology[[6](#references)] is being conducted,
+Recently, lot of research to improve DBMS functions using AI technology[[9](#references)] is being conducted,
 and [hundreds of papers](https://scholar.google.com/scholar?hl=en&as_sdt=0,5&as_ylo=2015&as_yhi=2021&q=selectivity+OR+cardinality+estimation+deep+OR+machine+learning+database+planner+OR+optimizer) have been published on cardinality estimation.
-These state-of-the-art methods[[7,9,8,1,2,5](#references)] are attempting to go beyond the traditional methods, such as using histograms.
+These state-of-the-art methods[[10,13,12,1,4,8](#references)] are attempting to go beyond the traditional methods, such as using histograms.
 As PostgreSQL uses a traditional method, it would be worthwhile to add ML methods to the optimizer.
 
 
-This framework will be able to provide feedback on the differences between the estimated cardinality (Plan Rows) and the actual cardinality in Step 1;
-therefore, the feedback can be used to improve learning.
+Since this framework can intervene to the PostgreSQL optimizer, it will be able to feedback the results of an external AI-based cardinality estimation system to the optimizer.
+Also, since this framework saves the estimated cardinality (Plan Rows) and the actual cardinality (Actual Rows), the difference between them will help to use to improve learning.
+
+
+### Step 3
+
+Self-Driving DBMS has recently been researched [[2,3,11,5](#references)] and I am also interested in it.
+
+Self-Driving DBMS is not one specific feature; it is a concept that is integrated of several features, each of which uses AI technologies.
+There are many issues that Self-Driving DBMS research targets, and all of them are challenging.
+However, I am optimistic because of the following reasons.
+
+
+1. The first difficulty of AI-based research is to collect data, however, we are usually collecting data such as the logs of DBMS, OS, network and storage constantly.  
+2. Many useful AI methods have already been developed, and new methods will continue to be developed.  
+3. The development of more difficult Self-Driving cars is progressing. There is no reason why we can not develop Self-Driving DBMS.
+
 
 ![alt text](./img/fig-future-plan.png "future plan")
-
 
 
 ## 5. Related Works
@@ -132,12 +155,12 @@ Two projects have similar features to the pg_query_plan module.
 2. [pg_show_plans](https://github.com/cybertec-postgresql/pg_show_plans) shows the execution plans of all current running SQL statements. Unlike pg_query_plan and pg_query_state, pg_show_plans shows the execution plan that only contains the estimated values and not the actual values.
 
 
-Query progress indicators were previously studied [[4](#references)]. However, it seems that it is not currently being extensively researched.
+Query progress indicators were previously studied [[7](#references)]. However, it seems that it is not currently being extensively researched.
 
 
-Two interesting demonstrations will be shown at [VLDB 2021: Demonstrations](http://vldb.org/2021/?program-schedule-demonstrations).
+Two interesting demonstrations were shown at [VLDB 2021: Demonstrations](http://vldb.org/2021/?program-schedule-demonstrations).
   + PostCENN: PostgreSQL with Machine Learning Models for Cardinality Estimation
-  + DBMind: A Self-Driving Platform in openGauss
+  + DBMind: A Self-Driving Platform in openGauss[[11](#references)]
 
 
 ## 6. Limitations and Warning
@@ -159,22 +182,26 @@ Use this framework at your own risk.
 
 ## Version
 
-Version 0.1 (POC model)
+Version 0.2 (POC model)
 
 ## References
 
 [1] Andreas Kipf, et al. "[Learned Cardinalities:Estimating Correlated Joins with Deep Learning](http://cidrdb.org/cidr2019/papers/p101-kipf-cidr19.pdf)". In CIDR, 2019.  
-[2] Benjamin Hilprecht, et al. "[DeepDB: Learn from Data, not from Queries!](http://www.vldb.org/pvldb/vol13/p992-hilprecht.pdf)". Proceedings of the VLDB, Vol. 13, Issue 7, March 2020, pages 992–1005.  
-[3] Lukas Fittl. "[What's Missing for Postgres Monitoring](https://www.pgcon.org/events/pgcon_2020/sessions/session/132/slides/49/Whats%20Missing%20for%20Postgres%20Monitoring.pdf)". PGCon 2020.  
-[4] Patil L.V., and Mane Urmila P. "[Survey on SQL Query Progress Indicator](https://www.ijert.org/research/survey-on-sql-query-progress-indicator-IJERTV2IS3286.pdf)". International Journal of Engineering Research & Technology (IJERT) Vol. 2, Issue 3, March 2013.  
-[5] Rong Zhu, Ziniu Wu, et al. "[FLAT: Fast, Lightweight and Accurate Method for Cardinality Estimation](https://arxiv.org/pdf/2011.09022.pdf)". arXiv preprint arXiv:2011.09022(2020).  
-[6] X. Zhou, C. Chai, G. Li, and J. Sun. "[Database Meets Artificial Intelligence: A Survey](https://www.researchgate.net/publication/341427551_Database_Meets_Artificial_Intelligence_A_Survey)". TKDE, 2020.  
-[7] Xiaoying Wang, et al. "[Are We Ready For Learned Cardinality Estimation?](https://arxiv.org/abs/2012.06743)". arXiv:2012.14743, December 2020.  
-[8] Ziniu Wu, et al. "[BayesCard: Revitalizing Bayesian Networks for Cardinality Estimation](https://arxiv.org/pdf/2012.14743.pdf)". arXiv:2012.14743, December 2020.  
-[9] Zongheng Yang, et al. "[NeuroCard: One Cardinality Estimator for All Tables](https://vldb.org/pvldb/vol14/p61-yang.pdf)". Proceedings of the VLDB, Vol. 14, Issue 1, September 2020.
+[2] Andrew Pavlo, et al. "[Self-Driving Database Management Systems](https://www.cs.cmu.edu/~malin199/publications/2017.self-driving.cidr.pdf)". In CIDR, 2017.  
+[3] Andrew Pavlo. "[What is a Self-Driving Database Management System?](https://www.cs.cmu.edu/~pavlo/blog/2018/04/what-is-a-self-driving-database-management-system.html)". blog, April, 2018.  
+[4] Benjamin Hilprecht, et al. "[DeepDB: Learn from Data, not from Queries!](http://www.vldb.org/pvldb/vol13/p992-hilprecht.pdf)". Proceedings of the VLDB, Vol. 13, Issue 7, March 2020, pages 992–1005.  
+[5] Holger Mueller. "[Oracle Switches to Autopilot, Turns Up the Heat With MySQL Database Service](https://www.oracle.com/a/ocom/docs/mysql/oracle-switches-to-autopilot-mysql-cr-h-mueller-report.pdf)". September, 2021.  
+[6] Lukas Fittl. "[What's Missing for Postgres Monitoring](https://www.pgcon.org/events/pgcon_2020/sessions/session/132/slides/49/Whats%20Missing%20for%20Postgres%20Monitoring.pdf)". PGCon 2020.  
+[7] Patil L.V., and Mane Urmila P. "[Survey on SQL Query Progress Indicator](https://www.ijert.org/research/survey-on-sql-query-progress-indicator-IJERTV2IS3286.pdf)". International Journal of Engineering Research & Technology (IJERT) Vol. 2, Issue 3, March 2013.  
+[8] Rong Zhu, Ziniu Wu, et al. "[FLAT: Fast, Lightweight and Accurate Method for Cardinality Estimation](https://arxiv.org/pdf/2011.09022.pdf)". arXiv preprint arXiv:2011.09022(2020).  
+[9] X. Zhou, C. Chai, G. Li, and J. Sun. "[Database Meets Artificial Intelligence: A Survey](https://www.researchgate.net/publication/341427551_Database_Meets_Artificial_Intelligence_A_Survey)". TKDE, 2020.  
+[10] Xiaoying Wang, et al. "[Are We Ready For Learned Cardinality Estimation?](https://arxiv.org/abs/2012.06743)". arXiv:2012.14743, December 2020.  
+[11] Xuanhe Zhou, et al. "[DBMind: A Self-Driving Platform in openGauss](http://vldb.org/pvldb/vol14/p2743-zhou.pdf)". VLDB 2021: Demonstrations.  
+[12] Ziniu Wu, et al. "[BayesCard: Revitalizing Bayesian Networks for Cardinality Estimation](https://arxiv.org/pdf/2012.14743.pdf)". arXiv:2012.14743, December 2020.  
+[13] Zongheng Yang, et al. "[NeuroCard: One Cardinality Estimator for All Tables](https://vldb.org/pvldb/vol14/p61-yang.pdf)". Proceedings of the VLDB, Vol. 14, Issue 1, September 2020.
 
 
 ## Change Log
 
+ - 15th December 2021: Version 0.2 Released.
  - 28th July 2021: Version 0.1 Released.
-

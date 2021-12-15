@@ -180,7 +180,7 @@ if __name__ == "__main__":
         clear_console()
 
         # Execute pg_query_plan().
-        sql = "SELECT pid, database, worker_type, nested_level, queryid, query, plan, plan_json"
+        sql = "SELECT pid, database, worker_type, nested_level, queryid, query, planid, plan, plan_json"
         sql += " FROM pg_query_plan(" + pid + ")"
         cur = connection.cursor()
         try:
@@ -202,8 +202,9 @@ if __name__ == "__main__":
             _worker_type = row[2]
             _queryid = int(row[4])
             _query = row[5]
-            _plan_json = row[7]
-            _planid = qp.calc_planId(_plan_json)
+            _planid = int(row[6])
+            _plan_json = row[8]
+
             if Log.debug1 <= LOG_LEVEL:
                 print("Debug1: queryid={}  planid={}".format(_queryid, _planid))
             _X.append(
@@ -241,8 +242,9 @@ if __name__ == "__main__":
             _nested_level = row[3]
             _queryid = int(row[4])
             _query = row[5]
-            _plan = row[6]
-            _plan_json = row[7]
+            _planid = int(row[6])
+            _plan = row[7]
+            _plan_json = row[8]
 
             print("[{}]----------------------------------------------------".format(i))
             print("pid           :{}".format(_pid))
@@ -253,6 +255,7 @@ if __name__ == "__main__":
             print("queryid       :{}".format(_queryid))
             print("query         :\n               {}".format(_query))
             if verbose:
+                print("planid        :{}".format(_planid))
                 print("query_plan    :\n{}".format(_plan))
             i += 1
 

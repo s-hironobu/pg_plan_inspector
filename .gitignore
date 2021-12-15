@@ -3,6 +3,11 @@
 /*~
 /src/*~
 /src/*.o
+/src/optimizer/*.o
+/src/optimizer/*~
+/src/*_scanner.c
+/src/*_parser.c
+/src/*_parser.h
 /pgpi/*~
 /pgpi/__pycache__/
 /tools/*~

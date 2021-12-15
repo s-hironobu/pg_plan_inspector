@@ -10,6 +10,8 @@
  */
 #include "postgres.h"
 
+#define __ADJUST_ROWS__
+
 #include "funcapi.h"
 #include "libpq/pqsignal.h"
 #include "libpq/auth.h"
@@ -40,6 +42,19 @@
 #include "utils/queryjumble.h"
 #endif
 
+#ifdef __ADJUST_ROWS__
+#include "nodes/pathnodes.h"
+#include "optimizer/geqo.h"
+#include "optimizer/planner.h"
+#include "nodes/print.h"
+#include "nodes/bitmapset.h"
+#include "optimizer/pgqp_allpaths.h"
+#include "adjust_rows.h"
+#include "optimizer/pgqp_planner.h"
+#include "optimizer/pgqp_planmain.h"
+#endif
+
+#include "optimizer/paths.h"
 #include "common.h"
 #include "buffer.h"
 #include "bgworker.h"
@@ -49,9 +64,16 @@
 #if PG_VERSION_NUM < 140000
 #include "pg_stat_statements/pg_stat_statements.h"
 #endif
-
+#include "planid.h"
+#include "param.h"
 
 PG_MODULE_MAGIC;
+
+#ifdef __ADJUST_ROWS__
+extern CurrentState current_state;
+extern regParams reg_params;
+extern bool pgqp_adjust_rows;
+#endif
 
 /* Link to shared memory state */
 pgqpSharedState *pgqp = NULL;
@@ -70,6 +92,10 @@ static bool pgqp_show_plan;
 static bool pgqp_global_store_plan;
 static bool pgqp_store_plan;
 static int	pgqp_log_min_duration;
+#ifdef __ADJUST_ROWS__
+bool		pgqp_enable_adjust_joinrel_rows;
+bool		pgqp_enable_adjust_rel_rows;
+#endif
 #ifdef __ADDITIONAL_OPTIONS__
 static bool pgqp_log_buffers;
 static bool pgqp_log_wal;
@@ -115,6 +141,12 @@ static ExecutorFinish_hook_type prev_ExecutorFinish = NULL;
 static ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 static ClientAuthentication_hook_type prev_ClientAuthentication = NULL;
+#ifdef __ADJUST_ROWS__
+static planner_hook_type prev_planner = NULL;
+static join_search_hook_type prev_join_search = NULL;
+set_rel_pathlist_hook_type prev_set_rel_pathlist = NULL;
+set_join_pathlist_hook_type prev_set_join_pathlist = NULL;
+#endif
 
 /*
  * Function declarations
@@ -138,6 +170,13 @@ static void pgqp_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 								ProcessUtilityContext context,
 								ParamListInfo params, QueryEnvironment *queryEnv,
 								DestReceiver *dest, QueryCompletion *qc);
+#ifdef __ADJUST_ROWS__
+static PlannedStmt *pgqp_planner(Query *parse, const char *query_string, int cursorOptions,
+								 ParamListInfo boundParams);
+
+static RelOptInfo *pgqp_join_search(PlannerInfo *root, int levels_needed,
+									List *initial_rels);
+#endif
 
 static void pgqp_shmem_startup(void);
 static void pgqp_shmem_shutdown(int code, Datum arg);
@@ -150,8 +189,10 @@ static bool checkConditionOfLogInsertion(const int pid,
 static void sig_get_query_plan(SIGNAL_ARGS);
 
 Datum		pg_query_plan(PG_FUNCTION_ARGS);
+Datum		get_planid(PG_FUNCTION_ARGS);
 
 PG_FUNCTION_INFO_V1(pg_query_plan);
+PG_FUNCTION_INFO_V1(get_planid);
 
 
 /*
@@ -210,7 +251,7 @@ _PG_init(void)
 							 NULL);
 
 	DefineCustomIntVariable("pg_query_plan.log_min_duration",
-							"Sets the minimum execution time in seconds above which executed plans will be logged.",
+							"Set the minimum execution time in seconds above which executed plans will be logged.",
 							"Zero stores all plans.",
 							&pgqp_log_min_duration,
 							10,
@@ -221,6 +262,30 @@ _PG_init(void)
 							NULL,
 							NULL,
 							NULL);
+
+#ifdef __ADJUST_ROWS__
+	DefineCustomBoolVariable("pg_query_plan.enable_adjust_joinrel_rows",
+							 "Whether adjust the join rows.",
+							 NULL,
+							 &pgqp_enable_adjust_joinrel_rows,
+							 true,
+							 PGC_USERSET,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
+
+	DefineCustomBoolVariable("pg_query_plan.enable_adjust_rel_rows",
+							 "Whether adjust the index scan rows.",
+							 NULL,
+							 &pgqp_enable_adjust_rel_rows,
+							 true,
+							 PGC_USERSET,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
+#endif
 
 #ifdef __ADDITIONAL_OPTIONS__
 	DefineCustomBoolVariable("pg_query_plan.log_buffers",
@@ -272,6 +337,20 @@ _PG_init(void)
 	prev_ExecutorEnd = ExecutorEnd_hook;
 	ExecutorEnd_hook = pgqp_ExecutorEnd;
 
+#ifdef __ADJUST_ROWS__
+	prev_planner = planner_hook;
+	planner_hook = pgqp_planner;
+
+	prev_join_search = join_search_hook;
+	join_search_hook = pgqp_join_search;
+
+	prev_set_rel_pathlist = set_rel_pathlist_hook;
+	set_rel_pathlist_hook = pgqp_set_rel_pathlist;
+
+	prev_set_join_pathlist = set_join_pathlist_hook;
+	set_join_pathlist_hook = pgqp_set_join_pathlist;
+#endif							/* __ADJUST_ROWS__ */
+
 	if (!IsParallelWorker())
 	{
 		prev_ClientAuthentication = ClientAuthentication_hook;
@@ -303,6 +382,11 @@ _PG_init(void)
 	/* initialize variable */
 	is_explain = false;
 	pgqp_received_signal = false;
+#ifdef __ADJUST_ROWS__
+	pgqp_adjust_rows = false;
+
+	init_param_parse_env();
+#endif
 
 #if PG_VERSION_NUM >= 140000
 	/* Enables query identifier computation. */
@@ -322,6 +406,14 @@ _PG_fini(void)
 	ExecutorRun_hook = prev_ExecutorRun;
 	ExecutorFinish_hook = prev_ExecutorFinish;
 	ExecutorEnd_hook = prev_ExecutorEnd;
+
+#ifdef __ADJUST_ROWS__
+	planner_hook = prev_planner;
+	join_search_hook = prev_join_search;
+	set_rel_pathlist_hook = prev_set_rel_pathlist;
+	set_join_pathlist_hook = prev_set_join_pathlist;
+#endif							/* __ADJUST_ROWS__ */
+
 	if (!IsParallelWorker())
 	{
 		ProcessUtility_hook = prev_ProcessUtility;
@@ -620,9 +712,17 @@ pgqp_ExecutorStart(QueryDesc *queryDesc, int eflags)
 	int			instrument_options = 0;
 	int			leader_pid;
 
+
 #ifdef __DEBUG__
-	_test_count_hashtable();
+	/* _test_count_hashtable(); */
 #endif
+
+	/*
+	 * Free all elements of reg_params that stores the regression parameters.
+	 * This is used for query planners, so it must be cleaned up after
+	 * planning.
+	 */
+	free_reg_params();
 
 	if (nested_level == 0)
 	{
@@ -889,6 +989,94 @@ checkConditionOfLogInsertion(const int pid, const TimestampTz currentTimestamp)
 	return false;
 }
 
+#ifdef __ADJUST_ROWS__
+
+/*
+ * join_search hook
+ */
+static RelOptInfo *
+pgqp_join_search(PlannerInfo *root, int levels_needed,
+				 List *initial_rels)
+{
+	RelOptInfo *rel = NULL;
+
+	if (enable_geqo && levels_needed >= geqo_threshold)
+		return geqo(root, levels_needed, initial_rels);
+
+	if (!pgqp_adjust_rows)
+	{
+		if (prev_join_search)
+			return (*prev_join_search) (root, levels_needed, initial_rels);
+		else
+			return standard_join_search(root, levels_needed, initial_rels);
+	}
+
+	rel = pgqp_standard_join_search(root, levels_needed, initial_rels);
+
+	return rel;
+}
+
+
+/*
+ * planner hook
+ */
+static PlannedStmt *
+pgqp_planner(Query *parse, const char *query_string, int cursorOptions,
+			 ParamListInfo boundParams)
+{
+	PlannedStmt *result;
+	char		queryid[32];
+	char	   *params = NULL;
+
+	pgqp_adjust_rows = false;
+	sprintf(queryid, "%lu", parse->queryId);
+
+	/*
+	 * Check query_plan.reg
+	 */
+	if ((pgqp_enable_adjust_joinrel_rows || pgqp_enable_adjust_rel_rows)
+		&& (params = selectParams(queryid)) != NULL)
+	{
+		if (set_reg_params(parse, params))
+		{
+			pgqp_adjust_rows = true;
+			set_current_state();
+		}
+	}
+
+	if (prev_planner)
+		result = prev_planner(parse, query_string, cursorOptions, boundParams);
+	else
+		result = pgqp_standard_planner(parse, query_string, cursorOptions, boundParams);
+
+	if (pgqp_adjust_rows)
+		set_join_config_options(current_state.init_join_mask, false,
+								current_state.context);
+
+	return result;
+}
+
+#endif							/* __ADJUST_ROWS__ */
+
+/*
+ * Get planId of the specified json plan. This is a helper function.
+ */
+Datum
+get_planid(PG_FUNCTION_ARGS)
+{
+	char		planid[32];
+	text	   *json_plan_text = PG_GETARG_TEXT_P(0);
+	char	   *json_plan = text_to_cstring(json_plan_text);
+
+	pgqp_json_plan = json_plan;
+	pre_plan_parse(strlen(json_plan));
+	if (plan_parse() != 0)
+		elog(WARNING, "Warning: Parse error in the json plan.");
+	sprintf(planid, "%lu", get_planId());
+
+	PG_RETURN_TEXT_P(cstring_to_text_with_len(planid, strlen(planid)));
+}
+
 
 /*
  * pg_query_plan function returns the specified process's query plan.
@@ -972,8 +1160,8 @@ pg_query_plan(PG_FUNCTION_ARGS)
 
 	for (curr_backend = 1; curr_backend <= num_backends; curr_backend++)
 	{
-#define PG_QUERY_PLAN_COLS 9	/* pid, database, worker_type, nested_level,
-								 * queryid, query_start, query, plan,
+#define PG_QUERY_PLAN_COLS 10	/* pid, database, worker_type, nested_level,
+								 * queryid, query_start, query, planid, plan,
 								 * plan_json */
 		Datum		values[PG_QUERY_PLAN_COLS];
 		bool		nulls[PG_QUERY_PLAN_COLS];
@@ -1075,6 +1263,7 @@ pg_query_plan(PG_FUNCTION_ARGS)
 				int			k = 0;
 				bool		is_null;
 				char		queryid[32];
+				char		planid[32];
 
 				/* Set values */
 				memset(values, 0, sizeof(values));
@@ -1108,6 +1297,10 @@ pg_query_plan(PG_FUNCTION_ARGS)
 				/* query */
 				values[k] = CStringGetTextDatum(get_query_plan(&pgqp->qpd, PRINT_QUERY, &is_null, j));
 				nulls[k++] = is_null;
+
+				/* planid */
+				sprintf(planid, "%lu", pgqp->qpd.planId[j]);
+				values[k++] = CStringGetTextDatum(planid);
 
 				/* query plan in text */
 				values[k] = CStringGetTextDatum(get_query_plan(&pgqp->qpd, PRINT_PLAN, &is_null, j));

@@ -171,22 +171,21 @@ class Replace(Common):
                             )
                         )
                 else:
-                    _Coefficient = param["Coefficient"][0]
                     _EstimatedRows = round(
-                        (_Coefficient[0] * _Xouter)
-                        + (_Coefficient[1] * _Xinner)
+                        (param["Coefficient"][0] * _Xouter)
+                        + (param["Coefficient"][1] * _Xinner)
                         + param["Intercept"][0]
                     )
-                    plan.update(Coefficient=_Coefficient)
+                    plan.update(Coefficient=param["Coefficient"])
                     plan.update(Coefficient2=0)
                     plan.update(Intercept=param["Intercept"])
                     if Log.debug1 <= self.LogLevel:
                         print(
                             "Debug1: EstimatedRows({}) = Coef({}) * Xouter({}) + Coef({}) * Xinner({}) + {}".format(
                                 _EstimatedRows,
-                                _Coefficient[0],
+                                param["Coefficient"][0],
                                 _Xouter,
-                                _Coefficient[1],
+                                param["Coefficient"][1],
                                 _Xinner,
                                 param["Intercept"],
                             )

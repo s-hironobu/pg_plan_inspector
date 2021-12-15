@@ -146,3 +146,7 @@ In this example, it has considerably reduced the query execution time.
 
 
 This is an ad hoc, however, at least it shows that the functional dependencies can be detected using the executed plans.
+
+
+#### Note
+As you have already noticed, similar functionality can also be implemented using the auto_explain module, not the pg_query_plan module.

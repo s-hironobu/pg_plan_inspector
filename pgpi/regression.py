@@ -49,29 +49,29 @@ class CalcRegression:
             if Log.debug3 <= self.LogLevel:
                 print(
                     "Debug3:       ==> coef = 0    intercept = {}".format(
-                        round(_sumY / len(Y), 5)
+                        float(round(_sumY / len(Y), 5))
                     )
                 )
-            return (0, round(_sumY / len(Y), 5))
+            return (0.0, float(round(_sumY / len(Y), 5)))
         else:
             if Log.debug3 <= self.LogLevel:
                 if _sumX == 0:
                     print(
                         "Debug3:       ==> coef = 0   intercept = {}".format(
-                            round(_sumY / len(Y), 5)
+                            float(round(_sumY / len(Y), 5))
                         )
                     )
                 else:
                     print(
                         "Debug3:       ==> coef = {}  intercept = 0".format(
-                            round(_sumY / _sumX, 5)
+                            float(round(_sumY / _sumX, 5))
                         )
                     )
 
             if _sumX == 0:
-                return (0, round(_sumY / len(Y), 5))
+                return (0.0, float(round(_sumY / len(Y), 5)))
             else:
-                return (_sumY / _sumX, 0)
+                return (float(_sumY / _sumX), 0.0)
 
     def gather(self, X, Y):
         """
@@ -90,20 +90,20 @@ class CalcRegression:
             if _sumX == 0:
                 print(
                     "Debug3:       ==> coef = 0   intercept = {}".format(
-                        round(_sumY / len(Y), 5)
+                        float(round(_sumY / len(Y), 5))
                     )
                 )
             else:
                 print(
                     "Debug3:       ==> coef = {}  intercept = 0".format(
-                        round(_sumY / _sumX, 5)
+                        float(round(_sumY / _sumX, 5))
                     )
                 )
 
         if _sumX == 0:
-            return (0, round(_sumY / len(Y), 5))
+            return (0.0, float(round(_sumY / len(Y), 5)))
         else:
-            return (_sumY / _sumX, 0)
+            return (float(_sumY / _sumX), 0.0)
 
     def nested_loop(self, Xouter, Xinner, Y):
         """
@@ -137,7 +137,7 @@ class CalcRegression:
             else:
                 print("Debug3:       ==> coef={}".format(str(round(_sumY / _sumX, 5))))
 
-        return 1 if _sumX == 0 else _sumY / _sumX
+        return 1.0 if _sumX == 0 else float(_sumY / _sumX)
 
     def merge_or_hash_join(self, Xouter, Xinner, Y, add_bias_0=True):
         def multi_regression(Xouter, Xinner, Y, add_bias_0=True):
@@ -150,8 +150,8 @@ class CalcRegression:
                 _X.append([Xouter[i], Xinner[i]])
             if add_bias_0:
                 # Add a constraint because we assume that the bias is 0
-                _X.append([0, 0])
-                _Y.append(0)
+                _X.append([0.0, 0.0])
+                _Y.append(0.0)
             if Log.debug3 <= self.LogLevel:
                 print("Debug3: ****MERGE OR HASH JOIN*****")
                 print("Debug3:       ===> Xouter = {}".format(Xouter))
@@ -168,8 +168,8 @@ class CalcRegression:
             scireg = LinearRegression()
             scireg.fit(_X, _Y)
             _list = scireg.coef_.tolist()
-            _coef = [round(_list[n], 5) for n in range(len(_list))]
-            _intercept = round(scireg.intercept_, 5)
+            _coef = [float(round(_list[n], 5)) for n in range(len(_list))]
+            _intercept = float(round(scireg.intercept_ + 0.0, 5))
 
             """Predict and calculate RMSE."""
             _y_pred = scireg.predict(_X)
@@ -188,10 +188,10 @@ class CalcRegression:
                 _X.append([X[i]])
             if add_bias_0:
                 # Add a constraint because we assume that the bias is 0
-                _X.append([0])
-                _Y.append(0)
+                _X.append([0.0])
+                _Y.append(0.0)
             if Log.debug3 <= self.LogLevel:
-                print("Debug3: ****MERGE OR HASH JOIN*****")
+                print("Debug3: ****MERGE OR HASHOIN*****")
                 print("Debug3:       ===> X={}".format(X))
                 print("Debug3:       ===> Plan Rows ={}  Y={}".format(Y, _Y))
 
@@ -204,15 +204,15 @@ class CalcRegression:
             scireg = LinearRegression()
             scireg.fit(_X, _Y)
             _list = scireg.coef_.tolist()
-            _coef = [round(_list[n], 5) for n in range(len(_list))]
-            _intercept = round(scireg.intercept_, 5)
+            _coef = [float(round(_list[n], 5)) for n in range(len(_list))]
+            _intercept = float(round(scireg.intercept_ + 0.0, 5))
 
             """Predict and calculate RMSE."""
             _y_pred = scireg.predict(_X)
             _rmse = np.sqrt(mean_squared_error(_Y, _y_pred))
 
             del scireg
-            return (_coef[0], _intercept, _rmse)
+            return (float(_coef[0]), float(_intercept), _rmse)
 
         def reg(Xouter, Xinner, Y):
             ## Same as NestedLoop
@@ -228,7 +228,7 @@ class CalcRegression:
                     )
                 )
             )
-            _coef = 1 if _sumX == 0 else _sumY / _sumX
+            _coef = 1.0 if _sumX == 0 else float(_sumY / _sumX)
             # Calculate MSE
             _mse = (
                 sum(
@@ -261,25 +261,25 @@ class CalcRegression:
         (coef, intercept, rmse) = multi_regression(Xouter, Xinner, Y)
         if coef[0] < 0 or coef[1] < 0:
             (coef, intercept, rmse) = multi_regression(Xouter, Xinner, Y, False)
-        _coef = [coef[0], coef[1]]
+        _coef = [float(coef[0]), float(coef[1])]
         _reg = 0
-        _intercept = intercept
+        _intercept = float(round(intercept + 0.0, 5))
         _rmse = rmse
 
         (coef, intercept, rmse) = single_regression(Xouter, Y)
         if coef < 0:
             (coef, intercept, rmse) = single_regression(Xouter, Y, False)
         if rmse < _rmse:
-            _coef = [coef, 0]
-            _intercept = intercept
+            _coef = [float(coef), 0.0]
+            _intercept = float(round(intercept + 0.0, 5))
             _rmse = rmse
 
         (coef, intercept, rmse) = single_regression(Xinner, Y)
         if coef < 0:
             (coef, intercept, rmse) = single_regression(Xinner, Y, False)
         if rmse < _rmse:
-            _coef = [0, coef]
-            _intercept = intercept
+            _coef = [0.0, float(coef)]
+            _intercept = float(round(intercept + 0.0, 5))
             _rmse = rmse
 
         """
@@ -325,14 +325,23 @@ class Regression(Repository, CalcRegression):
         return self.Level
 
     def __delete_objects(self, plan):
-        """Delete all objects except 'Node Type' and 'Plan(s)'."""
+        """Delete all objects except 'Node Type', 'Plan(s)' and some."""
 
         for k in list(plan):
             """
             Use list(plan) instead of plan.keys() to avoid
             "RuntimeError: dictionary changed size during iteration" error.
             """
-            if k != "Node Type" and k != "Plans" and k != "Plan":
+            if (
+                k != "Node Type"
+                and k != "Plans"
+                and k != "Plan"
+                and k != "Relation Name"
+                and k != "Schema"
+                and k != "Alias"
+                and k != "Parent Relationship"
+                and k != "MergeFlag"
+            ):
                 plan.pop(k)
         return plan
 
@@ -379,7 +388,10 @@ class Regression(Repository, CalcRegression):
                 """
                 Set the result to the reg dict.
                 """
-                reg.update(Coefficient=[_coef])
+                if type(_coef) is list:
+                    reg.update(Coefficient=_coef)
+                else:
+                    reg.update(Coefficient=[_coef])
                 return
 
         """
@@ -412,12 +424,16 @@ class Regression(Repository, CalcRegression):
                 (_coef, _reg, _intercept) = self.merge_or_hash_join(
                     _Xouter, _Xinner, _Y
                 )
+
                 """
                 Set the result to the reg dict.
                 """
-                reg.update(Coefficient=[_coef])
-                reg.update(Coefficient2=[_reg])
-                reg.update(Intercept=[_intercept])
+                if type(_coef) is list:
+                    reg.update(Coefficient=_coef)
+                else:
+                    reg.update(Coefficient=[_coef])
+                reg.update(Coefficient2=[round(_reg + 0.0, 5)])
+                reg.update(Intercept=[round(_intercept + 0.0, 5)])
 
                 return
 
@@ -442,9 +458,146 @@ class Regression(Repository, CalcRegression):
         """
         Set the result to the reg dict.
         """
-        reg.update(Coefficient=[_coef])
-        reg.update(Intercept=[_intercept])
+        if type(_coef) is list:
+            reg.update(Coefficient=_coef)
+        else:
+            reg.update(Coefficient=[_coef])
+        reg.update(Intercept=[round(_intercept + 0.0, 5)])
         return
+
+    def __set_relations(self, Plans, depth):
+        """
+        Set "Relation Name" in Plans by gathering children's "Relation Name" up if Plans does not have it.
+
+        For example, if the node type of Plans is "Sort" and the node type of Plans' child is "Seq Scan",
+        the relation name of Plans is set to the relation name of Plans' child.
+
+        "Node Type":"Sort"  ==> "Node Type":"Sort", "Relation Name":"tbl1"
+          -> "Node Type":"Seq Scan", "Relation Name":"tbl1"
+
+
+        If the node type of Plans is "Nested Loop", the relation name of Plans is set to the pair of the
+        relation names of Plans' outer and inner children.
+
+        "Node Type":"Nested Loop" ==> "Node Type":"Nested Loop","Relation Name":"[tbl1, tbl2]"
+          -> "Node Type":"Seq Scan", "Relation Name":"tbl1"
+          -> "Node Type":"Seq Scan", "Relation Name":"tbl2"
+
+        "Node Type":"Merge Join" ==>  "Node Type":"Merge Join", "Relation Name":"[[tbl1, tbl2], tbl3]"
+          -> "Node Type":"Nested Loop","Relation Name":"[tbl1, tbl2]"
+               -> "Node Type":"Seq Scan", "Relation Name":"tbl1"
+               -> "Node Type":"Seq Scan", "Relation Name":"tbl2"
+          -> "Node Type":"Seq Scan", "Relation Name":"tbl3"
+        """
+
+        def get_relations(plan):
+            if "Relation Name" not in plan:
+                if "Plans" in plan:
+                    __plan = plan["Plans"]
+                elif "Plan" in plan:
+                    __plan = plan["Plan"]
+                else:
+                    return
+                if isinstance(__plan, list):
+                    __outer_plan = __plan[0]
+                    __inner_plan = __plan[1] if 2 <= len(__plan) else None
+                    if __inner_plan is None:
+                        if "Relation Name" in __outer_plan:
+                            plan.update(
+                                [
+                                    (
+                                        "Relation Name",
+                                        __outer_plan["Relation Name"],
+                                    )
+                                ]
+                            )
+                        if "Schema" in __outer_plan:
+                            plan.update([("Schema", __outer_plan["Schema"])])
+                        if "Alias" in __outer_plan:
+                            plan.update([("Alias", __outer_plan["Alias"])])
+                    else:
+                        if (
+                            "Relation Name" in __outer_plan
+                            and "Relation Name" in __inner_plan
+                        ):
+                            plan.update(
+                                [
+                                    (
+                                        "Relation Name",
+                                        [
+                                            __outer_plan["Relation Name"],
+                                            __inner_plan["Relation Name"],
+                                        ],
+                                    )
+                                ]
+                            )
+
+                        if "Schema" in __outer_plan and "Schema" in __inner_plan:
+                            plan.update(
+                                [
+                                    (
+                                        "Schema",
+                                        [
+                                            __outer_plan["Schema"],
+                                            __inner_plan["Schema"],
+                                        ],
+                                    )
+                                ]
+                            )
+
+                        if "Alias" in __outer_plan and "Alias" in __inner_plan:
+                            plan.update(
+                                [
+                                    (
+                                        "Alias",
+                                        [
+                                            __outer_plan["Alias"],
+                                            __inner_plan["Alias"],
+                                        ],
+                                    )
+                                ]
+                            )
+                else:
+                    if "Relation Name" in __plan:
+                        plan.update([("Relation Name", __plan["Relation Name"])])
+                    if "Schema" in __plan:
+                        plan.update([("Schema", __plan["Schema"])])
+                    if "Alias" in __plan:
+                        plan.update([("Alias", __plan["Alias"])])
+
+        def incr(plan):
+            if "Node Type" in plan:
+                self._count += 1
+
+        def op(Plans):
+            if isinstance(Plans, list):
+                for i in range(0, len(Plans)):
+                    incr(Plans[i])
+                    if self._depth == self._count:
+                        get_relations(Plans[i])
+                        return
+                    elif "Plans" in Plans[i]:
+                        op(Plans[i]["Plans"])
+            else:
+                incr(Plans)
+                if self._depth == self._count:
+                    get_relations(Plans)
+                    return
+                elif "Plans" in Plans:
+                    op(Plans["Plans"])
+
+        self._depth = depth
+        self._count = 0
+        op(Plans)
+
+    def __add_relations(self, Plans):
+        """
+        Add "Relation Name"
+        """
+        i = self.count_nodes(Plans)
+        while 0 < i:
+            self.__set_relations(Plans["Plan"], i)
+            i -= 1
 
     def __regression(self, Plans, reg_param, queryid, planid):
         """
@@ -552,6 +705,7 @@ class Regression(Repository, CalcRegression):
 
                         _json_dict = self.read_plan_json(_gpath)
                         _reg_param = self.read_plan_json(_gpath)
+                        self.__add_relations(_reg_param)
                         self.delete_unnecessary_objects(
                             self.__delete_objects, _reg_param
                         )

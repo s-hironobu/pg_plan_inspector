@@ -25,6 +25,8 @@
 #include "common.h"
 #include "hash.h"
 
+#undef __DEBUG__
+
 /*
  * Global variable declarations
  */

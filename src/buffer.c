@@ -348,19 +348,20 @@ insertLog(bufferSlot * bslot, const bool recoveryInProgress)
 		 */
 		appendStringInfo(&buf, "INSERT INTO %s.%s"
 						 " (starttime, endtime, database, pid,"
-						 "  nested_level, queryid, query, plan, plan_json)"
+						 "  nested_level, queryid, query, planid, plan, plan_json)"
 						 "  VALUES ("
 						 "\'%s\',",
 						 SCHEMA, LOG_TABLE,
 						 timestamptz_to_str(qi.starttime)
 			);
-		appendStringInfo(&buf, "\'%s\', %s, %d, %d, \'%lu\', %s, %s, %s);",
+		appendStringInfo(&buf, "\'%s\', %s, %d, %d, \'%lu\', %s, \'%lu\', %s, %s);",
 						 timestamptz_to_str(qi.endtime),
 						 quote_literal_cstr(qi.database_name),
 						 bslot->qpd.pid,
 						 bslot->nested_level,
 						 bslot->qpd.queryId[0],
 						 quote_literal_cstr(get_query_plan(&bslot->qpd, PRINT_QUERY, &is_null, 0)),
+						 bslot->qpd.planId[0],
 						 quote_literal_cstr(get_query_plan(&bslot->qpd, PRINT_PLAN, &is_null, 0)),
 						 quote_literal_cstr(get_query_plan(&bslot->qpd, PRINT_PLAN_JSON, &is_null, 0))
 			);
