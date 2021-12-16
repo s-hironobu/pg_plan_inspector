@@ -82,9 +82,8 @@ static void show_relids(const Relids relids, char *_relids);
 static void show_reg_params(const char *string);
 #endif							/* __DEBUG__  */
 
-static void trim_dquote(const char *in, char *out);
 static int	relid2rti(const Oid oid);
-static NodeTag get_nodeid(const char *node);
+static NodeTag get_nodeid(const char *node_type);
 static bool get_join_param(NodeTag *join_type,
 						   const Relids outer_relids, const Relids inner_relids,
 						   double *outer_coef, double *inner_coef,
@@ -276,50 +275,28 @@ free_reg_params(void)
 	reg_params.params = NULL;
 }
 
-/*
- * Trim double quote since we assume that the input string is enclosed with "\"".
- * For example, if char_in is '"Buenos Dias"', trim_dquote writes 'Buenos Dias' to char_out.
- */
-static void
-trim_dquote(const char *char_in, char *char_out)
-{
-	int			len,
-				i;
-
-	len = (int) strlen(char_in);
-
-	for (i = 0; i < len - 2; i++)
-		char_out[i] = char_in[i + 1];
-	char_out[i++] = '\0';
-}
-
 
 /*
  * Get node type of the specified node name.
  */
-#define MAX_NODETYPE_LEN 32
 static NodeTag
-get_nodeid(const char *node)
+get_nodeid(const char *node_type)
 {
-	char		node_type[MAX_NODETYPE_LEN];
-
-	trim_dquote(node, node_type);
-
-	if (strcmp(node_type, "Merge Join") == 0)
+	if (strcmp(node_type, "\"Merge Join\"") == 0)
 		return T_MergePath;
-	else if (strcmp(node_type, "Hash Join") == 0)
+	else if (strcmp(node_type, "\"Hash Join\"") == 0)
 		return T_HashPath;
-	else if (strcmp(node_type, "Nested Loop") == 0)
+	else if (strcmp(node_type, "\"Nested Loop\"") == 0)
 		return T_NestPath;
-	else if (strcmp(node_type, "Seq Scan") == 0)
+	else if (strcmp(node_type, "\"Seq Scan\"") == 0)
 		return T_Path;
-	else if (strcmp(node_type, "Index Scan") == 0
-			 || strcmp(node_type, "Index Only Scan") == 0)
+	else if (strcmp(node_type, "\"Index Scan\"") == 0
+			 || strcmp(node_type, "\"Index Only Scan\"") == 0)
 		return T_IndexPath;
 
-	return 0;
+	return T_Invalid;
 }
-#undef MAX_NODETYPE_LEN
+
 
 /*
  * Functions used in param_parser.y
@@ -426,38 +403,34 @@ int
 relname2rti(const char *relname)
 {
 	Oid			nsoid;
-	char		trimed_relname[NAMEDATALEN * 2];
 	char		schema[NAMEDATALEN];
 	char		rel[NAMEDATALEN];
 	int			i,
 				j,
 				len;
 
-	memset(trimed_relname, 0, sizeof(trimed_relname));
 	memset(schema, 0, sizeof(schema));
 	memset(rel, 0, sizeof(rel));
 
-	trim_dquote(relname, trimed_relname);
-
 	/*
-	 * Get schema and rel from relname whose format is 'schema.relation'.
+	 * Get schema and rel from relname whose format is '\"schema.relation\"'.
 	 */
-	len = (int) strlen(trimed_relname);
-	for (i = 0; i < len; i++)
+	len = (int) strlen(relname);
+	for (i = 1; i < len; i++)	/* skip '^\"' */
 	{
-		if (trimed_relname[i] != '.')
-			schema[i] = trimed_relname[i];
+		if (relname[i] != '.')
+			schema[i-1] = relname[i];
 		else
 		{
-			schema[i] = '\0';
+			schema[i-1] = '\0';
 			break;
 		}
 	}
 
 	i++;						/* skip '.' */
 
-	for (j = i; j < len; j++)
-		rel[j - i] = trimed_relname[j];
+	for (j = i; j < len - 1; j++)	/* skip '\"$' */
+		rel[j - i] = relname[j];
 
 	/*
 	 * Get the oid of schema
@@ -470,7 +443,6 @@ relname2rti(const char *relname)
 
 	return relid2rti(get_relname_relid(rel, nsoid));
 }
-
 
 /*
  * Create and set reg_params and Set pgqp_reg_params.
