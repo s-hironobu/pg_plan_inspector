@@ -13,20 +13,20 @@
  * Whenever a query is issued, the optimizer checks the query_plan.reg table, and gets
  * the parameters if found. See selectParams().
  *
- * To adjust the plan rows by the regression parameters, pgqp_set_rel_pathlist() and
+ * To adjust the plan rows with the regression parameters, pgqp_set_rel_pathlist() and
  * adjust_joinrel_rows() are used. pgqp_set_rel_pathlist() is used when adjusting the
  * baserel rows, such as seqscan, index only scan, etc. adjust_joinrel_rows() is used
  * when adjusting the joinrel rows, such as nestloop, mergejoin, and hashjoin.
  *
  * To force to use the specified join method by the regression parameter in each join
- * level, the set_join_config_options() function that is imported from pg_hint_plan
- * extension is issued.
+ * level, the set_join_config_options() function, which is imported from the pg_hint_plan
+ * https://github.com/ossc-db/pg_hint_plan, is issued.
  * For example, if it is described in the regression parameters that the hashjoin method
  * is used between tbl1 and tbl2, set_jon_config_options() with enable_hashjoin option
  * is issued when the optimizer considers the join plan with tbl1 and tbl2.
  * See populate_joinrel_with_paths()@src/optimizer/pgqp_joinrels.c in detail.
  *
- * Copyright (c) 2021, Hironobu Suzuki @ interdb.jp
+ * Copyright (c) 2021-2022, Hironobu Suzuki @ interdb.jp
  *
  */
 #include "postgres.h"
@@ -165,14 +165,16 @@ show_rtables(PlannerInfo *root)
 	}
 }
 
+#define RELIDS_LEN 64
+#define N_LEN 10
 static void
 show_relids(const Relids relids, char *_relids)
 {
 	int			i,
 				j;
-	char		n[10];
+	char		n[N_LEN];
 
-	for (i = 0; i < 32; i++)
+	for (i = 0; i < RELIDS_LEN; i++)
 		_relids[i] = '\0';
 
 	if (bms_is_empty(relids))
@@ -183,7 +185,7 @@ show_relids(const Relids relids, char *_relids)
 
 
 	j = 0;
-	for (i = 1; i < 10; i++)
+	for (i = 1; i < N_LEN; i++)
 	{
 		if (bms_is_member(i, relids))
 		{
@@ -194,6 +196,7 @@ show_relids(const Relids relids, char *_relids)
 		}
 	}
 }
+#undef N_LEN
 
 static void
 show_reg_params(const char *string)
@@ -201,9 +204,9 @@ show_reg_params(const char *string)
 
 	int			i;
 	char	   *type;
-	char		_relids[32];
-	char		_outer_relids[32];
-	char		_inner_relids[32];
+	char		_relids[RELIDS_LEN];
+	char		_outer_relids[RELIDS_LEN];
+	char		_inner_relids[RELIDS_LEN];
 
 	elog(LOG, "============ %s ============= %s ", __func__, string);
 
@@ -241,6 +244,8 @@ show_reg_params(const char *string)
 			 i, type, _relids, _outer_relids, _inner_relids);
 	}
 }
+
+#undef RELIDS_LEN
 
 #endif							/* __DEBUG__ */
 

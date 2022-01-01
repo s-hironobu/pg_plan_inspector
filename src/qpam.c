@@ -7,7 +7,7 @@
  * The instances of queryPlanData are allocated on two places: the shared memory
  * and the dynamic shared memory on bgworker as the slots of the ring buffer.
  *
- * Copyright (c) 2021, Hironobu Suzuki @ interdb.jp
+ * Copyright (c) 2021-2022, Hironobu Suzuki @ interdb.jp
  *
  *-------------------------------------------------------------------------
  */

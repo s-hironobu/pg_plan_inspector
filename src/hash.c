@@ -12,7 +12,7 @@
  * contains the status into the hash table; in a parallel query, the parallel
  * bgworker processes refer to the entry and do the appropriate procedure.
  *
- * Copyright (c) 2021, Hironobu Suzuki @ interdb.jp
+ * Copyright (c) 2021-2022, Hironobu Suzuki @ interdb.jp
  *
  *-------------------------------------------------------------------------
  */
