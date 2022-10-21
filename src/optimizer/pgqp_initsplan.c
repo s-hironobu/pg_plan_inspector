@@ -2771,6 +2771,40 @@ check_hashjoinable(RestrictInfo *restrictinfo)
 static void
 check_memoizable(RestrictInfo *restrictinfo)
 {
+#if PG_VERSION_NUM >= 150000
+	TypeCacheEntry *typentry;
+	Expr	   *clause = restrictinfo->clause;
+	Oid			lefttype;
+	Oid			righttype;
+
+	if (restrictinfo->pseudoconstant)
+		return;
+	if (!is_opclause(clause))
+		return;
+	if (list_length(((OpExpr *) clause)->args) != 2)
+		return;
+
+	lefttype = exprType(linitial(((OpExpr *) clause)->args));
+
+	typentry = lookup_type_cache(lefttype, TYPECACHE_HASH_PROC |
+								 TYPECACHE_EQ_OPR);
+
+	if (OidIsValid(typentry->hash_proc) && OidIsValid(typentry->eq_opr))
+		restrictinfo->left_hasheqoperator = typentry->eq_opr;
+
+	righttype = exprType(lsecond(((OpExpr *) clause)->args));
+
+	/*
+	 * Lookup the right type, unless it's the same as the left type, in which
+	 * case typentry is already pointing to the required TypeCacheEntry.
+	 */
+	if (lefttype != righttype)
+		typentry = lookup_type_cache(righttype, TYPECACHE_HASH_PROC |
+									 TYPECACHE_EQ_OPR);
+
+	if (OidIsValid(typentry->hash_proc) && OidIsValid(typentry->eq_opr))
+		restrictinfo->right_hasheqoperator = typentry->eq_opr;
+#else
 	TypeCacheEntry *typentry;
 	Expr	   *clause = restrictinfo->clause;
 	Node	   *leftarg;
@@ -2791,5 +2825,6 @@ check_memoizable(RestrictInfo *restrictinfo)
 		return;
 
 	restrictinfo->hasheqoperator = typentry->eq_opr;
+#endif
 }
 #endif							/* #ifndef __PG_QUERY_PLAN__ */

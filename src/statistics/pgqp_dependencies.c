@@ -24,12 +24,18 @@
 #include "nodes/pathnodes.h"
 #include "optimizer/clauses.h"
 #include "optimizer/optimizer.h"
+#if PG_VERSION_NUM >= 150000
+#include "parser/parsetree.h"
+#endif
 #include "statistics/extended_stats_internal.h"
 #include "statistics/statistics.h"
 #include "utils/bytea.h"
 #include "utils/fmgroids.h"
 #include "utils/fmgrprotos.h"
 #include "utils/lsyscache.h"
+#if PG_VERSION_NUM >= 150000
+#include "utils/memutils.h"
+#endif
 #include "utils/selfuncs.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
@@ -359,8 +365,18 @@ statext_dependencies_build(StatsBuildData *data)
 
 	/* result */
 	MVDependencies *dependencies = NULL;
+#if PG_VERSION_NUM >= 150000
+	MemoryContext cxt;
+#endif
 
 	Assert(data->nattnums >= 2);
+
+#if PG_VERSION_NUM >= 150000
+	/* tracks memory allocated by dependency_degree calls */
+	cxt = AllocSetContextCreate(CurrentMemoryContext,
+								"dependency_degree cxt",
+								ALLOCSET_DEFAULT_SIZES);
+#endif
 
 	/*
 	 * We'll try build functional dependencies starting from the smallest ones
@@ -380,9 +396,19 @@ statext_dependencies_build(StatsBuildData *data)
 		{
 			double		degree;
 			MVDependency *d;
+#if PG_VERSION_NUM >= 150000
+			MemoryContext oldcxt;
 
+			/* release memory used by dependency degree calculation */
+			oldcxt = MemoryContextSwitchTo(cxt);
+#endif
 			/* compute how valid the dependency seems */
 			degree = dependency_degree(data, k, dependency);
+
+#if PG_VERSION_NUM >= 150000
+			MemoryContextSwitchTo(oldcxt);
+			MemoryContextReset(cxt);
+#endif
 
 			/*
 			 * if the dependency seems entirely invalid, don't store it
@@ -424,6 +450,10 @@ statext_dependencies_build(StatsBuildData *data)
 		 */
 		DependencyGenerator_free(DependencyGenerator);
 	}
+
+#if PG_VERSION_NUM >= 150000
+	MemoryContextDelete(cxt);
+#endif
 
 	return dependencies;
 }
@@ -608,14 +638,24 @@ dependency_is_fully_matched(MVDependency *dependency, Bitmapset *attnums)
  *		Load the functional dependencies for the indicated pg_statistic_ext tuple
  */
 MVDependencies *
+#if PG_VERSION_NUM >= 150000
+statext_dependencies_load(Oid mvoid, bool inh)
+#else
 statext_dependencies_load(Oid mvoid)
+#endif
 {
 	MVDependencies *result;
 	bool		isnull;
 	Datum		deps;
 	HeapTuple	htup;
 
+#if PG_VERSION_NUM >= 150000
+	htup = SearchSysCache2(STATEXTDATASTXOID,
+						   ObjectIdGetDatum(mvoid),
+						   BoolGetDatum(inh));
+#else
 	htup = SearchSysCache1(STATEXTDATASTXOID, ObjectIdGetDatum(mvoid));
+#endif
 	if (!HeapTupleIsValid(htup))
 		elog(ERROR, "cache lookup failed for statistics object %u", mvoid);
 
@@ -1400,7 +1440,9 @@ dependencies_clauselist_selectivity(PlannerInfo *root,
 	int			ndependencies;
 	int			i;
 	AttrNumber	attnum_offset;
-
+#if PG_VERSION_NUM >= 150000
+	RangeTblEntry *rte = planner_rt_fetch(rel->relid, root);
+#endif
 	/* unique expressions */
 	Node	  **unique_exprs;
 	int			unique_exprs_cnt;
@@ -1588,6 +1630,12 @@ dependencies_clauselist_selectivity(PlannerInfo *root,
 		if (stat->kind != STATS_EXT_DEPENDENCIES)
 			continue;
 
+#if PG_VERSION_NUM >= 150000
+		/* skip statistics with mismatching stxdinherit value */
+		if (stat->inherit != rte->inh)
+			continue;
+#endif
+
 		/*
 		 * Count matching attributes - we have to undo the attnum offsets. The
 		 * input attribute numbers are not offset (expressions are not
@@ -1634,7 +1682,11 @@ dependencies_clauselist_selectivity(PlannerInfo *root,
 		if (nmatched + nexprs < 2)
 			continue;
 
+#if PG_VERSION_NUM >= 150000
+		deps = statext_dependencies_load(stat->statOid, rte->inh);
+#else
 		deps = statext_dependencies_load(stat->statOid);
+#endif
 
 		/*
 		 * The expressions may be represented by different attnums in the

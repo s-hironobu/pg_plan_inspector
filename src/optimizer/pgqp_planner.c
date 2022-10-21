@@ -198,6 +198,14 @@ static void create_one_window_path(PlannerInfo *root,
 								   List *activeWindows);
 static RelOptInfo *create_distinct_paths(PlannerInfo *root,
 										 RelOptInfo *input_rel);
+#if PG_VERSION_NUM >= 150000
+static void create_partial_distinct_paths(PlannerInfo *root,
+										  RelOptInfo *input_rel,
+										  RelOptInfo *final_distinct_rel);
+static RelOptInfo *create_final_distinct_paths(PlannerInfo *root,
+											   RelOptInfo *input_rel,
+											   RelOptInfo *distinct_rel);
+#endif
 static RelOptInfo *create_ordered_paths(PlannerInfo *root,
 										RelOptInfo *input_rel,
 										PathTarget *target,
@@ -688,6 +696,13 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 		SS_process_ctes(root);
 #endif
 
+#if PG_VERSION_NUM >= 150000
+	/*
+	 * If it's a MERGE command, transform the joinlist as appropriate.
+	 */
+	transform_MERGE_to_join(parse);
+#endif
+
 	/*
 	 * If the FROM clause is empty, replace it with a dummy RTE_RESULT RTE, so
 	 * that we don't need so many special cases to deal with that situation.
@@ -887,6 +902,22 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 								  EXPRKIND_QUAL);
 		/* exclRelTlist contains only Vars, so no preprocessing needed */
 	}
+
+#if PG_VERSION_NUM >= 150000
+	foreach(l, parse->mergeActionList)
+	{
+		MergeAction *action = (MergeAction *) lfirst(l);
+
+		action->targetList = (List *)
+			preprocess_expression(root,
+								  (Node *) action->targetList,
+								  EXPRKIND_TARGET);
+		action->qual =
+			preprocess_expression(root,
+								  (Node *) action->qual,
+								  EXPRKIND_QUAL);
+	}
+#endif
 
 	root->append_rel_list = (List *)
 		preprocess_expression(root, (Node *) root->append_rel_list,
@@ -1138,8 +1169,12 @@ preprocess_expression(PlannerInfo *root, Node *expr, int kind)
 	 * careful to maintain AND/OR flatness --- that is, do not generate a tree
 	 * with AND directly under AND, nor OR directly under OR.
 	 */
+#if PG_VERSION_NUM >= 150000
+	if (kind != EXPRKIND_RTFUNC)
+#else
 	if (!(kind == EXPRKIND_RTFUNC ||
 		  (kind == EXPRKIND_RTFUNC_LATERAL && !root->hasJoinRTEs)))
+#endif
 		expr = eval_const_expressions(root, expr);
 
 	/*
@@ -1629,6 +1664,9 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 		 */
 		root->upper_targets[UPPERREL_FINAL] = final_target;
 		root->upper_targets[UPPERREL_ORDERED] = final_target;
+#if PG_VERSION_NUM >= 150000
+		root->upper_targets[UPPERREL_PARTIAL_DISTINCT] = sort_input_target;
+#endif
 		root->upper_targets[UPPERREL_DISTINCT] = sort_input_target;
 		root->upper_targets[UPPERREL_WINDOW] = sort_input_target;
 		root->upper_targets[UPPERREL_GROUP_AGG] = grouping_target;
@@ -1774,6 +1812,9 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 			List	   *updateColnosLists = NIL;
 			List	   *withCheckOptionLists = NIL;
 			List	   *returningLists = NIL;
+#if PG_VERSION_NUM >= 150000
+			List	   *mergeActionLists = NIL;
+#endif
 			List	   *rowMarks;
 
 			if (bms_membership(root->all_result_relids) == BMS_MULTIPLE)
@@ -1840,6 +1881,45 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 						returningLists = lappend(returningLists,
 												 returningList);
 					}
+#if PG_VERSION_NUM >= 150000
+					if (parse->mergeActionList)
+					{
+						ListCell   *l;
+						List	   *mergeActionList = NIL;
+
+						/*
+						 * Copy MergeActions and translate stuff that
+						 * references attribute numbers.
+						 */
+						foreach(l, parse->mergeActionList)
+						{
+							MergeAction *action = lfirst(l),
+									   *leaf_action = copyObject(action);
+
+							leaf_action->qual =
+								adjust_appendrel_attrs_multilevel(root,
+																  (Node *) action->qual,
+																  this_result_rel->relids,
+																  top_result_rel->relids);
+							leaf_action->targetList = (List *)
+								adjust_appendrel_attrs_multilevel(root,
+																  (Node *) action->targetList,
+																  this_result_rel->relids,
+																  top_result_rel->relids);
+							if (leaf_action->commandType == CMD_UPDATE)
+								leaf_action->updateColnos =
+									adjust_inherited_attnums_multilevel(root,
+																		action->updateColnos,
+																		this_result_rel->relid,
+																		top_result_rel->relid);
+							mergeActionList = lappend(mergeActionList,
+													  leaf_action);
+						}
+
+						mergeActionLists = lappend(mergeActionLists,
+												   mergeActionList);
+					}
+#endif
 				}
 
 				if (resultRelations == NIL)
@@ -1862,6 +1942,10 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 						withCheckOptionLists = list_make1(parse->withCheckOptions);
 					if (parse->returningList)
 						returningLists = list_make1(parse->returningList);
+#if PG_VERSION_NUM >= 150000
+					if (parse->mergeActionList)
+						mergeActionLists = list_make1(parse->mergeActionList);
+#endif
 				}
 			}
 			else
@@ -1874,6 +1958,10 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 					withCheckOptionLists = list_make1(parse->withCheckOptions);
 				if (parse->returningList)
 					returningLists = list_make1(parse->returningList);
+#if PG_VERSION_NUM >= 150000
+				if (parse->mergeActionList)
+					mergeActionLists = list_make1(parse->mergeActionList);
+#endif
 			}
 
 			/*
@@ -1910,6 +1998,9 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 										returningLists,
 										rowMarks,
 										parse->onConflict,
+#if PG_VERSION_NUM >= 150000
+										mergeActionLists,
+#endif
 										assign_special_exec_param(root));
 		}
 
@@ -4194,6 +4285,9 @@ create_one_window_path(PlannerInfo *root,
 {
 	PathTarget *window_target;
 	ListCell   *l;
+#if PG_VERSION_NUM >= 150000
+	List	   *topqual = NIL;
+#endif
 
 	/*
 	 * Since each window clause could require a different sort order, we stack
@@ -4218,6 +4312,9 @@ create_one_window_path(PlannerInfo *root,
 		List	   *window_pathkeys;
 		int			presorted_keys;
 		bool		is_sorted;
+#if PG_VERSION_NUM >= 150000
+		bool		topwindow;
+#endif
 
 		window_pathkeys = make_pathkeys_for_window(root,
 												   wc,
@@ -4281,15 +4378,376 @@ create_one_window_path(PlannerInfo *root,
 			window_target = output_target;
 		}
 
+#if PG_VERSION_NUM >= 150000
+		/* mark the final item in the list as the top-level window */
+		topwindow = foreach_current_index(l) == list_length(activeWindows) - 1;
+
+		/*
+		 * Accumulate all of the runConditions from each intermediate
+		 * WindowClause.  The top-level WindowAgg must pass these as a qual so
+		 * that it filters out unwanted tuples correctly.
+		 */
+		if (!topwindow)
+			topqual = list_concat(topqual, wc->runCondition);
+
+		path = (Path *)
+			create_windowagg_path(root, window_rel, path, window_target,
+								  wflists->windowFuncs[wc->winref],
+								  wc, topwindow ? topqual : NIL, topwindow);
+#else
 		path = (Path *)
 			create_windowagg_path(root, window_rel, path, window_target,
 								  wflists->windowFuncs[wc->winref],
 								  wc);
+#endif
 	}
 
 	add_path(window_rel, path);
 }
 
+#if PG_VERSION_NUM >= 150000
+/*
+ * create_distinct_paths
+ *
+ * Build a new upperrel containing Paths for SELECT DISTINCT evaluation.
+ *
+ * input_rel: contains the source-data Paths
+ *
+ * Note: input paths should already compute the desired pathtarget, since
+ * Sort/Unique won't project anything.
+ */
+static RelOptInfo *
+create_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel)
+{
+	RelOptInfo *distinct_rel;
+
+	/* For now, do all work in the (DISTINCT, NULL) upperrel */
+	distinct_rel = fetch_upper_rel(root, UPPERREL_DISTINCT, NULL);
+
+	/*
+	 * We don't compute anything at this level, so distinct_rel will be
+	 * parallel-safe if the input rel is parallel-safe.  In particular, if
+	 * there is a DISTINCT ON (...) clause, any path for the input_rel will
+	 * output those expressions, and will not be parallel-safe unless those
+	 * expressions are parallel-safe.
+	 */
+	distinct_rel->consider_parallel = input_rel->consider_parallel;
+
+	/*
+	 * If the input rel belongs to a single FDW, so does the distinct_rel.
+	 */
+	distinct_rel->serverid = input_rel->serverid;
+	distinct_rel->userid = input_rel->userid;
+	distinct_rel->useridiscurrent = input_rel->useridiscurrent;
+	distinct_rel->fdwroutine = input_rel->fdwroutine;
+
+	/* build distinct paths based on input_rel's pathlist */
+	create_final_distinct_paths(root, input_rel, distinct_rel);
+
+	/* now build distinct paths based on input_rel's partial_pathlist */
+	create_partial_distinct_paths(root, input_rel, distinct_rel);
+
+	/* Give a helpful error if we failed to create any paths */
+	if (distinct_rel->pathlist == NIL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("could not implement DISTINCT"),
+				 errdetail("Some of the datatypes only support hashing, while others only support sorting.")));
+
+	/*
+	 * If there is an FDW that's responsible for all baserels of the query,
+	 * let it consider adding ForeignPaths.
+	 */
+	if (distinct_rel->fdwroutine &&
+		distinct_rel->fdwroutine->GetForeignUpperPaths)
+		distinct_rel->fdwroutine->GetForeignUpperPaths(root,
+													   UPPERREL_DISTINCT,
+													   input_rel,
+													   distinct_rel,
+													   NULL);
+
+	/* Let extensions possibly add some more paths */
+	if (create_upper_paths_hook)
+		(*create_upper_paths_hook) (root, UPPERREL_DISTINCT, input_rel,
+									distinct_rel, NULL);
+
+	/* Now choose the best path(s) */
+	set_cheapest(distinct_rel);
+
+	return distinct_rel;
+}
+
+/*
+ * create_partial_distinct_paths
+ *
+ * Process 'input_rel' partial paths and add unique/aggregate paths to the
+ * UPPERREL_PARTIAL_DISTINCT rel.  For paths created, add Gather/GatherMerge
+ * paths on top and add a final unique/aggregate path to remove any duplicate
+ * produced from combining rows from parallel workers.
+ */
+static void
+create_partial_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
+							  RelOptInfo *final_distinct_rel)
+{
+	RelOptInfo *partial_distinct_rel;
+	Query	   *parse;
+	List	   *distinctExprs;
+	double		numDistinctRows;
+	Path	   *cheapest_partial_path;
+	ListCell   *lc;
+
+	/* nothing to do when there are no partial paths in the input rel */
+	if (!input_rel->consider_parallel || input_rel->partial_pathlist == NIL)
+		return;
+
+	parse = root->parse;
+
+	/* can't do parallel DISTINCT ON */
+	if (parse->hasDistinctOn)
+		return;
+
+	partial_distinct_rel = fetch_upper_rel(root, UPPERREL_PARTIAL_DISTINCT,
+										   NULL);
+	partial_distinct_rel->reltarget = root->upper_targets[UPPERREL_PARTIAL_DISTINCT];
+	partial_distinct_rel->consider_parallel = input_rel->consider_parallel;
+
+	/*
+	 * If input_rel belongs to a single FDW, so does the partial_distinct_rel.
+	 */
+	partial_distinct_rel->serverid = input_rel->serverid;
+	partial_distinct_rel->userid = input_rel->userid;
+	partial_distinct_rel->useridiscurrent = input_rel->useridiscurrent;
+	partial_distinct_rel->fdwroutine = input_rel->fdwroutine;
+
+	cheapest_partial_path = linitial(input_rel->partial_pathlist);
+
+	distinctExprs = get_sortgrouplist_exprs(parse->distinctClause,
+											parse->targetList);
+
+	/* estimate how many distinct rows we'll get from each worker */
+	numDistinctRows = estimate_num_groups(root, distinctExprs,
+										  cheapest_partial_path->rows,
+										  NULL, NULL);
+
+	/* first try adding unique paths atop of sorted paths */
+	if (grouping_is_sortable(parse->distinctClause))
+	{
+		foreach(lc, input_rel->partial_pathlist)
+		{
+			Path	   *path = (Path *) lfirst(lc);
+
+			if (pathkeys_contained_in(root->distinct_pathkeys, path->pathkeys))
+			{
+				add_partial_path(partial_distinct_rel, (Path *)
+								 create_upper_unique_path(root,
+														  partial_distinct_rel,
+														  path,
+														  list_length(root->distinct_pathkeys),
+														  numDistinctRows));
+			}
+		}
+	}
+
+	/*
+	 * Now try hash aggregate paths, if enabled and hashing is possible. Since
+	 * we're not on the hook to ensure we do our best to create at least one
+	 * path here, we treat enable_hashagg as a hard off-switch rather than the
+	 * slightly softer variant in create_final_distinct_paths.
+	 */
+	if (enable_hashagg && grouping_is_hashable(parse->distinctClause))
+	{
+		add_partial_path(partial_distinct_rel, (Path *)
+						 create_agg_path(root,
+										 partial_distinct_rel,
+										 cheapest_partial_path,
+										 cheapest_partial_path->pathtarget,
+										 AGG_HASHED,
+										 AGGSPLIT_SIMPLE,
+										 parse->distinctClause,
+										 NIL,
+										 NULL,
+										 numDistinctRows));
+	}
+
+	/*
+	 * If there is an FDW that's responsible for all baserels of the query,
+	 * let it consider adding ForeignPaths.
+	 */
+	if (partial_distinct_rel->fdwroutine &&
+		partial_distinct_rel->fdwroutine->GetForeignUpperPaths)
+		partial_distinct_rel->fdwroutine->GetForeignUpperPaths(root,
+															   UPPERREL_PARTIAL_DISTINCT,
+															   input_rel,
+															   partial_distinct_rel,
+															   NULL);
+
+	/* Let extensions possibly add some more partial paths */
+	if (create_upper_paths_hook)
+		(*create_upper_paths_hook) (root, UPPERREL_PARTIAL_DISTINCT,
+									input_rel, partial_distinct_rel, NULL);
+
+	if (partial_distinct_rel->partial_pathlist != NIL)
+	{
+		generate_gather_paths(root, partial_distinct_rel, true);
+		set_cheapest(partial_distinct_rel);
+
+		/*
+		 * Finally, create paths to distinctify the final result.  This step
+		 * is needed to remove any duplicates due to combining rows from
+		 * parallel workers.
+		 */
+		create_final_distinct_paths(root, partial_distinct_rel,
+									final_distinct_rel);
+	}
+}
+
+/*
+ * create_final_distinct_paths
+ *		Create distinct paths in 'distinct_rel' based on 'input_rel' pathlist
+ *
+ * input_rel: contains the source-data paths
+ * distinct_rel: destination relation for storing created paths
+ */
+static RelOptInfo *
+create_final_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
+							RelOptInfo *distinct_rel)
+{
+	Query	   *parse = root->parse;
+	Path	   *cheapest_input_path = input_rel->cheapest_total_path;
+	double		numDistinctRows;
+	bool		allow_hash;
+	Path	   *path;
+	ListCell   *lc;
+
+	/* Estimate number of distinct rows there will be */
+	if (parse->groupClause || parse->groupingSets || parse->hasAggs ||
+		root->hasHavingQual)
+	{
+		/*
+		 * If there was grouping or aggregation, use the number of input rows
+		 * as the estimated number of DISTINCT rows (ie, assume the input is
+		 * already mostly unique).
+		 */
+		numDistinctRows = cheapest_input_path->rows;
+	}
+	else
+	{
+		/*
+		 * Otherwise, the UNIQUE filter has effects comparable to GROUP BY.
+		 */
+		List	   *distinctExprs;
+
+		distinctExprs = get_sortgrouplist_exprs(parse->distinctClause,
+												parse->targetList);
+		numDistinctRows = estimate_num_groups(root, distinctExprs,
+											  cheapest_input_path->rows,
+											  NULL, NULL);
+	}
+
+	/*
+	 * Consider sort-based implementations of DISTINCT, if possible.
+	 */
+	if (grouping_is_sortable(parse->distinctClause))
+	{
+		/*
+		 * First, if we have any adequately-presorted paths, just stick a
+		 * Unique node on those.  Then consider doing an explicit sort of the
+		 * cheapest input path and Unique'ing that.
+		 *
+		 * When we have DISTINCT ON, we must sort by the more rigorous of
+		 * DISTINCT and ORDER BY, else it won't have the desired behavior.
+		 * Also, if we do have to do an explicit sort, we might as well use
+		 * the more rigorous ordering to avoid a second sort later.  (Note
+		 * that the parser will have ensured that one clause is a prefix of
+		 * the other.)
+		 */
+		List	   *needed_pathkeys;
+
+		if (parse->hasDistinctOn &&
+			list_length(root->distinct_pathkeys) <
+			list_length(root->sort_pathkeys))
+			needed_pathkeys = root->sort_pathkeys;
+		else
+			needed_pathkeys = root->distinct_pathkeys;
+
+		foreach(lc, input_rel->pathlist)
+		{
+			Path	   *path = (Path *) lfirst(lc);
+
+			if (pathkeys_contained_in(needed_pathkeys, path->pathkeys))
+			{
+				add_path(distinct_rel, (Path *)
+						 create_upper_unique_path(root, distinct_rel,
+												  path,
+												  list_length(root->distinct_pathkeys),
+												  numDistinctRows));
+			}
+		}
+
+		/* For explicit-sort case, always use the more rigorous clause */
+		if (list_length(root->distinct_pathkeys) <
+			list_length(root->sort_pathkeys))
+		{
+			needed_pathkeys = root->sort_pathkeys;
+			/* Assert checks that parser didn't mess up... */
+			Assert(pathkeys_contained_in(root->distinct_pathkeys,
+										 needed_pathkeys));
+		}
+		else
+			needed_pathkeys = root->distinct_pathkeys;
+
+		path = cheapest_input_path;
+		if (!pathkeys_contained_in(needed_pathkeys, path->pathkeys))
+			path = (Path *) create_sort_path(root, distinct_rel,
+											 path,
+											 needed_pathkeys,
+											 -1.0);
+
+		add_path(distinct_rel, (Path *)
+				 create_upper_unique_path(root, distinct_rel,
+										  path,
+										  list_length(root->distinct_pathkeys),
+										  numDistinctRows));
+	}
+
+	/*
+	 * Consider hash-based implementations of DISTINCT, if possible.
+	 *
+	 * If we were not able to make any other types of path, we *must* hash or
+	 * die trying.  If we do have other choices, there are two things that
+	 * should prevent selection of hashing: if the query uses DISTINCT ON
+	 * (because it won't really have the expected behavior if we hash), or if
+	 * enable_hashagg is off.
+	 *
+	 * Note: grouping_is_hashable() is much more expensive to check than the
+	 * other gating conditions, so we want to do it last.
+	 */
+	if (distinct_rel->pathlist == NIL)
+		allow_hash = true;		/* we have no alternatives */
+	else if (parse->hasDistinctOn || !enable_hashagg)
+		allow_hash = false;		/* policy-based decision not to hash */
+	else
+		allow_hash = true;		/* default */
+
+	if (allow_hash && grouping_is_hashable(parse->distinctClause))
+	{
+		/* Generate hashed aggregate path --- no sort needed */
+		add_path(distinct_rel, (Path *)
+				 create_agg_path(root,
+								 distinct_rel,
+								 cheapest_input_path,
+								 cheapest_input_path->pathtarget,
+								 AGG_HASHED,
+								 AGGSPLIT_SIMPLE,
+								 parse->distinctClause,
+								 NIL,
+								 NULL,
+								 numDistinctRows));
+	}
+
+	return distinct_rel;
+}
+#else
 /*
  * create_distinct_paths
  *
@@ -4485,6 +4943,7 @@ create_distinct_paths(PlannerInfo *root,
 
 	return distinct_rel;
 }
+#endif /* #if PG_VERSION_NUM >= 150000 */
 
 /*
  * create_ordered_paths
@@ -7107,20 +7566,41 @@ apply_scanjoin_target_to_paths(PlannerInfo *root,
 	if (rel_is_partitioned)
 	{
 		List	   *live_children = NIL;
+#if PG_VERSION_NUM >=  150000
+		int			i;
+#else
 		int			partition_idx;
+#endif
 
+#if PG_VERSION_NUM >= 150000
+		i = -1;
+		while ((i = bms_next_member(rel->live_parts, i)) >= 0)
+#else
 		/* Adjust each partition. */
 		for (partition_idx = 0; partition_idx < rel->nparts; partition_idx++)
+#endif
 		{
+#if PG_VERSION_NUM >= 150000
+			RelOptInfo *child_rel = rel->part_rels[i];
+#else
 			RelOptInfo *child_rel = rel->part_rels[partition_idx];
+#endif
 			AppendRelInfo **appinfos;
 			int			nappinfos;
 			List	   *child_scanjoin_targets = NIL;
 			ListCell   *lc;
 
+#if PG_VERSION_NUM >= 150000
+			Assert(child_rel != NULL);
+
+			/* Dummy children can be ignored. */
+			if (IS_DUMMY_REL(child_rel))
+				continue;
+#else
 			/* Pruned or dummy children can be ignored. */
 			if (child_rel == NULL || IS_DUMMY_REL(child_rel))
 				continue;
+#endif
 
 			/* Translate scan/join targets for this child. */
 			appinfos = find_appinfos_by_relids(root, child_rel->relids,
@@ -7204,8 +7684,12 @@ create_partitionwise_grouping_paths(PlannerInfo *root,
 									PartitionwiseAggregateType patype,
 									GroupPathExtraData *extra)
 {
+#if PG_VERSION_NUM >= 150000
+	int			i;
+#else
 	int			nparts = input_rel->nparts;
 	int			cnt_parts;
+#endif
 	List	   *grouped_live_children = NIL;
 	List	   *partially_grouped_live_children = NIL;
 	PathTarget *target = grouped_rel->reltarget;
@@ -7216,19 +7700,39 @@ create_partitionwise_grouping_paths(PlannerInfo *root,
 		   partially_grouped_rel != NULL);
 
 	/* Add paths for partitionwise aggregation/grouping. */
+#if PG_VERSION_NUM >= 150000
+	i = -1;
+	while ((i = bms_next_member(input_rel->live_parts, i)) >= 0)
+#else
 	for (cnt_parts = 0; cnt_parts < nparts; cnt_parts++)
+#endif
 	{
+#if PG_VERSION_NUM >= 150000
+		RelOptInfo *child_input_rel = input_rel->part_rels[i];
+		PathTarget *child_target;
+#else
 		RelOptInfo *child_input_rel = input_rel->part_rels[cnt_parts];
 		PathTarget *child_target = copy_pathtarget(target);
+#endif
 		AppendRelInfo **appinfos;
 		int			nappinfos;
 		GroupPathExtraData child_extra;
 		RelOptInfo *child_grouped_rel;
 		RelOptInfo *child_partially_grouped_rel;
 
+#if PG_VERSION_NUM >= 150000
+		Assert(child_input_rel != NULL);
+
+		/* Dummy children can be ignored. */
+		if (IS_DUMMY_REL(child_input_rel))
+			continue;
+
+		child_target = copy_pathtarget(target);
+#else
 		/* Pruned or dummy children can be ignored. */
 		if (child_input_rel == NULL || IS_DUMMY_REL(child_input_rel))
 			continue;
+#endif
 
 		/*
 		 * Copy the given "extra" structure as is and then override the

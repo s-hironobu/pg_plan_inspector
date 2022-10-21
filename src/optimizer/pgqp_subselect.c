@@ -384,8 +384,14 @@ build_subplan(PlannerInfo *root, Plan *plan, PlannerInfo *subroot,
 		 * SubLinks, which have not yet been processed (see the comments for
 		 * SS_replace_correlation_vars).  Do that now.
 		 */
+#if PG_VERSION_NUM >= 150000
+		if (IsA(arg, PlaceHolderVar) ||
+			IsA(arg, Aggref) ||
+			IsA(arg, GroupingFunc))
+#else
 		if (IsA(arg, PlaceHolderVar) ||
 			IsA(arg, Aggref))
+#endif
 			arg = SS_process_sublinks(root, arg, false);
 
 		splan->parParam = lappend_int(splan->parParam, pitem->paramId);
@@ -869,7 +875,12 @@ hash_ok_operator(OpExpr *expr)
 	/* quick out if not a binary operator */
 	if (list_length(expr->args) != 2)
 		return false;
+#if PG_VERSION_NUM >= 150000
+	if (opid == ARRAY_EQ_OP ||
+		opid == RECORD_EQ_OP)
+#else
 	if (opid == ARRAY_EQ_OP)
+#endif
 	{
 		/* array_eq is strict, but must check input type to ensure hashable */
 		/* XXX record_eq will need same treatment when it becomes hashable */
@@ -1991,6 +2002,30 @@ process_sublinks_mutator(Node *node, process_sublinks_context *context)
 							context->isTopQual);
 	}
 
+#if PG_VERSION_NUM >= 150000
+	/*
+	 * Don't recurse into the arguments of an outer PHV, Aggref or
+	 * GroupingFunc here.  Any SubLinks in the arguments have to be dealt with
+	 * at the outer query level; they'll be handled when build_subplan
+	 * collects the PHV, Aggref or GroupingFunc into the arguments to be
+	 * passed down to the current subplan.
+	 */
+	if (IsA(node, PlaceHolderVar))
+	{
+		if (((PlaceHolderVar *) node)->phlevelsup > 0)
+			return node;
+	}
+	else if (IsA(node, Aggref))
+	{
+		if (((Aggref *) node)->agglevelsup > 0)
+			return node;
+	}
+	else if (IsA(node, GroupingFunc))
+	{
+		if (((GroupingFunc *) node)->agglevelsup > 0)
+			return node;
+	}
+#else
 	/*
 	 * Don't recurse into the arguments of an outer PHV or aggregate here. Any
 	 * SubLinks in the arguments have to be dealt with at the outer query
@@ -2007,6 +2042,7 @@ process_sublinks_mutator(Node *node, process_sublinks_context *context)
 		if (((Aggref *) node)->agglevelsup > 0)
 			return node;
 	}
+#endif
 
 	/*
 	 * We should never see a SubPlan expression in the input (since this is
@@ -2371,6 +2407,10 @@ finalize_plan(PlannerInfo *root, Plan *plan,
 		case T_IndexOnlyScan:
 			finalize_primnode((Node *) ((IndexOnlyScan *) plan)->indexqual,
 							  &context);
+#if PG_VERSION_NUM >= 150000
+			finalize_primnode((Node *) ((IndexOnlyScan *) plan)->recheckqual,
+							  &context);
+#endif
 			finalize_primnode((Node *) ((IndexOnlyScan *) plan)->indexorderby,
 							  &context);
 

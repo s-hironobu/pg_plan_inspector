@@ -974,7 +974,11 @@ create_seqscan_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->param_info = get_baserel_parampathinfo(root, rel,
 													 required_outer);
 #endif
+#if PG_VERSION_NUM >= 150000
+	pathnode->parallel_aware = (parallel_workers > 0);
+#else
 	pathnode->parallel_aware = parallel_workers > 0 ? true : false;
+#endif
 	pathnode->parallel_safe = rel->consider_parallel;
 	pathnode->parallel_workers = parallel_workers;
 	pathnode->pathkeys = NIL;	/* seqscan has unordered result */
@@ -1141,7 +1145,11 @@ create_bitmap_heap_path(PlannerInfo *root,
 	pathnode->path.param_info = get_baserel_parampathinfo(root, rel,
 														  required_outer);
 #endif
+#if PG_VERSION_NUM >= 150000
+	pathnode->path.parallel_aware = (parallel_degree > 0);
+#else
 	pathnode->path.parallel_aware = parallel_degree > 0 ? true : false;
+#endif
 	pathnode->path.parallel_safe = rel->consider_parallel;
 	pathnode->path.parallel_workers = parallel_degree;
 	pathnode->path.pathkeys = NIL;	/* always unordered */
@@ -1734,9 +1742,15 @@ create_material_path(RelOptInfo *rel, Path *subpath)
  *	  Creates a path corresponding to a Memoize plan, returning the pathnode.
  */
 MemoizePath *
+#if PG_VERSION_NUM >= 150000
+create_memoize_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
+					List *param_exprs, List *hash_operators,
+					bool singlerow, bool binary_mode, double calls)
+#else
 create_memoize_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
 					List *param_exprs, List *hash_operators,
 					bool singlerow, double calls)
+#endif
 {
 	MemoizePath *pathnode = makeNode(MemoizePath);
 
@@ -1756,6 +1770,9 @@ create_memoize_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
 	pathnode->hash_operators = hash_operators;
 	pathnode->param_exprs = param_exprs;
 	pathnode->singlerow = singlerow;
+#if PG_VERSION_NUM >= 150000
+	pathnode->binary_mode = binary_mode;
+#endif
 	pathnode->calls = calls;
 
 	/*
@@ -2717,6 +2734,40 @@ create_nestloop_path(PlannerInfo *root,
 		restrict_clauses = jclauses;
 	}
 
+#if PG_VERSION_NUM >= 150000
+	pathnode->jpath.path.pathtype = T_NestLoop;
+	pathnode->jpath.path.parent = joinrel;
+	pathnode->jpath.path.pathtarget = joinrel->reltarget;
+	pathnode->jpath.path.param_info =
+#ifdef __PG_QUERY_PLAN__
+		pgqp_get_joinrel_parampathinfo(root,
+									   joinrel,
+									   outer_path,
+									   inner_path,
+									   extra->sjinfo,
+									   required_outer,
+									   &restrict_clauses);
+#else
+		get_joinrel_parampathinfo(root,
+								  joinrel,
+								  outer_path,
+								  inner_path,
+								  extra->sjinfo,
+								  required_outer,
+								  &restrict_clauses);
+#endif
+	pathnode->jpath.path.parallel_aware = false;
+	pathnode->jpath.path.parallel_safe = joinrel->consider_parallel &&
+		outer_path->parallel_safe && inner_path->parallel_safe;
+	/* This is a foolish way to estimate parallel_workers, but for now... */
+	pathnode->jpath.path.parallel_workers = outer_path->parallel_workers;
+	pathnode->jpath.path.pathkeys = pathkeys;
+	pathnode->jpath.jointype = jointype;
+	pathnode->jpath.inner_unique = extra->inner_unique;
+	pathnode->jpath.outerjoinpath = outer_path;
+	pathnode->jpath.innerjoinpath = inner_path;
+	pathnode->jpath.joinrestrictinfo = restrict_clauses;
+#else
 	pathnode->path.pathtype = T_NestLoop;
 	pathnode->path.parent = joinrel;
 	pathnode->path.pathtarget = joinrel->reltarget;
@@ -2749,6 +2800,7 @@ create_nestloop_path(PlannerInfo *root,
 	pathnode->outerjoinpath = outer_path;
 	pathnode->innerjoinpath = inner_path;
 	pathnode->joinrestrictinfo = restrict_clauses;
+#endif
 
 #ifdef __PG_QUERY_PLAN__
 	pgqp_final_cost_nestloop(root, pathnode, workspace, extra);
@@ -3759,14 +3811,30 @@ create_minmaxagg_path(PlannerInfo *root,
  * plus ORDER BY keys.
  */
 WindowAggPath *
+#if PG_VERSION_NUM >= 150000
+create_windowagg_path(PlannerInfo *root,
+					  RelOptInfo *rel,
+					  Path *subpath,
+					  PathTarget *target,
+					  List *windowFuncs,
+					  WindowClause *winclause,
+					  List *qual,
+					  bool topwindow)
+#else
 create_windowagg_path(PlannerInfo *root,
 					  RelOptInfo *rel,
 					  Path *subpath,
 					  PathTarget *target,
 					  List *windowFuncs,
 					  WindowClause *winclause)
+#endif
 {
 	WindowAggPath *pathnode = makeNode(WindowAggPath);
+
+#if PG_VERSION_NUM >= 150000
+	/* qual can only be set for the topwindow */
+	Assert(qual == NIL || topwindow);
+#endif
 
 	pathnode->path.pathtype = T_WindowAgg;
 	pathnode->path.parent = rel;
@@ -3782,6 +3850,10 @@ create_windowagg_path(PlannerInfo *root,
 
 	pathnode->subpath = subpath;
 	pathnode->winclause = winclause;
+#if PG_VERSION_NUM >= 150000
+	pathnode->qual = qual;
+	pathnode->topwindow = topwindow;
+#endif
 
 	/*
 	 * For costing purposes, assume that there are no redundant partitioning
@@ -4005,13 +4077,24 @@ create_modifytable_path(PlannerInfo *root, RelOptInfo *rel,
 						List *updateColnosLists,
 						List *withCheckOptionLists, List *returningLists,
 						List *rowMarks, OnConflictExpr *onconflict,
+#if PG_VERSION_NUM >= 150000
+						List *mergeActionLists, int epqParam)
+#else
 						int epqParam)
+#endif
 {
 	ModifyTablePath *pathnode = makeNode(ModifyTablePath);
 
+#if PG_VERSION_NUM >= 150000
+	Assert(operation == CMD_MERGE ||
+		   (operation == CMD_UPDATE ?
+			list_length(resultRelations) == list_length(updateColnosLists) :
+			updateColnosLists == NIL));
+#else
 	Assert(operation == CMD_UPDATE ?
 		   list_length(resultRelations) == list_length(updateColnosLists) :
 		   updateColnosLists == NIL);
+#endif
 	Assert(withCheckOptionLists == NIL ||
 		   list_length(resultRelations) == list_length(withCheckOptionLists));
 	Assert(returningLists == NIL ||
@@ -4071,6 +4154,9 @@ create_modifytable_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->rowMarks = rowMarks;
 	pathnode->onconflict = onconflict;
 	pathnode->epqParam = epqParam;
+#if PG_VERSION_NUM >= 150000
+	pathnode->mergeActionLists = mergeActionLists;
+#endif
 
 	return pathnode;
 }
@@ -4347,6 +4433,9 @@ reparameterize_path(PlannerInfo *root, Path *path,
 													mpath->param_exprs,
 													mpath->hash_operators,
 													mpath->singlerow,
+#if PG_VERSION_NUM >= 150000
+													mpath->binary_mode,
+#endif
 													mpath->calls);
 			}
 		default:
@@ -4516,13 +4605,27 @@ do { \
 		case T_NestPath:
 			{
 				JoinPath   *jpath;
+#if PG_VERSION_NUM >= 150000
+				NestPath   *npath;
+#endif
 
+#if PG_VERSION_NUM >= 150000
+				FLAT_COPY_PATH(npath, path, NestPath);
+#else
 				FLAT_COPY_PATH(jpath, path, NestPath);
+#endif
 
+#if PG_VERSION_NUM >= 150000
+				jpath = (JoinPath *) npath;
+#endif
 				REPARAMETERIZE_CHILD_PATH(jpath->outerjoinpath);
 				REPARAMETERIZE_CHILD_PATH(jpath->innerjoinpath);
 				ADJUST_CHILD_ATTRS(jpath->joinrestrictinfo);
+#if PG_VERSION_NUM >= 150000
+				new_path = (Path *) npath;
+#else
 				new_path = (Path *) jpath;
+#endif
 			}
 			break;
 
