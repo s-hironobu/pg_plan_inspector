@@ -538,13 +538,21 @@ paraminfo_get_equal_hashops(PlannerInfo *root, ParamPathInfo *param_info,
 static bool
 paraminfo_get_equal_hashops(PlannerInfo *root, ParamPathInfo *param_info,
 							RelOptInfo *outerrel, RelOptInfo *innerrel,
+#if PG_VERSION_NUM >= 140002
+							List **param_exprs, List **operators,
+							bool *binary_mode)
+#else
 							List **param_exprs, List **operators)
+#endif
 
 {
 	ListCell   *lc;
 
 	*param_exprs = NIL;
 	*operators = NIL;
+#if PG_VERSION_NUM >= 140002
+	*binary_mode = false;
+#endif
 
 	if (param_info != NULL)
 	{
@@ -577,6 +585,21 @@ paraminfo_get_equal_hashops(PlannerInfo *root, ParamPathInfo *param_info,
 
 			*operators = lappend_oid(*operators, rinfo->hasheqoperator);
 			*param_exprs = lappend(*param_exprs, expr);
+#if PG_VERSION_NUM >= 140002
+			/*
+			 * When the join operator is not hashable then it's possible that
+			 * the operator will be able to distinguish something that the
+			 * hash equality operator could not. For example with floating
+			 * point types -0.0 and +0.0 are classed as equal by the hash
+			 * function and equality function, but some other operator may be
+			 * able to tell those values apart.  This means that we must put
+			 * memoize into binary comparison mode so that it does bit-by-bit
+			 * comparisons rather than a "logical" comparison as it would
+			 * using the hash equality operator.
+			 */
+			if (!OidIsValid(rinfo->hashjoinoperator))
+				*binary_mode = true;
+#endif
 		}
 	}
 
@@ -607,6 +630,18 @@ paraminfo_get_equal_hashops(PlannerInfo *root, ParamPathInfo *param_info,
 
 		*operators = lappend_oid(*operators, typentry->eq_opr);
 		*param_exprs = lappend(*param_exprs, expr);
+#if PG_VERSION_NUM >= 140002
+		/*
+		 * We must go into binary mode as we don't have too much of an idea of
+		 * how these lateral Vars are being used.  See comment above when we
+		 * set *binary_mode for the non-lateral Var case. This could be
+		 * relaxed a bit if we had the RestrictInfos and knew the operators
+		 * being used, however for cases like Vars that are arguments to
+		 * functions we must operate in binary mode as we don't have
+		 * visibility into what the function is doing with the Vars.
+		 */
+		*binary_mode = true;
+#endif
 	}
 
 	/* We're okay to use memoize */
@@ -628,7 +663,7 @@ get_memoize_path(PlannerInfo *root, RelOptInfo *innerrel,
 	List	   *param_exprs;
 	List	   *hash_operators;
 	ListCell   *lc;
-#if PG_VERSION_NUM >= 150000
+#if PG_VERSION_NUM >= 140002
 	bool		binary_mode;
 #endif
 
@@ -717,7 +752,7 @@ get_memoize_path(PlannerInfo *root, RelOptInfo *innerrel,
 	}
 
 	/* Check if we have hash ops for each parameter to the path */
-#if PG_VERSION_NUM >= 150000
+#if PG_VERSION_NUM >= 140002
 	if (paraminfo_get_equal_hashops(root,
 									inner_path->param_info,
 									outerrel,

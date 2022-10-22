@@ -1742,7 +1742,7 @@ create_material_path(RelOptInfo *rel, Path *subpath)
  *	  Creates a path corresponding to a Memoize plan, returning the pathnode.
  */
 MemoizePath *
-#if PG_VERSION_NUM >= 150000
+#if PG_VERSION_NUM >= 140002
 create_memoize_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
 					List *param_exprs, List *hash_operators,
 					bool singlerow, bool binary_mode, double calls)
@@ -1770,7 +1770,7 @@ create_memoize_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
 	pathnode->hash_operators = hash_operators;
 	pathnode->param_exprs = param_exprs;
 	pathnode->singlerow = singlerow;
-#if PG_VERSION_NUM >= 150000
+#if PG_VERSION_NUM >= 140002
 	pathnode->binary_mode = binary_mode;
 #endif
 	pathnode->calls = calls;
@@ -4433,7 +4433,7 @@ reparameterize_path(PlannerInfo *root, Path *path,
 													mpath->param_exprs,
 													mpath->hash_operators,
 													mpath->singlerow,
-#if PG_VERSION_NUM >= 150000
+#if PG_VERSION_NUM >= 140002
 													mpath->binary_mode,
 #endif
 													mpath->calls);

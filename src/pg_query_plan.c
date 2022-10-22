@@ -183,8 +183,8 @@ static RelOptInfo *pgqp_join_search(PlannerInfo *root, int levels_needed,
 #endif
 
 #if PG_VERSION_NUM >= 150000
-#endif
 static void pgqp_shmem_request(void);
+#endif
 static void pgqp_shmem_startup(void);
 static void pgqp_shmem_shutdown(int code, Datum arg);
 static Size pgqp_memsize(void);
