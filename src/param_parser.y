@@ -30,7 +30,7 @@
 	extern void init_input_param_buf(const int params_len);
 
 	/*
-	 * A temporal buffer to hold the string retrieved from pgqp_reg_param.
+	 * A temporal buffer to hold the string retrieved from pgqp_reg_params.
 	 */
 #define PARAM_BUF_SIZE 128*1024 /* 128 KB */
 	struct
@@ -71,7 +71,8 @@
 
 %}
 
-%name-prefix "param_"
+%define api.prefix {param_}
+/* If bison makes error because of old version, use %name-prefix "param_" */
 
 %union {
 	char   *string;

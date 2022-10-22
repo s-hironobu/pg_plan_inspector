@@ -14,13 +14,13 @@ extern char *pgqp_json_plan;
 /*
  * Helper structure and variable for input_json() function.
  */
-struct InputBufInfo
+struct _InputBufInfo
 {
 	int plan_len;
 	int offset;
-} InputBufInfo;
+} _InputBufInfo;
 
-static struct InputBufInfo bufInfo;
+static struct _InputBufInfo bufInfo;
 
 #undef YY_INPUT
 #define YY_INPUT(buf,result,size) \
@@ -41,12 +41,12 @@ static struct InputBufInfo bufInfo;
 
 %%
 
-"{" { DEBUG_ECHO; return LCURLY; }
-"}" { DEBUG_ECHO; return RCURLY; }
-"[" { DEBUG_ECHO; return LBRAC; }
-"]" { DEBUG_ECHO; return RBRAC; }
-"," { DEBUG_ECHO; return COMMA; }
-":" { DEBUG_ECHO; return COLON; }
+"{" { DEBUG_ECHO; return _LCURLY; }
+"}" { DEBUG_ECHO; return _RCURLY; }
+"[" { DEBUG_ECHO; return _LBRAC; }
+"]" { DEBUG_ECHO; return _RBRAC; }
+"," { DEBUG_ECHO; return _COMMA; }
+":" { DEBUG_ECHO; return _COLON; }
 ("true"|"TRUE") { DEBUG_ECHO; return VTRUE; }
 ("false"|"FALSE") { DEBUG_ECHO; return VFALSE; }
 ("null"|"NULL") { DEBUG_ECHO; return VNULL; }
@@ -57,11 +57,11 @@ static struct InputBufInfo bufInfo;
 
 ("\"Node Type\""|"\"Parent Relationship\""|"\"Relation Name\""|"\"Function Name\""|"\"Index Name\""|"\"CTE Name\""|"\"Relation\""|"\"Schema\""|"\"Alias\""|"\"Output\""|"\"Scan Direction\""|"\"Strategy\""|"\"Join Type\""|"\"Sort Method\""|"\"Sort Key\""|"\"Operation\""|"\"Subplan Name\""|"\"Command\""|"\"Triggers\""|"\"Trigger\""|"\"Trigger Name\""|"\"Constraint Name\""|"\"Group Key\""|"\"Grouping Sets\""|"\"Group Keys\""|"\"Hash Keys\""|"\"Hash Key\""|"\"Partial Mode\""|"\"Inner Unique\"") { plan_lval.key_with_value = strdup(yytext); DEBUG_ECHO; return KEY_WITH_VALUE; }
 
-[0-9]+ { DEBUG_ECHO; plan_lval.integer = atoi(yytext); return INTEGER; }
+[0-9]+ { DEBUG_ECHO; plan_lval.integer = atoi(yytext); return _INTEGER; }
 
-[0-9]+"."?[0-9]* { DEBUG_ECHO; plan_lval.decimal = atof(yytext); return DECIMAL; }
+[0-9]+"."?[0-9]* { DEBUG_ECHO; plan_lval.decimal = atof(yytext); return _DECIMAL; }
 
-\"[^"]*\" { plan_lval.string = strdup(yytext); DEBUG_ECHO; return STRING; }
+\"[^"]*\" { plan_lval.string = strdup(yytext); DEBUG_ECHO; return _STRING; }
 
 [ \t\r\n]+ { /* eat up whitespace */ }
 

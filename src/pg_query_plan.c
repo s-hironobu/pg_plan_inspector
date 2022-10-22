@@ -73,6 +73,7 @@ PG_MODULE_MAGIC;
 extern CurrentState current_state;
 extern regParams reg_params;
 extern bool pgqp_adjust_rows;
+extern char	   *pgqp_json_plan;
 #endif
 
 /* Link to shared memory state */
