@@ -12,6 +12,13 @@ and it is currently composed of three python scripts: query_progress.py, repo_mg
 + `repo_mgr.py` is a tool to manage the repository that stores the executed plans, which are stored in the query_plan.log table on the PostgreSQL server.
 + `analyze.py` placed in the `tools` directory analyzes the stored executed plans in a specified repository. Refer to [README-tools.md](./README-tools.md) in detail.
 
+## Notice
+
+As mentioned in [the tentative conclusion](https://github.com/s-hironobu/pg_plan_inspector#version-02),
+the current version cannot show the accurate query progress.
+If you want to confirm the performance of the query progress feature, use [V_0_1](https://github.com/s-hironobu/pg_plan_inspector/tree/V_0_1) buranch version.
+
+
 ## Contents
 
 1. [Requirement](#1-requirement)  
@@ -227,6 +234,12 @@ $ ./repo_mgr.py get --basedir test_repo server_1
 
 
 ### 2.6. Use query_progress.py with Repository
+
+**Notice**
+*As mentioned in [the tentative conclusion](https://github.com/s-hironobu/pg_plan_inspector#version-02),
+the current version cannot show the accurate query progress.
+If you want to confirm the performance of the query progress feature, use [V_0_1](https://github.com/s-hironobu/pg_plan_inspector/tree/V_0_1) buranch version, or
+or disable the parallel query feature (by set max_parallel_workers = 0).*
 
 
 Also, watch the movie: [query_progress_tutorial-03.mp4](https://user-images.githubusercontent.com/7246769/126769277-0fe9fbd7-1ab8-44db-8b2f-5e734f21f3a4.mp4)
