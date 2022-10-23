@@ -404,7 +404,11 @@ count_distinct_groups(int numrows, SortItem *items, MultiSortSupport mss)
  *		order.
  */
 static int
+#if PG_VERSION_NUM >= 150000
+compare_sort_item_count(const void *a, const void *b, void *arg)
+#else
 compare_sort_item_count(const void *a, const void *b)
+#endif
 {
 	SortItem   *ia = (SortItem *) a;
 	SortItem   *ib = (SortItem *) b;
@@ -457,8 +461,13 @@ build_distinct_groups(int numrows, SortItem *items, MultiSortSupport mss,
 	Assert(j + 1 == ngroups);
 
 	/* Sort the distinct groups by frequency (in descending order). */
+#if PG_VERSION_NUM >= 150000
+	qsort_interruptible((void *) groups, ngroups, sizeof(SortItem),
+						compare_sort_item_count, NULL);
+#else
 	pg_qsort((void *) groups, ngroups, sizeof(SortItem),
 			 compare_sort_item_count);
+	#endif
 
 	*ndistinct = ngroups;
 	return groups;
@@ -528,8 +537,13 @@ build_column_frequencies(SortItem *groups, int ngroups,
 		}
 
 		/* sort the values, deduplicate */
+#if PG_VERSION_NUM >= 150000
+		qsort_interruptible((void *) result[dim], ngroups, sizeof(SortItem),
+							sort_item_compare, ssup);
+#else
 		qsort_arg((void *) result[dim], ngroups, sizeof(SortItem),
 				  sort_item_compare, ssup);
+#endif
 
 		/*
 		 * Identify distinct values, compute frequency (there might be
@@ -559,12 +573,21 @@ build_column_frequencies(SortItem *groups, int ngroups,
  *		Load the MCV list for the indicated pg_statistic_ext tuple.
  */
 MCVList *
+#if PG_VERSION_NUM >= 150000
+statext_mcv_load(Oid mvoid, bool inh)
+#else
 statext_mcv_load(Oid mvoid)
+#endif
 {
 	MCVList    *result;
 	bool		isnull;
 	Datum		mcvlist;
+#if PG_VERSION_NUM >= 150000
+	HeapTuple	htup = SearchSysCache2(STATEXTDATASTXOID,
+									   ObjectIdGetDatum(mvoid), BoolGetDatum(inh));
+#else
 	HeapTuple	htup = SearchSysCache1(STATEXTDATASTXOID, ObjectIdGetDatum(mvoid));
+#endif
 
 	if (!HeapTupleIsValid(htup))
 		elog(ERROR, "cache lookup failed for statistics object %u", mvoid);
@@ -695,8 +718,13 @@ statext_mcv_serialize(MCVList *mcvlist, VacAttrStats **stats)
 
 		PrepareSortSupportFromOrderingOp(typentry->lt_opr, &ssup[dim]);
 
+#if PG_VERSION_NUM >= 150000
+		qsort_interruptible(values[dim], counts[dim], sizeof(Datum),
+							compare_scalars_simple, &ssup[dim]);
+#else
 		qsort_arg(values[dim], counts[dim], sizeof(Datum),
 				  compare_scalars_simple, &ssup[dim]);
+#endif
 
 		/*
 		 * Walk through the array and eliminate duplicate values, but keep the
@@ -1537,7 +1565,11 @@ pg_mcv_list_send(PG_FUNCTION_ARGS)
 static int
 mcv_match_expression(Node *expr, Bitmapset *keys, List *exprs, Oid *collid)
 {
+#if PG_VERSION_NUM >= 150000
+	int			idx;
+#else
 	int			idx = -1;
+#endif
 
 	if (IsA(expr, Var))
 	{
@@ -1549,13 +1581,37 @@ mcv_match_expression(Node *expr, Bitmapset *keys, List *exprs, Oid *collid)
 
 		idx = bms_member_index(keys, var->varattno);
 
+#if PG_VERSION_NUM >= 150000
+		if (idx < 0)
+			elog(ERROR, "variable not found in statistics object");
+#else
 		/* make sure the index is valid */
 		Assert((idx >= 0) && (idx <= bms_num_members(keys)));
+#endif
 	}
 	else
 	{
 		ListCell   *lc;
 
+#if PG_VERSION_NUM >= 150000
+		if (collid)
+			*collid = exprCollation(expr);
+
+		/* expressions are stored after the simple columns */
+		idx = bms_num_members(keys);
+		foreach(lc, exprs)
+		{
+			Node	   *stat_expr = (Node *) lfirst(lc);
+
+			if (equal(expr, stat_expr))
+				break;
+
+			idx++;
+		}
+
+		if (lc == NULL)
+			elog(ERROR, "expression not found in statistics object");
+#else
 		/* expressions are stored after the simple columns */
 		idx = bms_num_members(keys);
 
@@ -1576,9 +1632,12 @@ mcv_match_expression(Node *expr, Bitmapset *keys, List *exprs, Oid *collid)
 		/* make sure the index is valid */
 		Assert((idx >= bms_num_members(keys)) &&
 			   (idx <= bms_num_members(keys) + list_length(exprs)));
+#endif
 	}
 
+#if PG_VERSION_NUM < 150000
 	Assert((idx >= 0) && (idx < bms_num_members(keys) + list_length(exprs)));
+#endif
 
 	return idx;
 }
@@ -1619,8 +1678,12 @@ mcv_get_match_bitmap(PlannerInfo *root, List *clauses,
 	Assert(mcvlist->nitems <= STATS_MCVLIST_MAX_ITEMS);
 
 	matches = palloc(sizeof(bool) * mcvlist->nitems);
+#if PG_VERSION_NUM >= 150000
+	memset(matches, !is_or, sizeof(bool) * mcvlist->nitems);
+#else
 	memset(matches, (is_or) ? false : true,
 		   sizeof(bool) * mcvlist->nitems);
+#endif
 
 	/*
 	 * Loop through the list of clauses, and for each of them evaluate all the
@@ -1659,7 +1722,9 @@ mcv_get_match_bitmap(PlannerInfo *root, List *clauses,
 			/* match the attribute/expression to a dimension of the statistic */
 			idx = mcv_match_expression(clause_expr, keys, exprs, &collid);
 
+#if PG_VERSION_NUM < 150000
 			Assert((idx >= 0) && (idx < bms_num_members(keys) + list_length(exprs)));
+#endif
 
 			/*
 			 * Walk through the MCV items and evaluate the current clause. We
@@ -1746,10 +1811,23 @@ mcv_get_match_bitmap(PlannerInfo *root, List *clauses,
 			if (!examine_opclause_args(expr->args, &clause_expr, &cst, &expronleft))
 				elog(ERROR, "incompatible clause");
 
+#if PG_VERSION_NUM >= 150000
+			/* We expect Var on left */
+			if (!expronleft)
+				elog(ERROR, "incompatible clause");
+#else
 			/* ScalarArrayOpExpr has the Var always on the left */
 			Assert(expronleft);
+#endif
 
+#if PG_VERSION_NUM >= 150000
+			/*
+			 * Deconstruct the array constant, unless it's NULL (we'll cover
+			 * that case below)
+			 */
+#else
 			/* XXX what if (cst->constisnull == NULL)? */
+#endif
 			if (!cst->constisnull)
 			{
 				arrayval = DatumGetArrayTypeP(cst->constvalue);
@@ -1772,7 +1850,11 @@ mcv_get_match_bitmap(PlannerInfo *root, List *clauses,
 			for (i = 0; i < mcvlist->nitems; i++)
 			{
 				int			j;
+#if PG_VERSION_NUM >= 150000
+				bool		match = !expr->useOr;
+#else
 				bool		match = (expr->useOr ? false : true);
+#endif
 				MCVItem    *item = &mcvlist->items[i];
 
 				/*
@@ -1947,7 +2029,34 @@ mcv_get_match_bitmap(PlannerInfo *root, List *clauses,
 			}
 		}
 		else
+#if PG_VERSION_NUM >= 150000
+		{
+			/* Otherwise, it must be a bare boolean-returning expression */
+			int			idx;
+
+			/* match the expression to a dimension of the statistic */
+			idx = mcv_match_expression(clause, keys, exprs, NULL);
+
+			/*
+			 * Walk through the MCV items and evaluate the current clause. We
+			 * can skip items that were already ruled out, and terminate if
+			 * there are no remaining MCV items that might possibly match.
+			 */
+			for (i = 0; i < mcvlist->nitems; i++)
+			{
+				bool		match;
+				MCVItem    *item = &mcvlist->items[i];
+
+				/* "match" just means it's bool TRUE */
+				match = !item->isnull[idx] && DatumGetBool(item->values[idx]);
+
+				/* now, update the match bitmap, depending on OR/AND type */
+				matches[i] = RESULT_MERGE(matches[i], is_or, match);
+			}
+		}
+#else
 			elog(ERROR, "unknown clause type: %d", clause->type);
+#endif
 	}
 
 	return matches;
@@ -2039,12 +2148,19 @@ mcv_clauselist_selectivity(PlannerInfo *root, StatisticExtInfo *stat,
 	int			i;
 	MCVList    *mcv;
 	Selectivity s = 0.0;
+#if PG_VERSION_NUM >= 150000
+	RangeTblEntry *rte = root->simple_rte_array[rel->relid];
+#endif
 
 	/* match/mismatch bitmap for each MCV item */
 	bool	   *matches = NULL;
 
 	/* load the MCV list stored in the statistics object */
+#if PG_VERSION_NUM >= 150000
+	mcv = statext_mcv_load(stat->statOid, rte->inh);
+#else
 	mcv = statext_mcv_load(stat->statOid);
+#endif
 
 	/* build a match bitmap for the clauses */
 	matches = mcv_get_match_bitmap(root, clauses, stat->keys, stat->exprs,

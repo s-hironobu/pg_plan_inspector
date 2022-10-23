@@ -78,7 +78,8 @@
 
 %}
 
-%name-prefix "plan_"
+%define api.prefix {plan_}
+/* If bison makes error because of old version, use %name-prefix "plan_" */
 
 %union {
 	char *plan;
@@ -92,11 +93,11 @@
 %token <plan> PLAN
 %token <key> KEY
 %token <key_with_value> KEY_WITH_VALUE
-%token LCURLY RCURLY LBRAC RBRAC COMMA COLON
+%token _LCURLY _RCURLY _LBRAC _RBRAC _COMMA _COLON
 %token VTRUE VFALSE VNULL
-%token <string> STRING
-%token <decimal> DECIMAL
-%token <integer> INTEGER
+%token <string> _STRING
+%token <decimal> _DECIMAL
+%token <integer> _INTEGER
 
 %start json
 
@@ -105,19 +106,19 @@
 json: object
     ;
 
-object: LCURLY RCURLY
-      | LCURLY members RCURLY
+object: _LCURLY _RCURLY
+      | _LCURLY members _RCURLY
       ;
 
 members: member
-       | members COMMA member
+       | members _COMMA member
        ;
 
-member: PLAN COLON value
-      | KEY COLON value {
+member: PLAN _COLON value
+      | KEY _COLON value {
           add_buf($1);
         }
-      | KEY_WITH_VALUE COLON STRING {
+      | KEY_WITH_VALUE _COLON _STRING {
 		  /*
 		   * Add the depth info of the plan tree if the key is "Parent Relationship"
 		   * to reflect the plan tree structure to the planid.
@@ -130,29 +131,29 @@ member: PLAN COLON value
           add_buf($1);
           add_buf($3);
         }
-      | KEY_WITH_VALUE COLON DECIMAL
-	  | KEY_WITH_VALUE COLON INTEGER
-	  | KEY_WITH_VALUE COLON VTRUE
-	  | KEY_WITH_VALUE COLON VFALSE
-	  | KEY_WITH_VALUE COLON VNULL
-	  | KEY_WITH_VALUE COLON array
-	  | KEY_WITH_VALUE COLON object
-      | STRING COLON value
+      | KEY_WITH_VALUE _COLON _DECIMAL
+	  | KEY_WITH_VALUE _COLON _INTEGER
+	  | KEY_WITH_VALUE _COLON VTRUE
+	  | KEY_WITH_VALUE _COLON VFALSE
+	  | KEY_WITH_VALUE _COLON VNULL
+	  | KEY_WITH_VALUE _COLON array
+	  | KEY_WITH_VALUE _COLON object
+      | _STRING _COLON value
       ;
 
-array: LBRAC RBRAC
-     | LBRAC members RBRAC
-     | LBRAC elements RBRAC
+array: _LBRAC _RBRAC
+     | _LBRAC members _RBRAC
+     | _LBRAC elements _RBRAC
      ;
 
 elements : value
-         | value COMMA elements
+         | value _COMMA elements
          ;
 
 value: object
-     | STRING
-     | DECIMAL
-     | INTEGER
+     | _STRING
+     | _DECIMAL
+     | _INTEGER
      | array
      | VTRUE
      | VFALSE

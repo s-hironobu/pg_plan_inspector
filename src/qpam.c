@@ -23,6 +23,9 @@
 #include "planid.h"
 
 
+char	   *pgqp_json_plan;	/* This is read by
+								 * input_params()@planid_scanner.l. */
+
 /* Link to shared memory state */
 extern pgqpSharedState * pgqp;
 

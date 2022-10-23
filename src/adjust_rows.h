@@ -67,7 +67,7 @@ typedef struct CurrentState
  * The following enums and definitions are imported from pg_hint_plan.
  * https://github.com/ossc-db/pg_hint_plan
  */
-enum
+typedef enum
 {
 	ENABLE_SEQSCAN = 0x01,
 	ENABLE_INDEXSCAN = 0x02,
@@ -76,7 +76,7 @@ enum
 	ENABLE_INDEXONLYSCAN = 0x10
 } SCAN_TYPE_BITS;
 
-enum
+typedef enum
 {
 	ENABLE_NESTLOOP = 0x01,
 	ENABLE_MERGEJOIN = 0x02,

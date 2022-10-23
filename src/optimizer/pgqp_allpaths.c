@@ -24,6 +24,9 @@
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#if PG_VERSION_NUM >= 150000
+#include "nodes/supportnodes.h"
+#endif
 #ifdef OPTIMIZER_DEBUG
 #include "nodes/print.h"
 #endif
@@ -149,8 +152,12 @@ static void subquery_push_qual(Query *subquery,
 							   RangeTblEntry *rte, Index rti, Node *qual);
 static void recurse_push_qual(Node *setOp, Query *topquery,
 							  RangeTblEntry *rte, Index rti, Node *qual);
+#if PG_VERSION_NUM >= 150000
+static void remove_unused_subquery_outputs(Query *subquery, RelOptInfo *rel,
+										   Bitmapset *extra_used_attrs);
+#else
 static void remove_unused_subquery_outputs(Query *subquery, RelOptInfo *rel);
-
+#endif
 
 /*
  * make_one_rel
@@ -569,8 +576,13 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	 * we postpone gathering until the final scan/join targetlist is available
 	 * (see grouping_planner).
 	 */
+#if PG_VERSION_NUM >= 150000
+	if (rel->reloptkind == RELOPT_BASEREL &&
+		!bms_equal(rel->relids, root->all_baserels))
+#else
 	if (rel->reloptkind == RELOPT_BASEREL &&
 		bms_membership(root->all_baserels) != BMS_SINGLETON)
+#endif
 		generate_useful_gather_paths(root, rel, false);
 
 	/* Now find the cheapest of the paths for this rel */
@@ -1767,8 +1779,13 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 	 * this is relevant, build pathkey descriptions of the partition ordering,
 	 * for both forward and reverse scans.
 	 */
+#if PG_VERSION_NUM >= 150000
+	if (rel->part_scheme != NULL && IS_SIMPLE_REL(rel) &&
+		partitions_are_ordered(rel->boundinfo, rel->live_parts))
+#else
 	if (rel->part_scheme != NULL && IS_SIMPLE_REL(rel) &&
 		partitions_are_ordered(rel->boundinfo, rel->nparts))
+#endif
 	{
 		partition_pathkeys = build_partition_pathkeys(root, rel,
 													  ForwardScanDirection,
@@ -1795,6 +1812,9 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 		List	   *pathkeys = (List *) lfirst(lcp);
 		List	   *startup_subpaths = NIL;
 		List	   *total_subpaths = NIL;
+#if PG_VERSION_NUM >= 150000
+		List	   *fractional_subpaths = NIL;
+#endif
 		bool		startup_neq_total = false;
 		ListCell   *lcr;
 		bool		match_partition_order;
@@ -1823,8 +1843,14 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 		foreach(lcr, live_childrels)
 		{
 			RelOptInfo *childrel = (RelOptInfo *) lfirst(lcr);
+#if PG_VERSION_NUM >= 150000
+			Path	   *cheapest_startup,
+					   *cheapest_total,
+					   *cheapest_fractional = NULL;
+#else
 			Path	   *cheapest_startup,
 					   *cheapest_total;
+#endif
 
 			/* Locate the right paths, if they are available. */
 			cheapest_startup =
@@ -1852,6 +1878,39 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 				Assert(cheapest_total->param_info == NULL);
 			}
 
+#if PG_VERSION_NUM >= 150000
+			/*
+			 * When building a fractional path, determine a cheapest
+			 * fractional path for each child relation too. Looking at startup
+			 * and total costs is not enough, because the cheapest fractional
+			 * path may be dominated by two separate paths (one for startup,
+			 * one for total).
+			 *
+			 * When needed (building fractional path), determine the cheapest
+			 * fractional path too.
+			 */
+			if (root->tuple_fraction > 0)
+			{
+				double		path_fraction = (1.0 / root->tuple_fraction);
+
+				cheapest_fractional =
+					get_cheapest_fractional_path_for_pathkeys(childrel->pathlist,
+															  pathkeys,
+															  NULL,
+															  path_fraction);
+
+				/*
+				 * If we found no path with matching pathkeys, use the
+				 * cheapest total path instead.
+				 *
+				 * XXX We might consider partially sorted paths too (with an
+				 * incremental sort on top). But we'd have to build all the
+				 * incremental paths, do the costing etc.
+				 */
+				if (!cheapest_fractional)
+					cheapest_fractional = cheapest_total;
+			}
+#endif
 			/*
 			 * Notice whether we actually have different paths for the
 			 * "cheapest" and "total" cases; frequently there will be no point
@@ -1878,6 +1937,14 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 
 				startup_subpaths = lappend(startup_subpaths, cheapest_startup);
 				total_subpaths = lappend(total_subpaths, cheapest_total);
+
+#if PG_VERSION_NUM >= 150000
+				if (cheapest_fractional)
+				{
+					cheapest_fractional = get_singleton_append_subpath(cheapest_fractional);
+					fractional_subpaths = lappend(fractional_subpaths, cheapest_fractional);
+				}
+#endif
 			}
 			else if (match_partition_order_desc)
 			{
@@ -1891,6 +1958,14 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 
 				startup_subpaths = lcons(cheapest_startup, startup_subpaths);
 				total_subpaths = lcons(cheapest_total, total_subpaths);
+
+#if PG_VERSION_NUM >= 150000
+				if (cheapest_fractional)
+				{
+					cheapest_fractional = get_singleton_append_subpath(cheapest_fractional);
+					fractional_subpaths = lcons(cheapest_fractional, fractional_subpaths);
+				}
+#endif
 			}
 			else
 			{
@@ -1902,6 +1977,11 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 										  &startup_subpaths, NULL);
 				accumulate_append_subpath(cheapest_total,
 										  &total_subpaths, NULL);
+#if PG_VERSION_NUM >= 150000
+				if (cheapest_fractional)
+					accumulate_append_subpath(cheapest_fractional,
+											  &fractional_subpaths, NULL);
+#endif
 			}
 		}
 
@@ -1952,6 +2032,32 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 														  false,
 														  -1));
 #endif
+
+#if PG_VERSION_NUM >= 150000
+			if (fractional_subpaths)
+#ifdef __PG_QUERY_PLAN__
+				add_path(rel, (Path *) pgqp_create_append_path(root,
+															   rel,
+															   fractional_subpaths,
+															   NIL,
+															   pathkeys,
+															   NULL,
+															   0,
+															   false,
+															   -1));
+#else
+				add_path(rel, (Path *) create_append_path(root,
+														  rel,
+														  fractional_subpaths,
+														  NIL,
+														  pathkeys,
+														  NULL,
+														  0,
+														  false,
+														  -1));
+#endif
+#endif
+
 		}
 		else
 		{
@@ -1967,6 +2073,15 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 																total_subpaths,
 																pathkeys,
 																NULL));
+
+#if PG_VERSION_NUM >= 150000
+			if (fractional_subpaths)
+				add_path(rel, (Path *) create_merge_append_path(root,
+																rel,
+																fractional_subpaths,
+																pathkeys,
+																NULL));
+#endif
 		}
 	}
 }
@@ -2198,6 +2313,283 @@ has_multiple_baserels(PlannerInfo *root)
 	return false;
 }
 
+#if PG_VERSION_NUM >= 150000
+/*
+ * find_window_run_conditions
+ *		Determine if 'wfunc' is really a WindowFunc and call its prosupport
+ *		function to determine the function's monotonic properties.  We then
+ *		see if 'opexpr' can be used to short-circuit execution.
+ *
+ * For example row_number() over (order by ...) always produces a value one
+ * higher than the previous.  If someone has a window function in a subquery
+ * and has a WHERE clause in the outer query to filter rows <= 10, then we may
+ * as well stop processing the windowagg once the row number reaches 11.  Here
+ * we check if 'opexpr' might help us to stop doing needless extra processing
+ * in WindowAgg nodes.
+ *
+ * '*keep_original' is set to true if the caller should also use 'opexpr' for
+ * its original purpose.  This is set to false if the caller can assume that
+ * the run condition will handle all of the required filtering.
+ *
+ * Returns true if 'opexpr' was found to be useful and was added to the
+ * WindowClauses runCondition.  We also set *keep_original accordingly and add
+ * 'attno' to *run_cond_attrs offset by FirstLowInvalidHeapAttributeNumber.
+ * If the 'opexpr' cannot be used then we set *keep_original to true and
+ * return false.
+ */
+static bool
+find_window_run_conditions(Query *subquery, RangeTblEntry *rte, Index rti,
+						   AttrNumber attno, WindowFunc *wfunc, OpExpr *opexpr,
+						   bool wfunc_left, bool *keep_original,
+						   Bitmapset **run_cond_attrs)
+{
+	Oid			prosupport;
+	Expr	   *otherexpr;
+	SupportRequestWFuncMonotonic req;
+	SupportRequestWFuncMonotonic *res;
+	WindowClause *wclause;
+	List	   *opinfos;
+	OpExpr	   *runopexpr;
+	Oid			runoperator;
+	ListCell   *lc;
+
+	*keep_original = true;
+
+	while (IsA(wfunc, RelabelType))
+		wfunc = (WindowFunc *) ((RelabelType *) wfunc)->arg;
+
+	/* we can only work with window functions */
+	if (!IsA(wfunc, WindowFunc))
+		return false;
+
+	prosupport = get_func_support(wfunc->winfnoid);
+
+	/* Check if there's a support function for 'wfunc' */
+	if (!OidIsValid(prosupport))
+		return false;
+
+	/* get the Expr from the other side of the OpExpr */
+	if (wfunc_left)
+		otherexpr = lsecond(opexpr->args);
+	else
+		otherexpr = linitial(opexpr->args);
+
+	/*
+	 * The value being compared must not change during the evaluation of the
+	 * window partition.
+	 */
+	if (!is_pseudo_constant_clause((Node *) otherexpr))
+		return false;
+
+	/* find the window clause belonging to the window function */
+	wclause = (WindowClause *) list_nth(subquery->windowClause,
+										wfunc->winref - 1);
+
+	req.type = T_SupportRequestWFuncMonotonic;
+	req.window_func = wfunc;
+	req.window_clause = wclause;
+
+	/* call the support function */
+	res = (SupportRequestWFuncMonotonic *)
+		DatumGetPointer(OidFunctionCall1(prosupport,
+										 PointerGetDatum(&req)));
+
+	/*
+	 * Nothing to do if the function is neither monotonically increasing nor
+	 * monotonically decreasing.
+	 */
+	if (res == NULL || res->monotonic == MONOTONICFUNC_NONE)
+		return false;
+
+	runopexpr = NULL;
+	runoperator = InvalidOid;
+	opinfos = get_op_btree_interpretation(opexpr->opno);
+
+	foreach(lc, opinfos)
+	{
+		OpBtreeInterpretation *opinfo = (OpBtreeInterpretation *) lfirst(lc);
+		int			strategy = opinfo->strategy;
+
+		/* handle < / <= */
+		if (strategy == BTLessStrategyNumber ||
+			strategy == BTLessEqualStrategyNumber)
+		{
+			/*
+			 * < / <= is supported for monotonically increasing functions in
+			 * the form <wfunc> op <pseudoconst> and <pseudoconst> op <wfunc>
+			 * for monotonically decreasing functions.
+			 */
+			if ((wfunc_left && (res->monotonic & MONOTONICFUNC_INCREASING)) ||
+				(!wfunc_left && (res->monotonic & MONOTONICFUNC_DECREASING)))
+			{
+				*keep_original = false;
+				runopexpr = opexpr;
+				runoperator = opexpr->opno;
+			}
+			break;
+		}
+		/* handle > / >= */
+		else if (strategy == BTGreaterStrategyNumber ||
+				 strategy == BTGreaterEqualStrategyNumber)
+		{
+			/*
+			 * > / >= is supported for monotonically decreasing functions in
+			 * the form <wfunc> op <pseudoconst> and <pseudoconst> op <wfunc>
+			 * for monotonically increasing functions.
+			 */
+			if ((wfunc_left && (res->monotonic & MONOTONICFUNC_DECREASING)) ||
+				(!wfunc_left && (res->monotonic & MONOTONICFUNC_INCREASING)))
+			{
+				*keep_original = false;
+				runopexpr = opexpr;
+				runoperator = opexpr->opno;
+			}
+			break;
+		}
+		/* handle = */
+		else if (strategy == BTEqualStrategyNumber)
+		{
+			int16		newstrategy;
+
+			/*
+			 * When both monotonically increasing and decreasing then the
+			 * return value of the window function will be the same each time.
+			 * We can simply use 'opexpr' as the run condition without
+			 * modifying it.
+			 */
+			if ((res->monotonic & MONOTONICFUNC_BOTH) == MONOTONICFUNC_BOTH)
+			{
+				*keep_original = false;
+				runopexpr = opexpr;
+				runoperator = opexpr->opno;
+				break;
+			}
+
+			/*
+			 * When monotonically increasing we make a qual with <wfunc> <=
+			 * <value> or <value> >= <wfunc> in order to filter out values
+			 * which are above the value in the equality condition.  For
+			 * monotonically decreasing functions we want to filter values
+			 * below the value in the equality condition.
+			 */
+			if (res->monotonic & MONOTONICFUNC_INCREASING)
+				newstrategy = wfunc_left ? BTLessEqualStrategyNumber : BTGreaterEqualStrategyNumber;
+			else
+				newstrategy = wfunc_left ? BTGreaterEqualStrategyNumber : BTLessEqualStrategyNumber;
+
+			/* We must keep the original equality qual */
+			*keep_original = true;
+			runopexpr = opexpr;
+
+			/* determine the operator to use for the runCondition qual */
+			runoperator = get_opfamily_member(opinfo->opfamily_id,
+											  opinfo->oplefttype,
+											  opinfo->oprighttype,
+											  newstrategy);
+			break;
+		}
+	}
+
+	if (runopexpr != NULL)
+	{
+		Expr	   *newexpr;
+
+		/*
+		 * Build the qual required for the run condition keeping the
+		 * WindowFunc on the same side as it was originally.
+		 */
+		if (wfunc_left)
+			newexpr = make_opclause(runoperator,
+									runopexpr->opresulttype,
+									runopexpr->opretset, (Expr *) wfunc,
+									otherexpr, runopexpr->opcollid,
+									runopexpr->inputcollid);
+		else
+			newexpr = make_opclause(runoperator,
+									runopexpr->opresulttype,
+									runopexpr->opretset,
+									otherexpr, (Expr *) wfunc,
+									runopexpr->opcollid,
+									runopexpr->inputcollid);
+
+		wclause->runCondition = lappend(wclause->runCondition, newexpr);
+
+		/* record that this attno was used in a run condition */
+		*run_cond_attrs = bms_add_member(*run_cond_attrs,
+										 attno - FirstLowInvalidHeapAttributeNumber);
+		return true;
+	}
+
+	/* unsupported OpExpr */
+	return false;
+}
+
+/*
+ * check_and_push_window_quals
+ *		Check if 'clause' is a qual that can be pushed into a WindowFunc's
+ *		WindowClause as a 'runCondition' qual.  These, when present, allow
+ *		some unnecessary work to be skipped during execution.
+ *
+ * 'run_cond_attrs' will be populated with all targetlist resnos of subquery
+ * targets (offset by FirstLowInvalidHeapAttributeNumber) that we pushed
+ * window quals for.
+ *
+ * Returns true if the caller still must keep the original qual or false if
+ * the caller can safely ignore the original qual because the WindowAgg node
+ * will use the runCondition to stop returning tuples.
+ */
+static bool
+check_and_push_window_quals(Query *subquery, RangeTblEntry *rte, Index rti,
+							Node *clause, Bitmapset **run_cond_attrs)
+{
+	OpExpr	   *opexpr = (OpExpr *) clause;
+	bool		keep_original = true;
+	Var		   *var1;
+	Var		   *var2;
+
+	/* We're only able to use OpExprs with 2 operands */
+	if (!IsA(opexpr, OpExpr))
+		return true;
+
+	if (list_length(opexpr->args) != 2)
+		return true;
+
+	/*
+	 * Check for plain Vars that reference window functions in the subquery.
+	 * If we find any, we'll ask find_window_run_conditions() if 'opexpr' can
+	 * be used as part of the run condition.
+	 */
+
+	/* Check the left side of the OpExpr */
+	var1 = linitial(opexpr->args);
+	if (IsA(var1, Var) && var1->varattno > 0)
+	{
+		TargetEntry *tle = list_nth(subquery->targetList, var1->varattno - 1);
+		WindowFunc *wfunc = (WindowFunc *) tle->expr;
+
+		if (find_window_run_conditions(subquery, rte, rti, tle->resno, wfunc,
+									   opexpr, true, &keep_original,
+									   run_cond_attrs))
+			return keep_original;
+	}
+
+	/* and check the right side */
+	var2 = lsecond(opexpr->args);
+	if (IsA(var2, Var) && var2->varattno > 0)
+	{
+		TargetEntry *tle = list_nth(subquery->targetList, var2->varattno - 1);
+		WindowFunc *wfunc = (WindowFunc *) tle->expr;
+
+		if (find_window_run_conditions(subquery, rte, rti, tle->resno, wfunc,
+									   opexpr, false, &keep_original,
+									   run_cond_attrs))
+			return keep_original;
+	}
+
+	return true;
+}
+#endif
+
 /*
  * set_subquery_pathlist
  *		Generate SubqueryScan access paths for a subquery RTE
@@ -2220,6 +2612,9 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	pushdown_safety_info safetyInfo;
 	double		tuple_fraction;
 	RelOptInfo *sub_final_rel;
+#if PG_VERSION_NUM >= 150000
+	Bitmapset  *run_cond_attrs = NULL;
+#endif
 	ListCell   *lc;
 
 	/*
@@ -2286,6 +2681,9 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 		foreach(l, rel->baserestrictinfo)
 		{
 			RestrictInfo *rinfo = (RestrictInfo *) lfirst(l);
+#if PG_VERSION_NUM >= 150000
+			Node	   *clause = (Node *) rinfo->clause;
+#endif
 
 			if (!rinfo->pseudoconstant &&
 				qual_is_pushdown_safe(subquery, rti, rinfo, &safetyInfo))
@@ -2297,8 +2695,27 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 			}
 			else
 			{
+#if PG_VERSION_NUM >= 150000
+				/*
+				 * Since we can't push the qual down into the subquery, check
+				 * if it happens to reference a window function.  If so then
+				 * it might be useful to use for the WindowAgg's runCondition.
+				 */
+				if (!subquery->hasWindowFuncs ||
+					check_and_push_window_quals(subquery, rte, rti, clause,
+												&run_cond_attrs))
+				{
+					/*
+					 * subquery has no window funcs or the clause is not a
+					 * suitable window run condition qual or it is, but the
+					 * original must also be kept in the upper query.
+					 */
+					upperrestrictlist = lappend(upperrestrictlist, rinfo);
+				}
+#else
 				/* Keep it in the upper query */
 				upperrestrictlist = lappend(upperrestrictlist, rinfo);
+#endif
 			}
 		}
 		rel->baserestrictinfo = upperrestrictlist;
@@ -2307,11 +2724,21 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 
 	pfree(safetyInfo.unsafeColumns);
 
+#if PG_VERSION_NUM >= 150000
+	/*
+	 * The upper query might not use all the subquery's output columns; if
+	 * not, we can simplify.  Pass the attributes that were pushed down into
+	 * WindowAgg run conditions to ensure we don't accidentally think those
+	 * are unused.
+	 */
+	remove_unused_subquery_outputs(subquery, rel, run_cond_attrs);
+#else
 	/*
 	 * The upper query might not use all the subquery's output columns; if
 	 * not, we can simplify.
 	 */
 	remove_unused_subquery_outputs(subquery, rel);
+#endif
 
 	/*
 	 * We can safely pass the outer tuple_fraction down to the subquery if the
@@ -2586,7 +3013,12 @@ set_cte_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 	if (ndx >= list_length(cteroot->cte_plan_ids))
 		elog(ERROR, "could not find plan for CTE \"%s\"", rte->ctename);
 	plan_id = list_nth_int(cteroot->cte_plan_ids, ndx);
+#if PG_VERSION_NUM >= 150000
+	if (plan_id <= 0)
+		elog(ERROR, "no plan was made for CTE \"%s\"", rte->ctename);
+#else
 	Assert(plan_id > 0);
+#endif
 	cteplan = (Plan *) list_nth(root->glob->subplans, plan_id - 1);
 
 	/* Mark rel with estimated output rows, width, etc */
@@ -3235,7 +3667,11 @@ standard_join_search(PlannerInfo *root, int levels_needed, List *initial_rels)
 			 * partial paths.  We'll do the same for the topmost scan/join rel
 			 * once we know the final targetlist (see grouping_planner).
 			 */
+#if PG_VERSION_NUM >= 150000
+			if (!bms_equal(rel->relids, root->all_baserels))
+#else
 			if (lev < levels_needed)
+#endif
 				generate_useful_gather_paths(root, rel, false);
 
 			/* Find and save the cheapest paths for this rel */
@@ -3251,7 +3687,11 @@ standard_join_search(PlannerInfo *root, int levels_needed, List *initial_rels)
 	 * We should have a single rel at the final level.
 	 */
 	if (root->join_rel_level[levels_needed] == NIL)
+#if PG_VERSION_NUM >= 150000
+		elog(ERROR, "failed to build any %d-way joins", levels_needed);
+#else
 		elog(ERROR, "%s failed to build any %d-way joins", __func__, levels_needed);
+#endif
 	Assert(list_length(root->join_rel_level[levels_needed]) == 1);
 
 	rel = (RelOptInfo *) linitial(root->join_rel_level[levels_needed]);
@@ -3799,10 +4239,27 @@ recurse_push_qual(Node *setOp, Query *topquery,
  * constants.  This is implemented by modifying subquery->targetList.
  */
 static void
+#if PG_VERSION_NUM >= 150000
+remove_unused_subquery_outputs(Query *subquery, RelOptInfo *rel,
+							   Bitmapset *extra_used_attrs)
+#else
 remove_unused_subquery_outputs(Query *subquery, RelOptInfo *rel)
+#endif
 {
+#if PG_VERSION_NUM >= 150000
+	Bitmapset  *attrs_used;
+#else
 	Bitmapset  *attrs_used = NULL;
+#endif
 	ListCell   *lc;
+
+#if PG_VERSION_NUM >= 150000
+	/*
+	 * Just point directly to extra_used_attrs. No need to bms_copy as none of
+	 * the current callers use the Bitmapset after calling this function.
+	 */
+	attrs_used = extra_used_attrs;
+#endif
 
 	/*
 	 * Do nothing if subquery has UNION/INTERSECT/EXCEPT: in principle we

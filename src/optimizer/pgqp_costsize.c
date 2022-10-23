@@ -71,6 +71,10 @@
 #define __PG_QUERY_PLAN__
 
 #include "postgres.h"
+
+#if PG_VERSION_NUM >= 150000
+#include <limits.h>
+#endif
 #include <math.h>
 
 #include "access/amapi.h"
@@ -126,6 +130,9 @@ double		cpu_index_tuple_cost = DEFAULT_CPU_INDEX_TUPLE_COST;
 double		cpu_operator_cost = DEFAULT_CPU_OPERATOR_COST;
 double		parallel_tuple_cost = DEFAULT_PARALLEL_TUPLE_COST;
 double		parallel_setup_cost = DEFAULT_PARALLEL_SETUP_COST;
+#if PG_VERSION_NUM >= 150000
+double		recursive_worktable_factor = DEFAULT_RECURSIVE_WORKTABLE_FACTOR;
+#endif
 
 int			effective_cache_size = DEFAULT_EFFECTIVE_CACHE_SIZE;
 
@@ -166,7 +173,9 @@ static MergeScanSelCache *cached_scansel(PlannerInfo *root,
 										 PathKey *pathkey);
 static void cost_rescan(PlannerInfo *root, Path *path,
 						Cost *rescan_startup_cost, Cost *rescan_total_cost);
+#if PG_VERSION_NUM < 150000
 static bool cost_qual_eval_walker(Node *node, cost_qual_eval_context *context);
+#endif
 static void get_restriction_qual_cost(PlannerInfo *root, RelOptInfo *baserel,
 									  ParamPathInfo *param_info,
 									  QualCost *qpqual_cost);
@@ -220,6 +229,37 @@ clamp_row_est(double nrows)
 	return nrows;
 }
 #endif							/* #ifndef __PG_QUERY_PLAN__ */
+
+#if PG_VERSION_NUM >= 150000
+#ifndef __PG_QUERY_PLAN__
+/*
+ * clamp_cardinality_to_long
+ *		Cast a Cardinality value to a sane long value.
+ */
+long
+clamp_cardinality_to_long(Cardinality x)
+{
+	/*
+	 * Just for paranoia's sake, ensure we do something sane with negative or
+	 * NaN values.
+	 */
+	if (isnan(x))
+		return LONG_MAX;
+	if (x <= 0)
+		return 0;
+
+	/*
+	 * If "long" is 64 bits, then LONG_MAX cannot be represented exactly as a
+	 * double.  Casting it to double and back may well result in overflow due
+	 * to rounding, so avoid doing that.  We trust that any double value that
+	 * compares strictly less than "(double) LONG_MAX" will cast to a
+	 * representable "long" value.
+	 */
+	return (x < (double) LONG_MAX) ? (long) x : LONG_MAX;
+}
+#endif							/* #ifndef __PG_QUERY_PLAN__ */
+#endif
+
 
 #ifndef __PG_QUERY_PLAN__
 /*
@@ -1442,6 +1482,9 @@ cost_subqueryscan(SubqueryScanPath *path, PlannerInfo *root,
 {
 	Cost		startup_cost;
 	Cost		run_cost;
+#if PG_VERSION_NUM >= 150000
+	List	   *qpquals;
+#endif
 	QualCost	qpqual_cost;
 	Cost		cpu_per_tuple;
 
@@ -1449,11 +1492,32 @@ cost_subqueryscan(SubqueryScanPath *path, PlannerInfo *root,
 	Assert(baserel->relid > 0);
 	Assert(baserel->rtekind == RTE_SUBQUERY);
 
+#if PG_VERSION_NUM >= 150000
+	/*
+	 * We compute the rowcount estimate as the subplan's estimate times the
+	 * selectivity of relevant restriction clauses.  In simple cases this will
+	 * come out the same as baserel->rows; but when dealing with parallelized
+	 * paths we must do it like this to get the right answer.
+	 */
+	if (param_info)
+		qpquals = list_concat_copy(param_info->ppi_clauses,
+								   baserel->baserestrictinfo);
+	else
+		qpquals = baserel->baserestrictinfo;
+
+	path->path.rows = clamp_row_est(path->subpath->rows *
+									clauselist_selectivity(root,
+														   qpquals,
+														   0,
+														   JOIN_INNER,
+														   NULL));
+#else
 	/* Mark the path with the correct row estimate */
 	if (param_info)
 		path->path.rows = param_info->ppi_rows;
 	else
 		path->path.rows = baserel->rows;
+#endif
 
 	/*
 	 * Cost of path is cost of evaluating the subplan, plus cost of evaluating
@@ -1468,7 +1532,11 @@ cost_subqueryscan(SubqueryScanPath *path, PlannerInfo *root,
 
 	startup_cost = qpqual_cost.startup;
 	cpu_per_tuple = cpu_tuple_cost + qpqual_cost.per_tuple;
+#if PG_VERSION_NUM >= 150000
+	run_cost = cpu_per_tuple * path->subpath->rows;
+#else
 	run_cost = cpu_per_tuple * baserel->tuples;
+#endif
 
 	/* tlist eval costs are paid per output row, not per tuple scanned */
 	startup_cost += path->path.pathtarget->cost.startup;
@@ -3083,8 +3151,13 @@ final_cost_nestloop(PlannerInfo *root, NestPath *path,
 					JoinPathExtraData *extra)
 #endif
 {
+#if PG_VERSION_NUM >= 150000
+	Path	   *outer_path = path->jpath.outerjoinpath;
+	Path	   *inner_path = path->jpath.innerjoinpath;
+#else
 	Path	   *outer_path = path->outerjoinpath;
 	Path	   *inner_path = path->innerjoinpath;
+#endif
 	double		outer_path_rows = outer_path->rows;
 	double		inner_path_rows = inner_path->rows;
 	Cost		startup_cost = workspace->startup_cost;
@@ -3099,12 +3172,28 @@ final_cost_nestloop(PlannerInfo *root, NestPath *path,
 	if (inner_path_rows <= 0)
 		inner_path_rows = 1;
 	/* Mark the path with the correct row estimate */
+#if PG_VERSION_NUM >= 150000
+	if (path->jpath.path.param_info)
+		path->jpath.path.rows = path->jpath.path.param_info->ppi_rows;
+	else
+		path->jpath.path.rows = path->jpath.path.parent->rows;
+#else
 	if (path->path.param_info)
 		path->path.rows = path->path.param_info->ppi_rows;
 	else
 		path->path.rows = path->path.parent->rows;
+#endif
 
 	/* For partial paths, scale row estimate. */
+#if PG_VERSION_NUM >= 150000
+	if (path->jpath.path.parallel_workers > 0)
+	{
+		double		parallel_divisor = get_parallel_divisor(&path->jpath.path);
+
+		path->jpath.path.rows =
+			clamp_row_est(path->jpath.path.rows / parallel_divisor);
+	}
+#else
 	if (path->path.parallel_workers > 0)
 	{
 		double		parallel_divisor = get_parallel_divisor(&path->path);
@@ -3112,6 +3201,7 @@ final_cost_nestloop(PlannerInfo *root, NestPath *path,
 		path->path.rows =
 			clamp_row_est(path->path.rows / parallel_divisor);
 	}
+#endif
 
 	/*
 	 * We could include disable_cost in the preliminary estimate, but that
@@ -3123,8 +3213,13 @@ final_cost_nestloop(PlannerInfo *root, NestPath *path,
 
 	/* cost of inner-relation source data (we already dealt with outer rel) */
 
+#if PG_VERSION_NUM >= 150000
+	if (path->jpath.jointype == JOIN_SEMI || path->jpath.jointype == JOIN_ANTI ||
+		extra->inner_unique)
+#else
 	if (path->jointype == JOIN_SEMI || path->jointype == JOIN_ANTI ||
 		extra->inner_unique)
+#endif
 	{
 		/*
 		 * With a SEMI or ANTI join, or if the innerrel is known unique, the
@@ -3241,17 +3336,29 @@ final_cost_nestloop(PlannerInfo *root, NestPath *path,
 	}
 
 	/* CPU costs */
+#if PG_VERSION_NUM >= 150000
+	cost_qual_eval(&restrict_qual_cost, path->jpath.joinrestrictinfo, root);
+#else
 	cost_qual_eval(&restrict_qual_cost, path->joinrestrictinfo, root);
+#endif
 	startup_cost += restrict_qual_cost.startup;
 	cpu_per_tuple = cpu_tuple_cost + restrict_qual_cost.per_tuple;
 	run_cost += cpu_per_tuple * ntuples;
 
 	/* tlist eval costs are paid per output row, not per tuple scanned */
+#if PG_VERSION_NUM >= 150000
+	startup_cost += path->jpath.path.pathtarget->cost.startup;
+	run_cost += path->jpath.path.pathtarget->cost.per_tuple * path->jpath.path.rows;
+
+	path->jpath.path.startup_cost = startup_cost;
+	path->jpath.path.total_cost = startup_cost + run_cost;
+#else
 	startup_cost += path->path.pathtarget->cost.startup;
 	run_cost += path->path.pathtarget->cost.per_tuple * path->path.rows;
 
 	path->path.startup_cost = startup_cost;
 	path->path.total_cost = startup_cost + run_cost;
+#endif
 }
 
 /*
@@ -4484,6 +4591,7 @@ cost_qual_eval_node(QualCost *cost, Node *qual, PlannerInfo *root)
 }
 #endif							/* #ifndef __PG_QUERY_PLAN__ */
 
+#if PG_VERSION_NUM < 150000
 static bool
 cost_qual_eval_walker(Node *node, cost_qual_eval_context *context)
 {
@@ -4632,6 +4740,14 @@ cost_qual_eval_walker(Node *node, cost_qual_eval_context *context)
 		 */
 		return false;			/* don't recurse into children */
 	}
+#if PG_VERSION_NUM >= 150000
+	else if (IsA(node, GroupingFunc))
+	{
+		/* Treat this as having cost 1 */
+		context->total.per_tuple += cpu_operator_cost;
+		return false;			/* don't recurse into children */
+	}
+#endif
 	else if (IsA(node, CoerceViaIO))
 	{
 		CoerceViaIO *iocoerce = (CoerceViaIO *) node;
@@ -4746,6 +4862,7 @@ cost_qual_eval_walker(Node *node, cost_qual_eval_context *context)
 	return expression_tree_walker(node, cost_qual_eval_walker,
 								  (void *) context);
 }
+#endif /* #if PG_VERSION_NUM < 150000 */
 
 /*
  * get_restriction_qual_cost
@@ -4922,9 +5039,18 @@ compute_semi_anti_join_factors(PlannerInfo *root,
  * expensive.
  */
 static bool
+#if PG_VERSION_NUM >= 150000
+has_indexed_join_quals(NestPath *path)
+#else
 has_indexed_join_quals(NestPath *joinpath)
+#endif
 {
+#if PG_VERSION_NUM >= 150000
+	JoinPath   *joinpath = &path->jpath;
 	Relids		joinrelids = joinpath->path.parent->relids;
+#else
+	Relids		joinrelids = joinpath->path.parent->relids;
+#endif
 	Path	   *innerpath = joinpath->innerjoinpath;
 	List	   *indexclauses;
 	bool		found_one;
@@ -5842,11 +5968,20 @@ set_cte_size_estimates(PlannerInfo *root, RelOptInfo *rel, double cte_rows)
 
 	if (rte->self_reference)
 	{
+#if PG_VERSION_NUM >= 150000
+		/*
+		 * In a self-reference, we assume the average worktable size is a
+		 * multiple of the nonrecursive term's size.  The best multiplier will
+		 * vary depending on query "fan-out", so make its value adjustable.
+		 */
+		rel->tuples = clamp_row_est(recursive_worktable_factor * cte_rows);
+#else
 		/*
 		 * In a self-reference, arbitrarily assume the average worktable size
 		 * is about 10 times the nonrecursive term's size.
 		 */
 		rel->tuples = 10 * cte_rows;
+#endif
 	}
 	else
 	{
@@ -6154,7 +6289,12 @@ set_pathtarget_cost_width(PlannerInfo *root, PathTarget *target)
 			Assert(var->varlevelsup == 0);
 
 			/* Try to get data from RelOptInfo cache */
+#if PG_VERSION_NUM >= 150000
+			if (!IS_SPECIAL_VARNO(var->varno) &&
+				var->varno < root->simple_rel_array_size)
+#else
 			if (var->varno < root->simple_rel_array_size)
+#endif
 			{
 				RelOptInfo *rel = root->simple_rel_array[var->varno];
 
