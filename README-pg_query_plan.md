@@ -24,7 +24,7 @@ https://user-images.githubusercontent.com/7246769/126768894-a5bca8e6-8b5a-4bc0-b
 ## 1. Installation and Setting
 
 
-pg_query_plan currently supports PostgreSQL 13 and 14, and it can be installed by running the usual installing process shown below.
+pg_query_plan currently supports PostgreSQL 13, 14 and 15, and it can be installed by running the usual installing process shown below.
 
 ```
 $ cd postgresql/contrib
@@ -51,7 +51,7 @@ If you need to execute the function on other databases, you will have to issue t
 $ psql -f share/contrib/pg_query_plan--1.0.sql DATABASE_YOU_WANT_TO_USE
 ```
 
-##### version 14
+##### version 14, 15
 
 ```
 $ psql -f share/postgresql/contrib/pg_query_plan--1.0.sql DATABASE_YOU_WANT_TO_USE
