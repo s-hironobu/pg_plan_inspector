@@ -4,7 +4,7 @@
  * Show the query plan of the running query. And, similar to auto_explain,
  * store the executed plan into the query_plan.log table in postgres database.
  *
- * Copyright (c) 2021-2022, Hironobu Suzuki @ interdb.jp
+ * Copyright (c) 2021-2023, Hironobu Suzuki @ interdb.jp
  *
  *-------------------------------------------------------------------------
  */

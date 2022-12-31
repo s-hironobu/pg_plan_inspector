@@ -1,7 +1,7 @@
 /*
  * adjust_rows.h
  *
- * Copyright (c) 2021-2022, Hironobu Suzuki @ interdb.jp
+ * Copyright (c) 2021-2023, Hironobu Suzuki @ interdb.jp
  *
  */
 #ifndef __ADJUST_ROWS_H_

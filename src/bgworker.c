@@ -19,7 +19,7 @@
  * the message broker systems such as Kafka. However, the specifics
  * such as the schedule have not been decided yet.
  *
- * Copyright (c) 2021-2022, Hironobu Suzuki @ interdb.jp
+ * Copyright (c) 2021-2023, Hironobu Suzuki @ interdb.jp
  *
  *-------------------------------------------------------------------------
  */

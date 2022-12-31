@@ -4,7 +4,7 @@
  * param_parser.y and param_scanner.l are to parase the regression params
  * in the query_plan.reg table.
  *
- * Copyright (c) 2021-2022, Hironobu Suzuki @ interdb.jp
+ * Copyright (c) 2021-2023, Hironobu Suzuki @ interdb.jp
  *
  *-------------------------------------------------------------------------
  */

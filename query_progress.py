@@ -11,7 +11,7 @@ Usage:
 
   Formatted by black (https://pypi.org/project/black/)
 
-  Copyright (c) 2021-2022, Hironobu Suzuki @ interdb.jp
+  Copyright (c) 2021-2023, Hironobu Suzuki @ interdb.jp
 """
 
 import psycopg2

@@ -3,7 +3,7 @@ rules.py
 
   Formatted by black (https://pypi.org/project/black/)
 
-  Copyright (c) 20212-2022, Hironobu Suzuki @ interdb.jp
+  Copyright (c) 20212-2023, Hironobu Suzuki @ interdb.jp
 """
 
 from .common import Common, State, Log
