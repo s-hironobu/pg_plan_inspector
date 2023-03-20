@@ -90,7 +90,10 @@ class GetTables(MergePlan):
             _nested_level = _row[5]
             _queryid = int(_row[6])
             _query = _row[7]
-            _planid = int(_row[8])
+            if _row[8] is not None:
+                _planid = int(_row[8])
+            else:
+                continue
             _plan = _row[9]
             _plan_json = _row[10]
 
