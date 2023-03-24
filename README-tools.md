@@ -1,7 +1,13 @@
 Demonstration
 =============
 
-## Finding functional dependency
+## Contents
+
+1. [Finding functional dependency](#1-finding-functional-dependency)  
+2. [Adaptive work memory expansion](#2-adaptive-work-memory-expansion)
+
+
+## 1. Finding functional dependency
 
 I demonstrate how to find a functional dependency between the attributes of the table using an extreme example.
 
@@ -150,3 +156,122 @@ This is an ad hoc, however, at least it shows that the functional dependencies c
 
 #### Note
 As you have already noticed, similar functionality can also be implemented using the auto_explain module, not the pg_query_plan module.
+
+
+## 2. Adaptive work memory expansion
+
+This feature is an experimental implementation,
+and it temporarily expands the work_mem area during this query execution if the query has ever used temporary files.
+
+
+Let us see an example.
+
+
+At first, we execute the following query twice.
+
+
+```
+postgres=# SELECT id FROM tbl_big ORDER BY id DESC;
+```
+
+As shown the following result, The query used temporary files for sorting.
+
+
+```
+postgres=# select seqid, queryid, query, planid,plan from query_plan.log where queryid = '4294305104826516741';
+-[ RECORD 1 ]-------------------------------------------------------------------------------------------------------
+seqid   | 1381
+queryid | 4294305104826516741
+query   | SELECT id FROM tbl_big ORDER BY id DESC;
+planid  | 6000439534193952791
+plan    | Sort  (cost=127757.69..130257.70 rows=1000003 width=4) (actual rows=1000003 loops=1)                      +
+        |   Output: id                                                                                              +
+        |   Sort Key: tbl_big.id DESC                                                                               +
+        |   Sort Method: external merge  Disk: 11768kB                                                              +
+        |   ->  Seq Scan on public.tbl_big  (cost=0.00..14425.03 rows=1000003 width=4) (actual rows=1000003 loops=1)+
+        |         Output: id                                                                                        +
+        |
+-[ RECORD 2 ]-------------------------------------------------------------------------------------------------------
+seqid   | 1383
+queryid | 4294305104826516741
+query   | SELECT id FROM tbl_big ORDER BY id DESC;
+planid  | 6000439534193952791
+plan    | Sort  (cost=127757.69..130257.70 rows=1000003 width=4) (actual rows=1000003 loops=1)                      +
+        |   Output: id                                                                                              +
+        |   Sort Key: tbl_big.id DESC                                                                               +
+        |   Sort Method: external merge  Disk: 11768kB                                                              +
+        |   ->  Seq Scan on public.tbl_big  (cost=0.00..14425.03 rows=1000003 width=4) (actual rows=1000003 loops=1)+
+        |         Output: id                                                                                        +
+        |
+```
+
+
+We do repo_mgr.py with get and push commands for updating the query_plan.reg table.
+
+
+```
+$ ./repo_mgr.py get --basedir test_repo server_1
+Use test_repo/pgpi_repository:
+Info: Connection established to 'server_1'.
+Info: Getting query_plan.log table data.
+Info: Connection closed.
+Info: Grouping json formated plans.
+Info: Calculating regression parameters.
+$ ./repo_mgr.py push --basedir test_repo server_1
+Use test_repo/pgpi_repository:
+```
+
+After that, we execute the SEELCT command again.
+
+```
+postgres=# SELECT id FROM tbl_big ORDER BY id DESC;
+```
+
+At this time,
+PostgreSQL temporarily expands the work_mem area during the query execution
+because PostgreSQL recognizes that this query needs more work_mem by using the query_plan.reg.
+
+
+See the following RECORD 3.
+You can confirm that PostgreSQL used the work_mem instead of temporary files for sorting tuples.
+
+
+```
+postgres=# select seqid, queryid, query, planid,plan from query_plan.log where queryid = '4294305104826516741';
+-[ RECORD 1 ]-------------------------------------------------------------------------------------------------------
+seqid   | 1381
+queryid | 4294305104826516741
+query   | SELECT id FROM tbl_big ORDER BY id DESC;
+planid  | 6000439534193952791
+plan    | Sort  (cost=127757.69..130257.70 rows=1000003 width=4) (actual rows=1000003 loops=1)                      +
+        |   Output: id                                                                                              +
+        |   Sort Key: tbl_big.id DESC                                                                               +
+        |   Sort Method: external merge  Disk: 11768kB                                                              +
+        |   ->  Seq Scan on public.tbl_big  (cost=0.00..14425.03 rows=1000003 width=4) (actual rows=1000003 loops=1)+
+        |         Output: id                                                                                        +
+        |
+-[ RECORD 2 ]-------------------------------------------------------------------------------------------------------
+seqid   | 1383
+queryid | 4294305104826516741
+query   | SELECT id FROM tbl_big ORDER BY id DESC;
+planid  | 6000439534193952791
+plan    | Sort  (cost=127757.69..130257.70 rows=1000003 width=4) (actual rows=1000003 loops=1)                      +
+        |   Output: id                                                                                              +
+        |   Sort Key: tbl_big.id DESC                                                                               +
+        |   Sort Method: external merge  Disk: 11768kB                                                              +
+        |   ->  Seq Scan on public.tbl_big  (cost=0.00..14425.03 rows=1000003 width=4) (actual rows=1000003 loops=1)+
+        |         Output: id                                                                                        +
+        |
+-[ RECORD 3 ]-------------------------------------------------------------------------------------------------------
+seqid   | 1390
+queryid | 4294305104826516741
+query   | SELECT id FROM tbl_big ORDER BY id DESC;
+planid  | 16216934002595222227
+plan    | Sort  (cost=127757.69..130257.70 rows=1000003 width=4) (actual rows=1000003 loops=1)                      +
+        |   Output: id                                                                                              +
+        |   Sort Key: tbl_big.id DESC                                                                               +
+        |   Sort Method: quicksort  Memory: 24577kB                                                                 +
+        |   ->  Seq Scan on public.tbl_big  (cost=0.00..14425.03 rows=1000003 width=4) (actual rows=1000003 loops=1)+
+        |         Output: id                                                                                        +
+        |
+```

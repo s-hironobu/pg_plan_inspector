@@ -1188,11 +1188,6 @@ pgqp_set_join_pathlist(PlannerInfo *root, RelOptInfo *joinrel,
 /*
  * Fetch rows from query_plan.reg table
  */
-/* query_plan.reg */
-#define Natts_reg					2
-#define Anum_reg_queryid 1		/* text */
-#define Anum_reg_params  2		/* text */
-
 char *
 selectParams(const char *queryid)
 {

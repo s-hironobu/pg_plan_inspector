@@ -203,5 +203,6 @@ Version 0.2 (POC model)
 
 ## Change Log
 
+ - 24th March 2023: Added an experimental feature that temporarily expands the work_mem area during the query execution. See [README-tools.md](./README-tools.md).
  - 15th December 2021: Version 0.2 Released.
  - 28th July 2021: Version 0.1 Released.

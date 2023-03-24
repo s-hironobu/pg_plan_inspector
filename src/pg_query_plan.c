@@ -11,6 +11,7 @@
 #include "postgres.h"
 
 #define __ADJUST_ROWS__
+#define __ADAPT_WORK_MEM__
 
 #include "funcapi.h"
 #include "libpq/pqsignal.h"
@@ -67,6 +68,18 @@
 #include "planid.h"
 #include "param.h"
 
+#ifdef __ADAPT_WORK_MEM__
+#include "access/skey.h"
+#include "access/relscan.h"
+#include "access/genam.h"
+#include "access/table.h"
+#include "catalog/namespace.h"
+#include "utils/fmgroids.h"
+#include "utils/guc.h"
+#include "utils/lsyscache.h"
+#include "utils/rel.h"
+#endif
+
 PG_MODULE_MAGIC;
 
 #ifdef __ADJUST_ROWS__
@@ -101,6 +114,11 @@ bool		pgqp_enable_adjust_rel_rows;
 static bool pgqp_log_buffers;
 static bool pgqp_log_wal;
 #endif
+#ifdef __ADAPT_WORK_MEM__
+static bool pgqp_work_mem;
+static int tmp_work_mem;
+#endif
+
 bool		pgqp_received_signal;
 
 /* Query info */
@@ -152,6 +170,7 @@ set_rel_pathlist_hook_type prev_set_rel_pathlist = NULL;
 set_join_pathlist_hook_type prev_set_join_pathlist = NULL;
 #endif
 
+
 /*
  * Function declarations
  */
@@ -194,6 +213,10 @@ static void init_pgqp(struct queryPlanData *qpd, struct queryInfo *qi);
 static bool checkConditionOfLogInsertion(const int pid,
 										 const TimestampTz currentTimestamp);
 static void sig_get_query_plan(SIGNAL_ARGS);
+#ifdef __ADAPT_WORK_MEM__
+static int get_sort_space_used(const uint64 queryId);
+static void set_work_mem(const int wm);
+#endif
 
 Datum		pg_query_plan(PG_FUNCTION_ARGS);
 Datum		get_planid(PG_FUNCTION_ARGS);
@@ -729,6 +752,68 @@ pgqp_post_parse_analyze(ParseState *pstate, Query *query)
 }
 #endif
 
+#ifdef __ADAPT_WORK_MEM__
+static void
+set_work_mem(const int wm)
+{
+	char buf[32];
+	sprintf(buf, "%i", wm);
+	SetConfigOption("work_mem", buf, PGC_USERSET, PGC_S_SESSION);
+}
+
+static int
+get_sort_space_used(const uint64 queryId)
+{
+	char		queryid[32];
+	Relation	rel = NULL;
+	Oid			relationId;
+	Oid			relationPkeyId;
+	ScanKeyData scanKey;
+	SysScanDesc scanDescriptor = NULL;
+	int			scanKeyCount = 1;
+	bool		indexOK = true;
+	HeapTuple	heapTuple = NULL;
+	int			sort_space_used = 0;
+
+	sprintf(queryid, "%lu", queryId);
+
+	relationId = get_relname_relid("reg", LookupExplicitNamespace("query_plan", true));
+	relationPkeyId = get_relname_relid("reg_pkey", LookupExplicitNamespace("query_plan", true));
+
+	if (relationId == InvalidOid)
+		return -1;
+
+	rel = table_open(relationId, AccessShareLock);
+	if (rel == NULL)
+		return -1;
+
+	ScanKeyInit(&scanKey, Anum_reg_queryid,
+				BTEqualStrategyNumber, F_TEXTEQ, CStringGetTextDatum(queryid));
+	scanDescriptor = systable_beginscan(rel, relationPkeyId, indexOK, NULL, scanKeyCount, &scanKey);
+	heapTuple = systable_getnext(scanDescriptor);
+
+	while (HeapTupleIsValid(heapTuple))
+	{
+		TupleDesc	tupleDescriptor = RelationGetDescr(rel);
+		bool		isNullArray[Natts_reg];
+		Datum		datumArray[Natts_reg];
+
+		heap_deform_tuple(heapTuple, tupleDescriptor, datumArray, isNullArray);
+		if (!isNullArray[Anum_reg_sort_space_used - 1])
+		{
+			sort_space_used = DatumGetInt32(datumArray[Anum_reg_sort_space_used - 1]);
+			break;
+		}
+		heapTuple = systable_getnext(scanDescriptor);
+	}
+
+	systable_endscan(scanDescriptor);
+	table_close(rel, NoLock);
+
+	return sort_space_used;
+}
+#endif
+
 /*
  * ExecutorStart hook
  */
@@ -737,10 +822,17 @@ pgqp_ExecutorStart(QueryDesc *queryDesc, int eflags)
 {
 	int			instrument_options = 0;
 	int			leader_pid;
-
+#ifdef __ADAPT_WORK_MEM__
+	int			sort_space_used = 0;
+	tmp_work_mem = 0;
+#endif
 
 #ifdef __DEBUG__
 	/* _test_count_hashtable(); */
+#endif
+
+#ifdef __ADAPT_WORK_MEM__
+	pgqp_work_mem = false;
 #endif
 
 	/*
@@ -777,6 +869,25 @@ pgqp_ExecutorStart(QueryDesc *queryDesc, int eflags)
 			}
 		}
 	}
+
+#ifdef __ADAPT_WORK_MEM__
+	/*
+	 * Experimental implementation:
+	 * It temporarily expands the work_mem area during this query execution
+	 * if the query has ever used temporary files.
+	 */
+	if ((sort_space_used = get_sort_space_used(queryDesc->plannedstmt->queryId)) > 0)
+	{
+		int wm;
+
+		pgqp_work_mem = true;
+		tmp_work_mem = atoi(GetConfigOption("work_mem", true, true));
+		wm = sort_space_used + tmp_work_mem;
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define MAX_WORK_MEM (1024 * 200) /* 200MB */
+		set_work_mem(MIN(wm * 8, MAX_WORK_MEM)); /* wm*8 is heuristics. */
+	}
+#endif
 
 	queryId[nested_level] = queryDesc->plannedstmt->queryId;
 	starttime[nested_level] = GetCurrentTimestamp();
@@ -881,13 +992,20 @@ pgqp_ExecutorEnd(QueryDesc *queryDesc)
 {
 	TimestampTz currentTimestamp = GetCurrentTimestamp();
 
+#ifdef __ADAPT_WORK_MEM__
+	if (pgqp_work_mem == true)
+		set_work_mem(tmp_work_mem);
+#endif
+
 	if (checkConditionOfLogInsertion(MyProcPid, currentTimestamp))
 	{
 		/* Store the query strings and executed plan to the ring buffer. */
 		qi.starttime = starttime[nested_level];
 		qi.endtime = currentTimestamp;
 
-		store_plan(qi, nested_level, queryId[nested_level]);
+		/* Only SELECT commands are stored. */
+		if (queryDesc->operation == CMD_SELECT)
+			store_plan(qi, nested_level, queryId[nested_level]);
 	}
 
 	if (prev_ExecutorEnd)

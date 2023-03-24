@@ -645,11 +645,64 @@ class Regression(Repository, CalcRegression):
         self._count = 0
         op(Plans, reg_param, queryid, planid)
 
+
+    def __get_sort_space_used(self, Plans, queryid, planid):
+        """
+        Get "Sort Space Used" if "Sort Space Type" is "Disk"
+
+        Parameters
+        ----------
+        Plans : dict
+          A plan grouped with the same queryid-planid.
+        queryid : int
+        planid : int
+
+        Returns
+        -------
+        Max "Sort Space Used" value.
+
+        """
+
+        def incr(plan):
+            if "Node Type" in plan:
+                self._count += 1
+
+        def pickup_sort_space_used(plan, queryid, planid):
+            self.__incr_level()
+            if "Sort Space Type" in plan:
+                _type = plan["Sort Space Type"]
+                _used = plan["Sort Space Used"]
+                for i in range(len(_type)):
+                    if _type[i] == "Disk":
+                        if self._max_sort_space_used < _used[i]:
+                            self._max_sort_space_used = _used[i]
+
+        def op(Plans, queryid, planid):
+            if isinstance(Plans, list):
+                for i in range(0, len(Plans)):
+                    incr(Plans[i])
+                    pickup_sort_space_used(Plans[i], queryid, planid)
+                    if "Plans" in Plans[i]:
+                        op(Plans[i]["Plans"], queryid, planid)
+                return
+            else:
+                incr(Plans)
+                pickup_sort_space_used(Plans, queryid, planid)
+                if "Plans" in Plans:
+                    op(Plans["Plans"], queryid, planid)
+                return
+
+        # Main procedure.
+        self._count = 0
+        self._max_sort_space_used = 0
+        op(Plans, queryid, planid)
+        return None if self._max_sort_space_used == 0 else self._max_sort_space_used
+
     """
     Public method
     """
 
-    def regression(self, serverId):
+    def regression(self, serverId, work_mem=True):
         """
         Calculate the regression parameters of all serverId's query plans
         in the repository.
@@ -718,6 +771,15 @@ class Regression(Repository, CalcRegression):
                         self.__regression(
                             _json_dict["Plan"], _reg_param["Plan"], _queryid, _planid
                         )
+
+                        """
+                        Add "Sort Space Used" item if "Sort Space Type" is "Disk".
+                        """
+                        if work_mem == True:
+                            self.__init_level()
+                            _max_sort_space_used = self.__get_sort_space_used(_json_dict["Plan"], _queryid, _planid)
+                            if _max_sort_space_used is not None:
+                                _reg_param.update({'SortSpaceUsed': _max_sort_space_used})
 
                         """
                         Write the result (regression parameters) to the regression

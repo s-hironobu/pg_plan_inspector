@@ -309,7 +309,7 @@ class PushParam(Database, Repository):
         _sql = "CREATE SCHEMA IF NOT EXISTS " + self.SCHEMA + ";"
         self.__execute_sql(connection, _sql)
 
-    def __create_table(self, connection):
+    def __create_table(self, connection, work_mem):
         _sql = (
             "CREATE TABLE IF NOT EXISTS "
             + self.SCHEMA
@@ -318,6 +318,8 @@ class PushParam(Database, Repository):
             + " ("
         )
         _sql += "queryid TEXT PRIMARY KEY,"
+        if work_mem == True:
+            _sql += "sort_space_used INT,"
         _sql += "params TEXT NOT NULL"
         _sql += ");"
         self.__execute_sql(connection, _sql)
@@ -326,7 +328,7 @@ class PushParam(Database, Repository):
         _sql = "TRUNCATE " + self.SCHEMA + "." + self.REG_PARAMS_TABLE + ";"
         self.__execute_sql(connection, _sql)
 
-    def __insert_reg_params(self, connection, serverId, queryid_list):
+    def __insert_reg_params(self, connection, serverId, queryid_list, work_mem):
         _cur = connection.cursor()
         try:
             _cur.execute("START TRANSACTION;")
@@ -340,6 +342,10 @@ class PushParam(Database, Repository):
             _reg_path = self.get_regression_param(serverId, _queryid, _planid)
 
             _result = self.__transform(_reg_path)
+            _sort_space_used = None
+            if work_mem == True:
+                if "SortSpaceUsed" in _reg_path:
+                    _sort_space_used = _reg_path["SortSpaceUsed"]
 
             if Log.debug3 <= self.LogLevel:
                 print(
@@ -352,12 +358,18 @@ class PushParam(Database, Repository):
                 "INSERT INTO "
                 + self.SCHEMA
                 + "."
-                + self.REG_PARAMS_TABLE
-                + " (queryid, params) VALUES ("
-            )
+                + self.REG_PARAMS_TABLE)
+
+            if _sort_space_used is None:
+                _sql += " (queryid, params) VALUES ("
+            else:
+                _sql += " (queryid, sort_space_used, params) VALUES ("
             _sql += "'" + str(_queryid) + "',"
+            if _sort_space_used is not None:
+                _sql += str(int(_sort_space_used)) + ","
             _sql += "'" + str(_result).replace("'", '"') + "'"
             _sql += ");"
+
             try:
                 _cur.execute(_sql)
             except Exception as err:
@@ -382,7 +394,7 @@ class PushParam(Database, Repository):
     Public method
     """
 
-    def push_param(self, serverId):
+    def push_param(self, serverId, work_mem=True):
         """
         Check formatted regression params subdir, and create it if not exists.
         """
@@ -436,14 +448,14 @@ class PushParam(Database, Repository):
 
             if self.__check_table(_connection):
                 self.__truncate_table(_connection)
-                self.truncate_formatted_regression_params(serverId)
             else:
-                self.__create_table(_connection)
+                self.__create_table(_connection, work_mem)
 
             """
             Insert reg_param
             """
-            self.__insert_reg_params(_connection, serverId, _queryid_list)
+            self.truncate_formatted_regression_params(serverId)
+            self.__insert_reg_params(_connection, serverId, _queryid_list, work_mem)
 
             _connection.close()
 
