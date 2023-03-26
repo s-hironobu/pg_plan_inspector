@@ -645,7 +645,6 @@ class Regression(Repository, CalcRegression):
         self._count = 0
         op(Plans, reg_param, queryid, planid)
 
-
     def __get_sort_space_used(self, Plans, queryid, planid):
         """
         Get "Sort Space Used" if "Sort Space Type" is "Disk"
@@ -777,9 +776,13 @@ class Regression(Repository, CalcRegression):
                         """
                         if work_mem == True:
                             self.__init_level()
-                            _max_sort_space_used = self.__get_sort_space_used(_json_dict["Plan"], _queryid, _planid)
+                            _max_sort_space_used = self.__get_sort_space_used(
+                                _json_dict["Plan"], _queryid, _planid
+                            )
                             if _max_sort_space_used is not None:
-                                _reg_param.update({'SortSpaceUsed': _max_sort_space_used})
+                                _reg_param.update(
+                                    {"SortSpaceUsed": _max_sort_space_used}
+                                )
 
                         """
                         Write the result (regression parameters) to the regression

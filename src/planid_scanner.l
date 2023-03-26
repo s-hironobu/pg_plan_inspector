@@ -55,7 +55,7 @@ static struct _InputBufInfo bufInfo;
 
 ("\"Filter\""|"\"Join Filter\""|"\"Conflict Filter\""|"\"Merge Cond\""|"\"Hash Cond\""|"\"Index Cond\""|"\"TID Cond\""|"\"Recheck Cond\"") { plan_lval.key = strdup(yytext); DEBUG_ECHO; return KEY; }
 
-("\"Node Type\""|"\"Parent Relationship\""|"\"Relation Name\""|"\"Function Name\""|"\"Index Name\""|"\"CTE Name\""|"\"Relation\""|"\"Schema\""|"\"Alias\""|"\"Output\""|"\"Scan Direction\""|"\"Strategy\""|"\"Join Type\""|"\"Sort Method\""|"\"Sort Key\""|"\"Operation\""|"\"Subplan Name\""|"\"Command\""|"\"Triggers\""|"\"Trigger\""|"\"Trigger Name\""|"\"Constraint Name\""|"\"Group Key\""|"\"Grouping Sets\""|"\"Group Keys\""|"\"Hash Keys\""|"\"Hash Key\""|"\"Partial Mode\""|"\"Inner Unique\"") { plan_lval.key_with_value = strdup(yytext); DEBUG_ECHO; return KEY_WITH_VALUE; }
+("\"Node Type\""|"\"Parent Relationship\""|"\"Relation Name\""|"\"Function Name\""|"\"Index Name\""|"\"CTE Name\""|"\"Relation\""|"\"Schema\""|"\"Alias\""|"\"Output\""|"\"Scan Direction\""|"\"Strategy\""|"\"Join Type\""|"\"Sort Key\""|"\"Operation\""|"\"Subplan Name\""|"\"Command\""|"\"Triggers\""|"\"Trigger\""|"\"Trigger Name\""|"\"Constraint Name\""|"\"Group Key\""|"\"Grouping Sets\""|"\"Group Keys\""|"\"Hash Keys\""|"\"Hash Key\""|"\"Partial Mode\""|"\"Inner Unique\"") { plan_lval.key_with_value = strdup(yytext); DEBUG_ECHO; return KEY_WITH_VALUE; }
 
 [0-9]+ { DEBUG_ECHO; plan_lval.integer = atoi(yytext); return _INTEGER; }
 

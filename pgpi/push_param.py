@@ -178,7 +178,7 @@ class PushParam(Database, Repository):
             if "MergeFlag" in plan:
                 if Log.debug3 <= self.LogLevel:
                     print("Debug3:    MergeFlag={}".format(plan["MergeFlag"]))
-                _items = _items + "\"" + str(plan["MergeFlag"]) + "\""
+                _items = _items + '"' + str(plan["MergeFlag"]) + '"'
             else:
                 _items = _items + "[]"
 
@@ -354,11 +354,7 @@ class PushParam(Database, Repository):
                     )
                 )
 
-            _sql = (
-                "INSERT INTO "
-                + self.SCHEMA
-                + "."
-                + self.REG_PARAMS_TABLE)
+            _sql = "INSERT INTO " + self.SCHEMA + "." + self.REG_PARAMS_TABLE
 
             if _sort_space_used is None:
                 _sql += " (queryid, params) VALUES ("
