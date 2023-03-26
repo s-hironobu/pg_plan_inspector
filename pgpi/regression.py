@@ -647,7 +647,7 @@ class Regression(Repository, CalcRegression):
 
     def __get_sort_space_used(self, Plans, queryid, planid):
         """
-        Get "Sort Space Used" if "Sort Space Type" is "Disk"
+        Get and return the max "Sort Space Used" value if "Sort Space Type" is "Disk"
 
         Parameters
         ----------
@@ -662,12 +662,7 @@ class Regression(Repository, CalcRegression):
 
         """
 
-        def incr(plan):
-            if "Node Type" in plan:
-                self._count += 1
-
         def pickup_sort_space_used(plan, queryid, planid):
-            self.__incr_level()
             if "Sort Space Type" in plan:
                 _type = plan["Sort Space Type"]
                 _used = plan["Sort Space Used"]
@@ -679,20 +674,17 @@ class Regression(Repository, CalcRegression):
         def op(Plans, queryid, planid):
             if isinstance(Plans, list):
                 for i in range(0, len(Plans)):
-                    incr(Plans[i])
                     pickup_sort_space_used(Plans[i], queryid, planid)
                     if "Plans" in Plans[i]:
                         op(Plans[i]["Plans"], queryid, planid)
                 return
             else:
-                incr(Plans)
                 pickup_sort_space_used(Plans, queryid, planid)
                 if "Plans" in Plans:
                     op(Plans["Plans"], queryid, planid)
                 return
 
         # Main procedure.
-        self._count = 0
         self._max_sort_space_used = 0
         op(Plans, queryid, planid)
         return None if self._max_sort_space_used == 0 else self._max_sort_space_used
