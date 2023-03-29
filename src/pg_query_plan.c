@@ -86,7 +86,7 @@ PG_MODULE_MAGIC;
 extern CurrentState current_state;
 extern regParams reg_params;
 extern bool pgqp_adjust_rows;
-extern char	   *pgqp_json_plan;
+extern char *pgqp_json_plan;
 #endif
 
 /* Link to shared memory state */
@@ -116,7 +116,7 @@ static bool pgqp_log_wal;
 #endif
 #ifdef __ADAPT_WORK_MEM__
 static bool pgqp_work_mem;
-static int tmp_work_mem;
+static int	tmp_work_mem;
 #endif
 
 bool		pgqp_received_signal;
@@ -214,7 +214,7 @@ static bool checkConditionOfLogInsertion(const int pid,
 										 const TimestampTz currentTimestamp);
 static void sig_get_query_plan(SIGNAL_ARGS);
 #ifdef __ADAPT_WORK_MEM__
-static int get_sort_space_used(const uint64 queryId);
+static int	get_sort_space_used(const uint64 queryId);
 static void set_work_mem(const int wm);
 #endif
 
@@ -756,7 +756,8 @@ pgqp_post_parse_analyze(ParseState *pstate, Query *query)
 static void
 set_work_mem(const int wm)
 {
-	char buf[32];
+	char		buf[32];
+
 	sprintf(buf, "%i", wm);
 	SetConfigOption("work_mem", buf, PGC_USERSET, PGC_S_SESSION);
 }
@@ -824,6 +825,7 @@ pgqp_ExecutorStart(QueryDesc *queryDesc, int eflags)
 	int			leader_pid;
 #ifdef __ADAPT_WORK_MEM__
 	int			sort_space_used = 0;
+
 	tmp_work_mem = 0;
 #endif
 
@@ -871,21 +873,21 @@ pgqp_ExecutorStart(QueryDesc *queryDesc, int eflags)
 	}
 
 #ifdef __ADAPT_WORK_MEM__
+
 	/*
-	 * Experimental implementation:
-	 * It temporarily expands the work_mem area during this query execution
-	 * if the query has ever used temporary files.
+	 * Experimental implementation: It temporarily expands the work_mem area
+	 * during this query execution if the query has ever used temporary files.
 	 */
 	if ((sort_space_used = get_sort_space_used(queryDesc->plannedstmt->queryId)) > 0)
 	{
-		int wm;
+		int			wm;
 
 		pgqp_work_mem = true;
 		tmp_work_mem = atoi(GetConfigOption("work_mem", true, true));
 		wm = sort_space_used + tmp_work_mem;
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
-#define MAX_WORK_MEM (1024 * 200) /* 200MB */
-		set_work_mem(MIN(wm * 8, MAX_WORK_MEM)); /* wm*8 is heuristics. */
+#define MAX_WORK_MEM (1024 * 200)	/* 200MB */
+		set_work_mem(MIN(wm * 8, MAX_WORK_MEM));	/* wm*8 is heuristics. */
 	}
 #endif
 

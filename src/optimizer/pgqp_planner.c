@@ -697,6 +697,7 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 #endif
 
 #if PG_VERSION_NUM >= 150000
+
 	/*
 	 * If it's a MERGE command, transform the joinlist as appropriate.
 	 */
@@ -4943,7 +4944,7 @@ create_distinct_paths(PlannerInfo *root,
 
 	return distinct_rel;
 }
-#endif /* #if PG_VERSION_NUM >= 150000 */
+#endif							/* #if PG_VERSION_NUM >= 150000 */
 
 /*
  * create_ordered_paths

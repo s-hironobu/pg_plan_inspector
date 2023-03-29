@@ -1879,6 +1879,7 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 			}
 
 #if PG_VERSION_NUM >= 150000
+
 			/*
 			 * When building a fractional path, determine a cheapest
 			 * fractional path for each child relation too. Looking at startup
@@ -1911,6 +1912,7 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 					cheapest_fractional = cheapest_total;
 			}
 #endif
+
 			/*
 			 * Notice whether we actually have different paths for the
 			 * "cheapest" and "total" cases; frequently there will be no point
@@ -2725,6 +2727,7 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	pfree(safetyInfo.unsafeColumns);
 
 #if PG_VERSION_NUM >= 150000
+
 	/*
 	 * The upper query might not use all the subquery's output columns; if
 	 * not, we can simplify.  Pass the attributes that were pushed down into
@@ -2733,6 +2736,7 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	 */
 	remove_unused_subquery_outputs(subquery, rel, run_cond_attrs);
 #else
+
 	/*
 	 * The upper query might not use all the subquery's output columns; if
 	 * not, we can simplify.
@@ -4254,6 +4258,7 @@ remove_unused_subquery_outputs(Query *subquery, RelOptInfo *rel)
 	ListCell   *lc;
 
 #if PG_VERSION_NUM >= 150000
+
 	/*
 	 * Just point directly to extra_used_attrs. No need to bms_copy as none of
 	 * the current callers use the Bitmapset after calling this function.

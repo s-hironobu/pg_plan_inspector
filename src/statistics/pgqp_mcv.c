@@ -467,7 +467,7 @@ build_distinct_groups(int numrows, SortItem *items, MultiSortSupport mss,
 #else
 	pg_qsort((void *) groups, ngroups, sizeof(SortItem),
 			 compare_sort_item_count);
-	#endif
+#endif
 
 	*ndistinct = ngroups;
 	return groups;
@@ -1821,6 +1821,7 @@ mcv_get_match_bitmap(PlannerInfo *root, List *clauses,
 #endif
 
 #if PG_VERSION_NUM >= 150000
+
 			/*
 			 * Deconstruct the array constant, unless it's NULL (we'll cover
 			 * that case below)

@@ -961,6 +961,7 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 				WindowAgg  *wplan = (WindowAgg *) plan;
 
 #if PG_VERSION_NUM >= 150000
+
 				/*
 				 * Adjust the WindowAgg's run conditions by swapping the
 				 * WindowFuncs references out to instead reference the Var in
@@ -1133,6 +1134,7 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 				}
 
 #if PG_VERSION_NUM >= 150000
+
 				/*
 				 * The MERGE statement produces the target rows by performing
 				 * a right join between the target relation and the source
@@ -1315,6 +1317,7 @@ set_indexonlyscan_references(PlannerInfo *root,
 #endif
 
 #if PG_VERSION_NUM >= 150000
+
 	/*
 	 * Vars in the plan node's targetlist, qual, and recheckqual must only
 	 * reference columns that the index AM can actually return.  To ensure
@@ -1484,7 +1487,7 @@ trivial_subqueryscan(SubqueryScan *plan)
 
 	return true;
 }
-#endif /* if PG_VERSION_NUM < 150000 */
+#endif							/* if PG_VERSION_NUM < 150000 */
 
 /*
  * clean_up_removed_plan_level
@@ -1690,6 +1693,7 @@ set_append_references(PlannerInfo *root,
 	}
 
 #if PG_VERSION_NUM >= 150000
+
 	/*
 	 * See if it's safe to get rid of the Append entirely.  For this to be
 	 * safe, there must be only one child plan and that child plan's parallel
@@ -1769,6 +1773,7 @@ set_mergeappend_references(PlannerInfo *root,
 	}
 
 #if PG_VERSION_NUM >= 150000
+
 	/*
 	 * See if it's safe to get rid of the MergeAppend entirely.  For this to
 	 * be safe, there must be only one child plan and that child plan's
@@ -2769,12 +2774,11 @@ build_tlist_index_other_vars(List *tlist, Index ignore_rel)
  * Also ensure that varnosyn is incremented by rtoffset.
  * If no match, return NULL.
  */
-static Var *
-search_indexed_tlist_for_var(Var *var, indexed_tlist *itlist,
+static Var *search_indexed_tlist_for_var(Var *var, indexed_tlist *itlist,
 #if PG_VERSION_NUM >= 150000
-							 int newvarno, int rtoffset)
+										 int newvarno, int rtoffset)
 #else
-							 Index newvarno, int rtoffset)
+										 Index newvarno, int rtoffset)
 #endif
 {
 #if PG_VERSION_NUM >= 150000
@@ -2862,14 +2866,13 @@ search_indexed_tlist_for_non_var(Expr *node,
  * where there are multiple textually-equal()-but-volatile sort expressions.
  * And it's also faster than search_indexed_tlist_for_non_var.
  */
-static Var *
-search_indexed_tlist_for_sortgroupref(Expr *node,
-									  Index sortgroupref,
-									  indexed_tlist *itlist,
+static Var *search_indexed_tlist_for_sortgroupref(Expr *node,
+												  Index sortgroupref,
+												  indexed_tlist *itlist,
 #if PG_VERSION_NUM >= 150000
-									  int newvarno)
+												  int newvarno)
 #else
-									  Index newvarno)
+												  Index newvarno)
 #endif
 {
 	ListCell   *lc;

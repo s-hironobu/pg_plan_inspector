@@ -129,7 +129,7 @@ extern bool adjust_joinrel_rows(RelOptInfo *joinrel,
 /* query_plan.reg */
 #define Natts_reg					3
 #define Anum_reg_queryid 1		/* text */
-#define Anum_reg_sort_space_used  2	/* int */
+#define Anum_reg_sort_space_used  2 /* int */
 #define Anum_reg_params  3		/* text */
 
 #endif							/* __ADJUST_ROWS_H_ */

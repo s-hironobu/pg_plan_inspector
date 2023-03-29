@@ -424,10 +424,10 @@ relname2rti(const char *relname)
 	for (i = 1; i < len; i++)	/* skip '^\"' */
 	{
 		if (relname[i] != '.')
-			schema[i-1] = relname[i];
+			schema[i - 1] = relname[i];
 		else
 		{
-			schema[i-1] = '\0';
+			schema[i - 1] = '\0';
 			break;
 		}
 	}

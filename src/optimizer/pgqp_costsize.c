@@ -1493,6 +1493,7 @@ cost_subqueryscan(SubqueryScanPath *path, PlannerInfo *root,
 	Assert(baserel->rtekind == RTE_SUBQUERY);
 
 #if PG_VERSION_NUM >= 150000
+
 	/*
 	 * We compute the rowcount estimate as the subplan's estimate times the
 	 * selectivity of relevant restriction clauses.  In simple cases this will
@@ -4862,7 +4863,7 @@ cost_qual_eval_walker(Node *node, cost_qual_eval_context *context)
 	return expression_tree_walker(node, cost_qual_eval_walker,
 								  (void *) context);
 }
-#endif /* #if PG_VERSION_NUM < 150000 */
+#endif							/* #if PG_VERSION_NUM < 150000 */
 
 /*
  * get_restriction_qual_cost

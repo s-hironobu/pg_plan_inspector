@@ -4067,20 +4067,19 @@ create_lockrows_path(PlannerInfo *root, RelOptInfo *rel,
  * 'onconflict' is the ON CONFLICT clause, or NULL
  * 'epqParam' is the ID of Param for EvalPlanQual re-eval
  */
-ModifyTablePath *
-create_modifytable_path(PlannerInfo *root, RelOptInfo *rel,
-						Path *subpath,
-						CmdType operation, bool canSetTag,
-						Index nominalRelation, Index rootRelation,
-						bool partColsUpdated,
-						List *resultRelations,
-						List *updateColnosLists,
-						List *withCheckOptionLists, List *returningLists,
-						List *rowMarks, OnConflictExpr *onconflict,
+ModifyTablePath *create_modifytable_path(PlannerInfo *root, RelOptInfo *rel,
+										 Path *subpath,
+										 CmdType operation, bool canSetTag,
+										 Index nominalRelation, Index rootRelation,
+										 bool partColsUpdated,
+										 List *resultRelations,
+										 List *updateColnosLists,
+										 List *withCheckOptionLists, List *returningLists,
+										 List *rowMarks, OnConflictExpr *onconflict,
 #if PG_VERSION_NUM >= 150000
-						List *mergeActionLists, int epqParam)
+										 List *mergeActionLists, int epqParam)
 #else
-						int epqParam)
+										 int epqParam)
 #endif
 {
 	ModifyTablePath *pathnode = makeNode(ModifyTablePath);

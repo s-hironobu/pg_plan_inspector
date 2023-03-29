@@ -2003,6 +2003,7 @@ process_sublinks_mutator(Node *node, process_sublinks_context *context)
 	}
 
 #if PG_VERSION_NUM >= 150000
+
 	/*
 	 * Don't recurse into the arguments of an outer PHV, Aggref or
 	 * GroupingFunc here.  Any SubLinks in the arguments have to be dealt with
@@ -2026,6 +2027,7 @@ process_sublinks_mutator(Node *node, process_sublinks_context *context)
 			return node;
 	}
 #else
+
 	/*
 	 * Don't recurse into the arguments of an outer PHV or aggregate here. Any
 	 * SubLinks in the arguments have to be dealt with at the outer query

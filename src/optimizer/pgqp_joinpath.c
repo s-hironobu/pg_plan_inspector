@@ -536,13 +536,13 @@ paraminfo_get_equal_hashops(PlannerInfo *root, ParamPathInfo *param_info,
  * when we return true.
  */
 static bool
-paraminfo_get_equal_hashops(PlannerInfo *root, ParamPathInfo *param_info,
-							RelOptInfo *outerrel, RelOptInfo *innerrel,
+			paraminfo_get_equal_hashops(PlannerInfo *root, ParamPathInfo *param_info,
+										RelOptInfo *outerrel, RelOptInfo *innerrel,
 #if PG_VERSION_NUM >= 140002
-							List **param_exprs, List **operators,
-							bool *binary_mode)
+										List **param_exprs, List **operators,
+										bool *binary_mode)
 #else
-							List **param_exprs, List **operators)
+										List **param_exprs, List **operators)
 #endif
 
 {
@@ -586,6 +586,7 @@ paraminfo_get_equal_hashops(PlannerInfo *root, ParamPathInfo *param_info,
 			*operators = lappend_oid(*operators, rinfo->hasheqoperator);
 			*param_exprs = lappend(*param_exprs, expr);
 #if PG_VERSION_NUM >= 140002
+
 			/*
 			 * When the join operator is not hashable then it's possible that
 			 * the operator will be able to distinguish something that the
@@ -631,6 +632,7 @@ paraminfo_get_equal_hashops(PlannerInfo *root, ParamPathInfo *param_info,
 		*operators = lappend_oid(*operators, typentry->eq_opr);
 		*param_exprs = lappend(*param_exprs, expr);
 #if PG_VERSION_NUM >= 140002
+
 		/*
 		 * We must go into binary mode as we don't have too much of an idea of
 		 * how these lateral Vars are being used.  See comment above when we
@@ -647,7 +649,7 @@ paraminfo_get_equal_hashops(PlannerInfo *root, ParamPathInfo *param_info,
 	/* We're okay to use memoize */
 	return true;
 }
-#endif /* if PG_VERSION_NUM >= 150000 */
+#endif							/* if PG_VERSION_NUM >= 150000 */
 
 /*
  * get_memoize_path

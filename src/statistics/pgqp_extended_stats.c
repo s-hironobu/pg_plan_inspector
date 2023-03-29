@@ -830,7 +830,7 @@ statext_store(Oid statOid, bool inh,
 statext_store(Oid statOid,
 			  MVNDistinct *ndistinct, MVDependencies *dependencies,
 			  MCVList *mcv, Datum exprs, VacAttrStats **stats)
-	#endif
+#endif
 {
 	Relation	pg_stextdata;
 #if PG_VERSION_NUM >= 150000
@@ -895,6 +895,7 @@ statext_store(Oid statOid,
 	}
 
 #if PG_VERSION_NUM >= 150000
+
 	/*
 	 * Delete the old tuple if it exists, and insert a new one. It's easier
 	 * than trying to update or insert, based on various conditions.
@@ -1476,6 +1477,7 @@ statext_is_compatible_clause_internal(PlannerInfo *root, Node *clause,
 			return false;
 
 #if PG_VERSION_NUM >= 150000
+
 		/*
 		 * Also reject system attributes and whole-row Vars (we don't allow
 		 * stats on those).
