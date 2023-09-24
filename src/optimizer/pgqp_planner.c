@@ -24,6 +24,9 @@
 #include "access/sysattr.h"
 #include "access/table.h"
 #include "access/xact.h"
+#if PG_VERSION_NUM >= 160000
+#include "catalog/pg_aggregate.h"
+#endif
 #include "catalog/pg_constraint.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_proc.h"
@@ -39,6 +42,9 @@
 #include "nodes/nodeFuncs.h"
 #ifdef OPTIMIZER_DEBUG
 #include "nodes/print.h"
+#endif
+#if PG_VERSION_NUM >= 160000
+#include "nodes/supportnodes.h"
 #endif
 #include "optimizer/appendinfo.h"
 #include "optimizer/clauses.h"
@@ -56,6 +62,9 @@
 #include "optimizer/tlist.h"
 #include "parser/analyze.h"
 #include "parser/parse_agg.h"
+#if PG_VERSION_NUM >= 160000
+#include "parser/parse_relation.h"
+#endif
 #include "parser/parsetree.h"
 #include "partitioning/partdesc.h"
 #include "rewrite/rewriteManip.h"
@@ -72,11 +81,16 @@
 #include "pgqp_preunion.h"
 #include "pgqp_setrefs.h"
 #include "pgqp_subselect.h"
+#include "pgqp_pathnode.h"
 #endif
 
 /* GUC parameters */
 double		cursor_tuple_fraction = DEFAULT_CURSOR_TUPLE_FRACTION;
+#if PG_VERSION_NUM >= 160000
+int			debug_parallel_query = DEBUG_PARALLEL_OFF;
+#else
 int			force_parallel_mode = FORCE_PARALLEL_OFF;
+#endif
 bool		parallel_leader_participation = true;
 
 /* Hook for plugins to get control in planner() */
@@ -101,12 +115,14 @@ create_upper_paths_hook_type create_upper_paths_hook = NULL;
 #define EXPRKIND_TABLEFUNC			11
 #define EXPRKIND_TABLEFUNC_LATERAL	12
 
+#if PG_VERSION_NUM < 160000
 /* Passthrough data for standard_qp_callback */
 typedef struct
 {
 	List	   *activeWindows;	/* active windows, if any */
 	List	   *groupClause;	/* overrides parse->groupClause */
 } standard_qp_extra;
+#endif
 
 /*
  * Data specific to grouping sets
@@ -134,6 +150,15 @@ typedef struct
 	List	   *uniqueOrder;	/* A List of unique ordering/partitioning
 								 * clauses per Window */
 } WindowClauseSortData;
+
+#if PG_VERSION_NUM >= 160000
+/* Passthrough data for standard_qp_callback */
+typedef struct
+{
+	List	   *activeWindows;	/* active windows, if any */
+	grouping_sets_data *gset_data;	/* grouping sets data, if any */
+} standard_qp_extra;
+#endif
 
 /* Local functions */
 static Node *preprocess_expression(PlannerInfo *root, Node *expr, int kind);
@@ -217,6 +242,10 @@ static PathTarget *make_partial_grouping_target(PlannerInfo *root,
 												PathTarget *grouping_target,
 												Node *havingQual);
 static List *postprocess_setop_tlist(List *new_tlist, List *orig_tlist);
+#if PG_VERSION_NUM >= 160000
+static void optimize_window_clauses(PlannerInfo *root,
+									WindowFuncLists *wflists);
+#endif
 static List *select_active_windows(PlannerInfo *root, WindowFuncLists *wflists);
 static PathTarget *make_window_input_target(PlannerInfo *root,
 											PathTarget *final_target,
@@ -324,6 +353,9 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 	glob->subroots = NIL;
 	glob->rewindPlanIDs = NULL;
 	glob->finalrtable = NIL;
+#if PG_VERSION_NUM >= 160000
+	glob->finalrteperminfos = NIL;
+#endif
 	glob->finalrowmarks = NIL;
 	glob->resultRelations = NIL;
 	glob->appendRelations = NIL;
@@ -344,11 +376,13 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 	 * functions are present in the query tree.
 	 *
 	 * (Note that we do allow CREATE TABLE AS, SELECT INTO, and CREATE
-	 * MATERIALIZED VIEW to use parallel plans, but as of now, only the leader
-	 * backend writes into a completely new table.  In the future, we can
-	 * extend it to allow workers to write into the table.  However, to allow
-	 * parallel updates and deletes, we have to solve other problems,
-	 * especially around combo CIDs.)
+	 * MATERIALIZED VIEW to use parallel plans, but this is safe only because
+	 * the command is writing into a completely new table which workers won't
+	 * be able to see.  If the workers could see the table, the fact that
+	 * group locking would cause them to ignore the leader's heavyweight GIN
+	 * page locks would make this unsafe.  We'll have to fix that somehow if
+	 * we want to allow parallel inserts in general; updates and deletes have
+	 * additional problems especially around combo CIDs.)
 	 *
 	 * For now, we don't try to use parallel mode if we're running inside a
 	 * parallel worker.  We might eventually be able to relax this
@@ -378,20 +412,25 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 	 * true during plan creation if a Gather or Gather Merge plan is actually
 	 * created (cf. create_gather_plan, create_gather_merge_plan).
 	 *
-	 * However, if force_parallel_mode = on or force_parallel_mode = regress,
-	 * then we impose parallel mode whenever it's safe to do so, even if the
-	 * final plan doesn't use parallelism.  It's not safe to do so if the
-	 * query contains anything parallel-unsafe; parallelModeOK will be false
-	 * in that case.  Note that parallelModeOK can't change after this point.
-	 * Otherwise, everything in the query is either parallel-safe or
+	 * However, if debug_parallel_query = on or debug_parallel_query =
+	 * regress, then we impose parallel mode whenever it's safe to do so, even
+	 * if the final plan doesn't use parallelism.  It's not safe to do so if
+	 * the query contains anything parallel-unsafe; parallelModeOK will be
+	 * false in that case.  Note that parallelModeOK can't change after this
+	 * point. Otherwise, everything in the query is either parallel-safe or
 	 * parallel-restricted, and in either case it should be OK to impose
 	 * parallel-mode restrictions.  If that ends up breaking something, then
 	 * either some function the user included in the query is incorrectly
 	 * labeled as parallel-safe or parallel-restricted when in reality it's
 	 * parallel-unsafe, or else the query planner itself has a bug.
 	 */
+#if PG_VERSION_NUM >= 160000
+	glob->parallelModeNeeded = glob->parallelModeOK &&
+		(debug_parallel_query != DEBUG_PARALLEL_OFF);
+#else
 	glob->parallelModeNeeded = glob->parallelModeOK &&
 		(force_parallel_mode != FORCE_PARALLEL_OFF);
+#endif
 
 	/* Determine what fraction of the plan is likely to be scanned */
 	if (cursorOptions & CURSOR_OPT_FAST_PLAN)
@@ -450,6 +489,74 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 			top_plan = materialize_finished_plan(top_plan);
 	}
 
+#if PG_VERSION_NUM >= 160000
+	/*
+	 * Optionally add a Gather node for testing purposes, provided this is
+	 * actually a safe thing to do.
+	 *
+	 * We can add Gather even when top_plan has parallel-safe initPlans, but
+	 * then we have to move the initPlans to the Gather node because of
+	 * SS_finalize_plan's limitations.  That would cause cosmetic breakage of
+	 * regression tests when debug_parallel_query = regress, because initPlans
+	 * that would normally appear on the top_plan move to the Gather, causing
+	 * them to disappear from EXPLAIN output.  That doesn't seem worth kluging
+	 * EXPLAIN to hide, so skip it when debug_parallel_query = regress.
+	 */
+	if (debug_parallel_query != DEBUG_PARALLEL_OFF &&
+		top_plan->parallel_safe &&
+		(top_plan->initPlan == NIL ||
+		 debug_parallel_query != DEBUG_PARALLEL_REGRESS))
+	{
+		Gather	   *gather = makeNode(Gather);
+		Cost		initplan_cost;
+		bool		unsafe_initplans;
+
+		gather->plan.targetlist = top_plan->targetlist;
+		gather->plan.qual = NIL;
+		gather->plan.lefttree = top_plan;
+		gather->plan.righttree = NULL;
+		gather->num_workers = 1;
+		gather->single_copy = true;
+		gather->invisible = (debug_parallel_query == DEBUG_PARALLEL_REGRESS);
+
+		/* Transfer any initPlans to the new top node */
+		gather->plan.initPlan = top_plan->initPlan;
+		top_plan->initPlan = NIL;
+
+		/*
+		 * Since this Gather has no parallel-aware descendants to signal to,
+		 * we don't need a rescan Param.
+		 */
+		gather->rescan_param = -1;
+
+		/*
+		 * Ideally we'd use cost_gather here, but setting up dummy path data
+		 * to satisfy it doesn't seem much cleaner than knowing what it does.
+		 */
+		gather->plan.startup_cost = top_plan->startup_cost +
+			parallel_setup_cost;
+		gather->plan.total_cost = top_plan->total_cost +
+			parallel_setup_cost + parallel_tuple_cost * top_plan->plan_rows;
+		gather->plan.plan_rows = top_plan->plan_rows;
+		gather->plan.plan_width = top_plan->plan_width;
+		gather->plan.parallel_aware = false;
+		gather->plan.parallel_safe = false;
+
+		/*
+		 * Delete the initplans' cost from top_plan.  We needn't add it to the
+		 * Gather node, since the above coding already included it there.
+		 */
+		SS_compute_initplan_cost(gather->plan.initPlan,
+								 &initplan_cost, &unsafe_initplans);
+		top_plan->startup_cost -= initplan_cost;
+		top_plan->total_cost -= initplan_cost;
+
+		/* use parallel mode for parallel plans. */
+		root->glob->parallelModeNeeded = true;
+
+		top_plan = &gather->plan;
+	}
+#else				/* #if PG_VERSION_NUM >= 160000 */
 	/*
 	 * Optionally add a Gather node for testing purposes, provided this is
 	 * actually a safe thing to do.
@@ -498,6 +605,7 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 
 		top_plan = &gather->plan;
 	}
+#endif				/* #if PG_VERSION_NUM >= 160000 */
 
 	/*
 	 * If any Params were generated, run through the plan tree and compute
@@ -520,6 +628,9 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 
 	/* final cleanup of the plan */
 	Assert(glob->finalrtable == NIL);
+#if PG_VERSION_NUM >= 160000
+	Assert(glob->finalrteperminfos == NIL);
+#endif
 	Assert(glob->finalrowmarks == NIL);
 	Assert(glob->resultRelations == NIL);
 	Assert(glob->appendRelations == NIL);
@@ -554,7 +665,13 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 	result->dependsOnRole = glob->dependsOnRole;
 	result->parallelModeNeeded = glob->parallelModeNeeded;
 	result->planTree = top_plan;
+#if PG_VERSION_NUM >= 160000
+	result->permInfos = glob->finalrteperminfos;
+#endif
 	result->rtable = glob->finalrtable;
+#if PG_VERSION_NUM >= 160000
+	result->permInfos = glob->finalrteperminfos;
+#endif
 	result->resultRelations = glob->resultRelations;
 	result->appendRelations = glob->appendRelations;
 	result->subplans = glob->subplans;
@@ -660,8 +777,14 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	root->init_plans = NIL;
 	root->cte_plan_ids = NIL;
 	root->multiexpr_params = NIL;
+#if PG_VERSION_NUM >= 160000
+	root->join_domains = NIL;
+#endif
 	root->eq_classes = NIL;
 	root->ec_merging_done = false;
+#if PG_VERSION_NUM >= 160000
+	root->last_rinfo_serial = 0;
+#endif
 	root->all_result_relids =
 		parse->resultRelation ? bms_make_singleton(parse->resultRelation) : NULL;
 	root->leaf_result_relids = NULL;	/* we'll find out leaf-ness later */
@@ -670,6 +793,10 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	root->rowMarks = NIL;
 	memset(root->upper_rels, 0, sizeof(root->upper_rels));
 	memset(root->upper_targets, 0, sizeof(root->upper_targets));
+#if PG_VERSION_NUM >= 160000
+	root->processed_groupClause = NIL;
+	root->processed_distinctClause = NIL;
+#endif
 	root->processed_tlist = NIL;
 	root->update_colnos = NIL;
 	root->grouping_map = NULL;
@@ -677,6 +804,9 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	root->qual_security_level = 0;
 	root->hasPseudoConstantQuals = false;
 	root->hasAlternativeSubPlans = false;
+#if PG_VERSION_NUM >= 160000
+	root->placeholdersFrozen = false;
+#endif
 	root->hasRecursion = hasRecursion;
 	if (hasRecursion)
 		root->wt_param_id = assign_special_exec_param(root);
@@ -684,6 +814,15 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 		root->wt_param_id = -1;
 	root->non_recursive_path = NULL;
 	root->partColsUpdated = false;
+
+#if PG_VERSION_NUM >= 160000
+	/*
+	 * Create the top-level join domain.  This won't have valid contents until
+	 * deconstruct_jointree fills it in, but the node needs to exist before
+	 * that so we can build EquivalenceClasses referencing it.
+	 */
+	root->join_domains = list_make1(makeNode(JoinDomain));
+#endif
 
 	/*
 	 * If there is a WITH list, process each WITH query and either convert it
@@ -876,6 +1015,11 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 												EXPRKIND_LIMIT);
 		wc->endOffset = preprocess_expression(root, wc->endOffset,
 											  EXPRKIND_LIMIT);
+#if PG_VERSION_NUM >= 160000
+		wc->runCondition = (List *) preprocess_expression(root,
+														  (Node *) wc->runCondition,
+														  EXPRKIND_TARGET);
+#endif
 	}
 
 	parse->limitOffset = preprocess_expression(root, parse->limitOffset,
@@ -950,8 +1094,13 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 			 */
 			if (rte->lateral && root->hasJoinRTEs)
 				rte->subquery = (Query *)
+#if PG_VERSION_NUM >= 160000
+					flatten_join_alias_vars(root, root->parse,
+											(Node *) rte->subquery);
+#else
 					flatten_join_alias_vars(root->parse,
 											(Node *) rte->subquery);
+#endif
 		}
 		else if (rte->rtekind == RTE_FUNCTION)
 		{
@@ -1071,8 +1220,10 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	}
 	parse->havingQual = (Node *) newHaving;
 
+#if PG_VERSION_NUM < 160000
 	/* Remove any redundant GROUP BY columns */
 	remove_useless_groupby_columns(root);
+#endif
 
 	/*
 	 * If we have any outer joins, try to reduce them to plain inner joins.
@@ -1084,10 +1235,15 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 
 	/*
 	 * If we have any RTE_RESULT relations, see if they can be deleted from
-	 * the jointree.  This step is most effectively done after we've done
-	 * expression preprocessing and outer join reduction.
+	 * the jointree.  We also rely on this processing to flatten single-child
+	 * FromExprs underneath outer joins.  This step is most effectively done
+	 * after we've done expression preprocessing and outer join reduction.
 	 */
+#if PG_VERSION_NUM >= 160000
+	if (hasResultRTEs || hasOuterJoins)
+#else
 	if (hasResultRTEs)
+#endif
 		remove_useless_result_rtes(root);
 
 	/*
@@ -1151,12 +1307,18 @@ preprocess_expression(PlannerInfo *root, Node *expr, int kind)
 		  kind == EXPRKIND_VALUES ||
 		  kind == EXPRKIND_TABLESAMPLE ||
 		  kind == EXPRKIND_TABLEFUNC))
+#if PG_VERSION_NUM >= 160000
+		expr = flatten_join_alias_vars(root, root->parse, expr);
+#else
 		expr = flatten_join_alias_vars(root->parse, expr);
+#endif
 
 	/*
 	 * Simplify constant expressions.  For function RTEs, this was already
-	 * done by preprocess_function_rtes ... but we have to do it again if the
-	 * RTE is LATERAL and might have contained join alias variables.
+	 * done by preprocess_function_rtes.  (But note we must do it again for
+	 * EXPRKIND_RTFUNC_LATERAL, because those might by now contain
+	 * un-simplified subexpressions inserted by flattening of subqueries or
+	 * join alias variables.)
 	 *
 	 * Note: an essential effect of this is to convert named-argument function
 	 * calls to positional notation and insert the current actual values of
@@ -1203,7 +1365,11 @@ preprocess_expression(PlannerInfo *root, Node *expr, int kind)
 
 	/* Expand SubLinks to SubPlans */
 	if (root->parse->hasSubLinks)
+#ifdef __PG_QUERY_PLAN__
+		expr = pgqp_SS_process_sublinks(root, expr, (kind == EXPRKIND_QUAL));
+#else
 		expr = SS_process_sublinks(root, expr, (kind == EXPRKIND_QUAL));
+#endif
 
 	/*
 	 * XXX do not insert anything here unless you have grokked the comments in
@@ -1281,7 +1447,7 @@ preprocess_phv_expression(PlannerInfo *root, Expr *expr)
 {
 	return (Expr *) preprocess_expression(root, (Node *) expr, EXPRKIND_PHV);
 }
-#endif							/* __PG_QUERY_PLAN__ */
+#endif							/* #ifndef __PG_QUERY_PLAN__ */
 
 /*--------------------
  * grouping_planner
@@ -1441,12 +1607,22 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 		{
 			gset_data = preprocess_grouping_sets(root);
 		}
+#if PG_VERSION_NUM >= 160000
+		else if (parse->groupClause)
+		{
+			/* Preprocess regular GROUP BY clause, if any */
+			root->processed_groupClause = preprocess_groupclause(root, NIL);
+			/* Remove any redundant GROUP BY columns */
+			remove_useless_groupby_columns(root);
+		}
+#else
 		else
 		{
 			/* Preprocess regular GROUP BY clause, if any */
 			if (parse->groupClause)
 				parse->groupClause = preprocess_groupclause(root, NIL);
 		}
+#endif
 
 		/*
 		 * Preprocess targetlist.  Note that much of the remaining planning
@@ -1480,8 +1656,22 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 		{
 			wflists = find_window_functions((Node *) root->processed_tlist,
 											list_length(parse->windowClause));
+#if PG_VERSION_NUM >= 160000
+			if (wflists->numWindowFuncs > 0)
+			{
+				/*
+				 * See if any modifications can be made to each WindowClause
+				 * to allow the executor to execute the WindowFuncs more
+				 * quickly.
+				 */
+				optimize_window_clauses(root, wflists);
+
+				activeWindows = select_active_windows(root, wflists);
+			}
+#else
 			if (wflists->numWindowFuncs > 0)
 				activeWindows = select_active_windows(root, wflists);
+#endif
 			else
 				parse->hasWindowFuncs = false;
 		}
@@ -1518,9 +1708,13 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 
 		/* Set up data needed by standard_qp_callback */
 		qp_extra.activeWindows = activeWindows;
+#if PG_VERSION_NUM >= 160000
+		qp_extra.gset_data = gset_data;
+#else
 		qp_extra.groupClause = (gset_data
 								? (gset_data->rollups ? linitial_node(RollupData, gset_data->rollups)->groupClause : NIL)
 								: parse->groupClause);
+#endif
 
 		/*
 		 * Generate the best unsorted and presorted paths for the scan/join
@@ -1804,7 +1998,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 		}
 
 		/*
-		 * If this is an INSERT/UPDATE/DELETE, add the ModifyTable node.
+		 * If this is an INSERT/UPDATE/DELETE/MERGE, add the ModifyTable node.
 		 */
 		if (parse->commandType != CMD_SELECT)
 		{
@@ -1820,7 +2014,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 
 			if (bms_membership(root->all_result_relids) == BMS_MULTIPLE)
 			{
-				/* Inherited UPDATE/DELETE */
+				/* Inherited UPDATE/DELETE/MERGE */
 				RelOptInfo *top_result_rel = find_base_rel(root,
 														   parse->resultRelation);
 				int			resultRelation = -1;
@@ -1862,10 +2056,17 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 
 						if (this_result_rel != top_result_rel)
 							withCheckOptions = (List *)
+#if PG_VERSION_NUM >= 160000
+								adjust_appendrel_attrs_multilevel(root,
+																  (Node *) withCheckOptions,
+																  this_result_rel,
+																  top_result_rel);
+#else
 								adjust_appendrel_attrs_multilevel(root,
 																  (Node *) withCheckOptions,
 																  this_result_rel->relids,
 																  top_result_rel->relids);
+#endif
 						withCheckOptionLists = lappend(withCheckOptionLists,
 													   withCheckOptions);
 					}
@@ -1875,10 +2076,17 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 
 						if (this_result_rel != top_result_rel)
 							returningList = (List *)
+#if PG_VERSION_NUM >= 160000
+								adjust_appendrel_attrs_multilevel(root,
+																  (Node *) returningList,
+																  this_result_rel,
+																  top_result_rel);
+#else
 								adjust_appendrel_attrs_multilevel(root,
 																  (Node *) returningList,
 																  this_result_rel->relids,
 																  top_result_rel->relids);
+#endif
 						returningLists = lappend(returningLists,
 												 returningList);
 					}
@@ -1897,6 +2105,18 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 							MergeAction *action = lfirst(l),
 									   *leaf_action = copyObject(action);
 
+#if PG_VERSION_NUM >= 160000
+							leaf_action->qual =
+								adjust_appendrel_attrs_multilevel(root,
+																  (Node *) action->qual,
+																  this_result_rel,
+																  top_result_rel);
+							leaf_action->targetList = (List *)
+								adjust_appendrel_attrs_multilevel(root,
+																  (Node *) action->targetList,
+																  this_result_rel,
+																  top_result_rel);
+#else							/* #if PG_VERSION_NUM >= 160000 */
 							leaf_action->qual =
 								adjust_appendrel_attrs_multilevel(root,
 																  (Node *) action->qual,
@@ -1907,6 +2127,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 																  (Node *) action->targetList,
 																  this_result_rel->relids,
 																  top_result_rel->relids);
+#endif							/* #if PG_VERSION_NUM >= 160000 */
 							if (leaf_action->commandType == CMD_UPDATE)
 								leaf_action->updateColnos =
 									adjust_inherited_attnums_multilevel(root,
@@ -1920,7 +2141,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 						mergeActionLists = lappend(mergeActionLists,
 												   mergeActionList);
 					}
-#endif
+#endif							/* #if PG_VERSION_NUM >= 150000 */
 				}
 
 				if (resultRelations == NIL)
@@ -1951,7 +2172,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 			}
 			else
 			{
-				/* Single-relation INSERT/UPDATE/DELETE. */
+				/* Single-relation INSERT/UPDATE/DELETE/MERGE. */
 				resultRelations = list_make1_int(parse->resultRelation);
 				if (parse->commandType == CMD_UPDATE)
 					updateColnosLists = list_make1(root->update_colnos);
@@ -2060,7 +2281,9 @@ preprocess_grouping_sets(PlannerInfo *root)
 	Query	   *parse = root->parse;
 	List	   *sets;
 	int			maxref = 0;
+#if PG_VERSION_NUM < 160000
 	ListCell   *lc;
+#endif
 	ListCell   *lc_set;
 	grouping_sets_data *gd = palloc0(sizeof(grouping_sets_data));
 
@@ -2070,6 +2293,14 @@ preprocess_grouping_sets(PlannerInfo *root)
 	gd->unhashable_refs = NULL;
 	gd->unsortable_refs = NULL;
 	gd->unsortable_sets = NIL;
+
+#if PG_VERSION_NUM >= 160000
+	/*
+	 * We don't currently make any attempt to optimize the groupClause when
+	 * there are grouping sets, so just duplicate it in processed_groupClause.
+	 */
+	root->processed_groupClause = parse->groupClause;
+#endif
 
 	if (parse->groupClause)
 	{
@@ -2103,6 +2334,9 @@ preprocess_grouping_sets(PlannerInfo *root)
 	if (!bms_is_empty(gd->unsortable_refs))
 	{
 		List	   *sortable_sets = NIL;
+#if PG_VERSION_NUM >= 160000
+		ListCell   *lc;
+#endif
 
 		foreach(lc, parse->groupingSets)
 		{
@@ -2302,7 +2536,11 @@ preprocess_rowmarks(PlannerInfo *root)
 	 * make a bitmapset of all base rels and then remove the items we don't
 	 * need or have FOR [KEY] UPDATE/SHARE marks for.
 	 */
+#if PG_VERSION_NUM >= 160000
+	rels = get_relids_in_jointree((Node *) parse->jointree, false, false);
+#else
 	rels = get_relids_in_jointree((Node *) parse->jointree, false);
+#endif
 	if (parse->resultRelation)
 		rels = bms_del_member(rels, parse->resultRelation);
 
@@ -2712,7 +2950,11 @@ remove_useless_groupby_columns(PlannerInfo *root)
 	int			relid;
 
 	/* No chance to do anything if there are less than two GROUP BY items */
+#if PG_VERSION_NUM >= 160000
+	if (list_length(root->processed_groupClause) < 2)
+#else
 	if (list_length(parse->groupClause) < 2)
+#endif
 		return;
 
 	/* Don't fiddle with the GROUP BY clause if the query has grouping sets */
@@ -2726,7 +2968,11 @@ remove_useless_groupby_columns(PlannerInfo *root)
 	 */
 	groupbyattnos = (Bitmapset **) palloc0(sizeof(Bitmapset *) *
 										   (list_length(parse->rtable) + 1));
+#if PG_VERSION_NUM >= 160000
+	foreach(lc, root->processed_groupClause)
+#else
 	foreach(lc, parse->groupClause)
+#endif
 	{
 		SortGroupClause *sgc = lfirst_node(SortGroupClause, lc);
 		TargetEntry *tle = get_sortgroupclause_tle(sgc, parse->targetList);
@@ -2821,7 +3067,11 @@ remove_useless_groupby_columns(PlannerInfo *root)
 	{
 		List	   *new_groupby = NIL;
 
+#if PG_VERSION_NUM >= 160000
+		foreach(lc, root->processed_groupClause)
+#else
 		foreach(lc, parse->groupClause)
+#endif
 		{
 			SortGroupClause *sgc = lfirst_node(SortGroupClause, lc);
 			TargetEntry *tle = get_sortgroupclause_tle(sgc, parse->targetList);
@@ -2838,7 +3088,11 @@ remove_useless_groupby_columns(PlannerInfo *root)
 				new_groupby = lappend(new_groupby, sgc);
 		}
 
+#if PG_VERSION_NUM >= 160000
+		root->processed_groupClause = new_groupby;
+#else
 		parse->groupClause = new_groupby;
+#endif
 	}
 }
 
@@ -2857,6 +3111,10 @@ remove_useless_groupby_columns(PlannerInfo *root)
  *
  * Note: we need no comparable processing of the distinctClause because
  * the parser already enforced that that matches ORDER BY.
+ *
+ * Note: we return a fresh List, but its elements are the same
+ * SortGroupClauses appearing in parse->groupClause.  This is important
+ * because later processing may modify the processed_groupClause list.
  *
  * For grouping sets, the order of items is instead forced to agree with that
  * of the grouping set (and items not in the grouping set are skipped). The
@@ -2888,7 +3146,11 @@ preprocess_groupclause(PlannerInfo *root, List *force)
 
 	/* If no ORDER BY, nothing useful to do here */
 	if (parse->sortClause == NIL)
+#if PG_VERSION_NUM >= 160000
+		return list_copy(parse->groupClause);
+#else
 		return parse->groupClause;
+#endif
 
 	/*
 	 * Scan the ORDER BY clause and construct a list of matching GROUP BY
@@ -2919,7 +3181,11 @@ preprocess_groupclause(PlannerInfo *root, List *force)
 
 	/* If no match at all, no point in reordering GROUP BY */
 	if (new_groupclause == NIL)
+#if PG_VERSION_NUM >= 160000
+		return list_copy(parse->groupClause);
+#else
 		return parse->groupClause;
+#endif
 
 	/*
 	 * Add any remaining GROUP BY items to the new list, but only if we were
@@ -2935,10 +3201,17 @@ preprocess_groupclause(PlannerInfo *root, List *force)
 
 		if (list_member_ptr(new_groupclause, gc))
 			continue;			/* it matched an ORDER BY item */
+#if PG_VERSION_NUM >= 160000
+		if (partial_match)		/* give up, no common sort possible */
+			return list_copy(parse->groupClause);
+		if (!OidIsValid(gc->sortop))	/* give up, GROUP BY can't be sorted */
+			return list_copy(parse->groupClause);
+#else
 		if (partial_match)
 			return parse->groupClause;	/* give up, no common sort possible */
 		if (!OidIsValid(gc->sortop))
 			return parse->groupClause;	/* give up, GROUP BY can't be sorted */
+#endif
 		new_groupclause = lappend(new_groupclause, gc);
 	}
 
@@ -3179,20 +3452,33 @@ extract_rollup_sets(List *groupingSets)
  * gets implemented in one pass.)
  */
 static List *
+#if PG_VERSION_NUM >= 160000
+reorder_grouping_sets(List *groupingSets, List *sortclause)
+#else
 reorder_grouping_sets(List *groupingsets, List *sortclause)
+#endif
 {
 	ListCell   *lc;
 	List	   *previous = NIL;
 	List	   *result = NIL;
 
+#if PG_VERSION_NUM >= 160000
+	foreach(lc, groupingSets)
+#else
 	foreach(lc, groupingsets)
+#endif
 	{
 		List	   *candidate = (List *) lfirst(lc);
 		List	   *new_elems = list_difference_int(candidate, previous);
 		GroupingSetData *gs = makeNode(GroupingSetData);
 
+#if PG_VERSION_NUM >= 160000
+		while (list_length(sortclause) > list_length(previous) &&
+			   new_elems != NIL)
+#else
 		while (list_length(sortclause) > list_length(previous) &&
 			   list_length(new_elems) > 0)
+#endif
 		{
 			SortGroupClause *sc = list_nth(sortclause, list_length(previous));
 			int			ref = sc->tleSortGroupRef;
@@ -3221,6 +3507,236 @@ reorder_grouping_sets(List *groupingsets, List *sortclause)
 	return result;
 }
 
+// #ifndef __PG_QUERY_PLAN__
+/*
+ * has_volatile_pathkey
+ *		Returns true if any PathKey in 'keys' has an EquivalenceClass
+ *		containing a volatile function.  Otherwise returns false.
+ */
+static bool
+has_volatile_pathkey(List *keys)
+{
+	ListCell   *lc;
+
+	foreach(lc, keys)
+	{
+		PathKey    *pathkey = lfirst_node(PathKey, lc);
+
+		if (pathkey->pk_eclass->ec_has_volatile)
+			return true;
+	}
+
+	return false;
+}
+
+/*
+ * adjust_group_pathkeys_for_groupagg
+ *		Add pathkeys to root->group_pathkeys to reflect the best set of
+ *		pre-ordered input for ordered aggregates.
+ *
+ * We define "best" as the pathkeys that suit the largest number of
+ * aggregate functions.  We find these by looking at the first ORDER BY /
+ * DISTINCT aggregate and take the pathkeys for that before searching for
+ * other aggregates that require the same or a more strict variation of the
+ * same pathkeys.  We then repeat that process for any remaining aggregates
+ * with different pathkeys and if we find another set of pathkeys that suits a
+ * larger number of aggregates then we select those pathkeys instead.
+ *
+ * When the best pathkeys are found we also mark each Aggref that can use
+ * those pathkeys as aggpresorted = true.
+ *
+ * Note: When an aggregate function's ORDER BY / DISTINCT clause contains any
+ * volatile functions, we never make use of these pathkeys.  We want to ensure
+ * that sorts using volatile functions are done independently in each Aggref
+ * rather than once at the query level.  If we were to allow this then Aggrefs
+ * with compatible sort orders would all transition their rows in the same
+ * order if those pathkeys were deemed to be the best pathkeys to sort on.
+ * Whereas, if some other set of Aggref's pathkeys happened to be deemed
+ * better pathkeys to sort on, then the volatile function Aggrefs would be
+ * left to perform their sorts individually.  To avoid this inconsistent
+ * behavior which could make Aggref results depend on what other Aggrefs the
+ * query contains, we always force Aggrefs with volatile functions to perform
+ * their own sorts.
+ */
+static void
+adjust_group_pathkeys_for_groupagg(PlannerInfo *root)
+{
+	List	   *grouppathkeys = root->group_pathkeys;
+	List	   *bestpathkeys;
+	Bitmapset  *bestaggs;
+	Bitmapset  *unprocessed_aggs;
+	ListCell   *lc;
+	int			i;
+
+	/* Shouldn't be here if there are grouping sets */
+	Assert(root->parse->groupingSets == NIL);
+	/* Shouldn't be here unless there are some ordered aggregates */
+	Assert(root->numOrderedAggs > 0);
+
+	/* Do nothing if disabled */
+	if (!enable_presorted_aggregate)
+		return;
+
+	/*
+	 * Make a first pass over all AggInfos to collect a Bitmapset containing
+	 * the indexes of all AggInfos to be processed below.
+	 */
+	unprocessed_aggs = NULL;
+	foreach(lc, root->agginfos)
+	{
+		AggInfo    *agginfo = lfirst_node(AggInfo, lc);
+		Aggref	   *aggref = linitial_node(Aggref, agginfo->aggrefs);
+
+		if (AGGKIND_IS_ORDERED_SET(aggref->aggkind))
+			continue;
+
+		/* only add aggregates with a DISTINCT or ORDER BY */
+		if (aggref->aggdistinct != NIL || aggref->aggorder != NIL)
+			unprocessed_aggs = bms_add_member(unprocessed_aggs,
+											  foreach_current_index(lc));
+	}
+
+	/*
+	 * Now process all the unprocessed_aggs to find the best set of pathkeys
+	 * for the given set of aggregates.
+	 *
+	 * On the first outer loop here 'bestaggs' will be empty.   We'll populate
+	 * this during the first loop using the pathkeys for the very first
+	 * AggInfo then taking any stronger pathkeys from any other AggInfos with
+	 * a more strict set of compatible pathkeys.  Once the outer loop is
+	 * complete, we mark off all the aggregates with compatible pathkeys then
+	 * remove those from the unprocessed_aggs and repeat the process to try to
+	 * find another set of pathkeys that are suitable for a larger number of
+	 * aggregates.  The outer loop will stop when there are not enough
+	 * unprocessed aggregates for it to be possible to find a set of pathkeys
+	 * to suit a larger number of aggregates.
+	 */
+	bestpathkeys = NIL;
+	bestaggs = NULL;
+	while (bms_num_members(unprocessed_aggs) > bms_num_members(bestaggs))
+	{
+		Bitmapset  *aggindexes = NULL;
+		List	   *currpathkeys = NIL;
+
+		i = -1;
+		while ((i = bms_next_member(unprocessed_aggs, i)) >= 0)
+		{
+			AggInfo    *agginfo = list_nth_node(AggInfo, root->agginfos, i);
+			Aggref	   *aggref = linitial_node(Aggref, agginfo->aggrefs);
+			List	   *sortlist;
+			List	   *pathkeys;
+
+			if (aggref->aggdistinct != NIL)
+				sortlist = aggref->aggdistinct;
+			else
+				sortlist = aggref->aggorder;
+
+			pathkeys = make_pathkeys_for_sortclauses(root, sortlist,
+													 aggref->args);
+
+			/*
+			 * Ignore Aggrefs which have volatile functions in their ORDER BY
+			 * or DISTINCT clause.
+			 */
+			if (has_volatile_pathkey(pathkeys))
+			{
+				unprocessed_aggs = bms_del_member(unprocessed_aggs, i);
+				continue;
+			}
+
+			/*
+			 * When not set yet, take the pathkeys from the first unprocessed
+			 * aggregate.
+			 */
+			if (currpathkeys == NIL)
+			{
+				currpathkeys = pathkeys;
+
+				/* include the GROUP BY pathkeys, if they exist */
+				if (grouppathkeys != NIL)
+					currpathkeys = append_pathkeys(list_copy(grouppathkeys),
+												   currpathkeys);
+
+				/* record that we found pathkeys for this aggregate */
+				aggindexes = bms_add_member(aggindexes, i);
+			}
+			else
+			{
+				/* now look for a stronger set of matching pathkeys */
+
+				/* include the GROUP BY pathkeys, if they exist */
+				if (grouppathkeys != NIL)
+					pathkeys = append_pathkeys(list_copy(grouppathkeys),
+											   pathkeys);
+
+				/* are 'pathkeys' compatible or better than 'currpathkeys'? */
+				switch (compare_pathkeys(currpathkeys, pathkeys))
+				{
+					case PATHKEYS_BETTER2:
+						/* 'pathkeys' are stronger, use these ones instead */
+						currpathkeys = pathkeys;
+						/* FALLTHROUGH */
+
+					case PATHKEYS_BETTER1:
+						/* 'pathkeys' are less strict */
+						/* FALLTHROUGH */
+
+					case PATHKEYS_EQUAL:
+						/* mark this aggregate as covered by 'currpathkeys' */
+						aggindexes = bms_add_member(aggindexes, i);
+						break;
+
+					case PATHKEYS_DIFFERENT:
+						break;
+				}
+			}
+		}
+
+		/* remove the aggregates that we've just processed */
+		unprocessed_aggs = bms_del_members(unprocessed_aggs, aggindexes);
+
+		/*
+		 * If this pass included more aggregates than the previous best then
+		 * use these ones as the best set.
+		 */
+		if (bms_num_members(aggindexes) > bms_num_members(bestaggs))
+		{
+			bestaggs = aggindexes;
+			bestpathkeys = currpathkeys;
+		}
+	}
+
+	/*
+	 * If we found any ordered aggregates, update root->group_pathkeys to add
+	 * the best set of aggregate pathkeys.  Note that bestpathkeys includes
+	 * the original GROUP BY pathkeys already.
+	 */
+	if (bestpathkeys != NIL)
+		root->group_pathkeys = bestpathkeys;
+
+	/*
+	 * Now that we've found the best set of aggregates we can set the
+	 * presorted flag to indicate to the executor that it needn't bother
+	 * performing a sort for these Aggrefs.  We're able to do this now as
+	 * there's no chance of a Hash Aggregate plan as create_grouping_paths
+	 * will not mark the GROUP BY as GROUPING_CAN_USE_HASH due to the presence
+	 * of ordered aggregates.
+	 */
+	i = -1;
+	while ((i = bms_next_member(bestaggs, i)) >= 0)
+	{
+		AggInfo    *agginfo = list_nth_node(AggInfo, root->agginfos, i);
+
+		foreach(lc, agginfo->aggrefs)
+		{
+			Aggref	   *aggref = lfirst_node(Aggref, lc);
+
+			aggref->aggpresorted = true;
+		}
+	}
+}
+// #endif                                                 /* __PG_QUERY_PLAN__ */
+
 /*
  * Compute query_pathkeys and other pathkeys during plan generation
  */
@@ -3232,6 +3748,114 @@ standard_qp_callback(PlannerInfo *root, void *extra)
 	List	   *tlist = root->processed_tlist;
 	List	   *activeWindows = qp_extra->activeWindows;
 
+#if PG_VERSION_NUM >= 160000
+	/*
+	 * Calculate pathkeys that represent grouping/ordering and/or ordered
+	 * aggregate requirements.
+	 */
+	if (qp_extra->gset_data)
+	{
+		/*
+		 * With grouping sets, just use the first RollupData's groupClause. We
+		 * don't make any effort to optimize grouping clauses when there are
+		 * grouping sets, nor can we combine aggregate ordering keys with
+		 * grouping.
+		 */
+		List	   *rollups = qp_extra->gset_data->rollups;
+		List	   *groupClause = (rollups ? linitial_node(RollupData, rollups)->groupClause : NIL);
+
+		if (grouping_is_sortable(groupClause))
+		{
+			root->group_pathkeys = make_pathkeys_for_sortclauses(root,
+																 groupClause,
+																 tlist);
+			root->num_groupby_pathkeys = list_length(root->group_pathkeys);
+		}
+		else
+		{
+			root->group_pathkeys = NIL;
+			root->num_groupby_pathkeys = 0;
+		}
+	}
+	else if (parse->groupClause || root->numOrderedAggs > 0)
+	{
+		/*
+		 * With a plain GROUP BY list, we can remove any grouping items that
+		 * are proven redundant by EquivalenceClass processing.  For example,
+		 * we can remove y given "WHERE x = y GROUP BY x, y".  These aren't
+		 * especially common cases, but they're nearly free to detect.  Note
+		 * that we remove redundant items from processed_groupClause but not
+		 * the original parse->groupClause.
+		 */
+		bool		sortable;
+
+		root->group_pathkeys =
+			make_pathkeys_for_sortclauses_extended(root,
+												   &root->processed_groupClause,
+												   tlist,
+												   true,
+												   &sortable);
+		if (!sortable)
+		{
+			/* Can't sort; no point in considering aggregate ordering either */
+			root->group_pathkeys = NIL;
+			root->num_groupby_pathkeys = 0;
+		}
+		else
+		{
+			root->num_groupby_pathkeys = list_length(root->group_pathkeys);
+			/* If we have ordered aggs, consider adding onto group_pathkeys */
+			if (root->numOrderedAggs > 0)
+				adjust_group_pathkeys_for_groupagg(root);
+		}
+	}
+	else
+	{
+		root->group_pathkeys = NIL;
+		root->num_groupby_pathkeys = 0;
+	}
+
+	/* We consider only the first (bottom) window in pathkeys logic */
+	if (activeWindows != NIL)
+	{
+		WindowClause *wc = linitial_node(WindowClause, activeWindows);
+
+		root->window_pathkeys = make_pathkeys_for_window(root,
+														 wc,
+														 tlist);
+	}
+	else
+		root->window_pathkeys = NIL;
+
+	/*
+	 * As with GROUP BY, we can discard any DISTINCT items that are proven
+	 * redundant by EquivalenceClass processing.  The non-redundant list is
+	 * kept in root->processed_distinctClause, leaving the original
+	 * parse->distinctClause alone.
+	 */
+	if (parse->distinctClause)
+	{
+		bool		sortable;
+
+		/* Make a copy since pathkey processing can modify the list */
+		root->processed_distinctClause = list_copy(parse->distinctClause);
+		root->distinct_pathkeys =
+			make_pathkeys_for_sortclauses_extended(root,
+												   &root->processed_distinctClause,
+												   tlist,
+												   true,
+												   &sortable);
+		if (!sortable)
+			root->distinct_pathkeys = NIL;
+	}
+	else
+		root->distinct_pathkeys = NIL;
+
+	root->sort_pathkeys =
+		make_pathkeys_for_sortclauses(root,
+									  parse->sortClause,
+									  tlist);
+#else										  /* #if PG_VERSION_NUM >= 160000 */
 	/*
 	 * Calculate pathkeys that represent grouping/ordering requirements.  The
 	 * sortClause is certainly sort-able, but GROUP BY and DISTINCT might not
@@ -3271,6 +3895,7 @@ standard_qp_callback(PlannerInfo *root, void *extra)
 		make_pathkeys_for_sortclauses(root,
 									  parse->sortClause,
 									  tlist);
+#endif										  /* #if PG_VERSION_NUM >= 160000 */
 
 	/*
 	 * Figure out whether we want a sorted result from query_planner.
@@ -3331,7 +3956,9 @@ get_number_of_groups(PlannerInfo *root,
 		{
 			/* Add up the estimates for each grouping set */
 			ListCell   *lc;
+#if PG_VERSION_NUM < 160000
 			ListCell   *lc2;
+#endif
 
 			Assert(gd);			/* keep Coverity happy */
 
@@ -3340,13 +3967,33 @@ get_number_of_groups(PlannerInfo *root,
 			foreach(lc, gd->rollups)
 			{
 				RollupData *rollup = lfirst_node(RollupData, lc);
+#if PG_VERSION_NUM >= 160000
+				ListCell   *lc2;
+				ListCell   *lc3;
+#else
 				ListCell   *lc;
+#endif
 
 				groupExprs = get_sortgrouplist_exprs(rollup->groupClause,
 													 target_list);
 
 				rollup->numGroups = 0.0;
 
+#if PG_VERSION_NUM >= 160000
+				forboth(lc2, rollup->gsets, lc3, rollup->gsets_data)
+				{
+					List	   *gset = (List *) lfirst(lc2);
+					GroupingSetData *gs = lfirst_node(GroupingSetData, lc3);
+					double		numGroups = estimate_num_groups(root,
+																groupExprs,
+																path_rows,
+																&gset,
+																NULL);
+
+					gs->numGroups = numGroups;
+					rollup->numGroups += numGroups;
+				}
+#else
 				forboth(lc, rollup->gsets, lc2, rollup->gsets_data)
 				{
 					List	   *gset = (List *) lfirst(lc);
@@ -3360,13 +4007,18 @@ get_number_of_groups(PlannerInfo *root,
 					gs->numGroups = numGroups;
 					rollup->numGroups += numGroups;
 				}
+#endif
 
 				dNumGroups += rollup->numGroups;
 			}
 
 			if (gd->hash_sets_idx)
 			{
+#if PG_VERSION_NUM >= 160000
+				ListCell   *lc2;
+#else
 				ListCell   *lc;
+#endif
 
 				gd->dNumHashGroups = 0;
 
@@ -3392,9 +4044,15 @@ get_number_of_groups(PlannerInfo *root,
 		}
 		else
 		{
+#if PG_VERSION_NUM >= 160000
+			/* Plain GROUP BY -- estimate based on optimized groupClause */
+			groupExprs = get_sortgrouplist_exprs(root->processed_groupClause,
+												 target_list);
+#else
 			/* Plain GROUP BY */
 			groupExprs = get_sortgrouplist_exprs(parse->groupClause,
 												 target_list);
+#endif
 
 			dNumGroups = estimate_num_groups(root, groupExprs, path_rows,
 											 NULL, NULL);
@@ -3471,8 +4129,8 @@ create_grouping_paths(PlannerInfo *root,
 
 		/*
 		 * Determine whether it's possible to perform sort-based
-		 * implementations of grouping.  (Note that if groupClause is empty,
-		 * grouping_is_sortable() is trivially true, and all the
+		 * implementations of grouping.  (Note that if processed_groupClause
+		 * is empty, grouping_is_sortable() is trivially true, and all the
 		 * pathkeys_contained_in() tests will succeed too, so that we'll
 		 * consider every surviving input path.)
 		 *
@@ -3480,8 +4138,13 @@ create_grouping_paths(PlannerInfo *root,
 		 * of them; in this case, we need can_sort to be true as long as we
 		 * must consider any sorted-input plan.
 		 */
+#if PG_VERSION_NUM >= 160000
+		if ((gd && gd->rollups != NIL)
+			|| grouping_is_sortable(root->processed_groupClause))
+#else
 		if ((gd && gd->rollups != NIL)
 			|| grouping_is_sortable(parse->groupClause))
+#endif
 			flags |= GROUPING_CAN_USE_SORT;
 
 		/*
@@ -3504,9 +4167,15 @@ create_grouping_paths(PlannerInfo *root,
 		 * Note: grouping_is_hashable() is much more expensive to check than
 		 * the other gating conditions, so we want to do it last.
 		 */
+#if PG_VERSION_NUM >= 160000
+		if ((parse->groupClause != NIL &&
+			 root->numOrderedAggs == 0 &&
+			 (gd ? gd->any_hashable : grouping_is_hashable(root->processed_groupClause))))
+#else
 		if ((parse->groupClause != NIL &&
 			 root->numOrderedAggs == 0 &&
 			 (gd ? gd->any_hashable : grouping_is_hashable(parse->groupClause))))
+#endif
 			flags |= GROUPING_CAN_USE_HASH;
 
 		/*
@@ -3652,6 +4321,17 @@ create_degenerate_grouping_paths(PlannerInfo *root, RelOptInfo *input_rel,
 			paths = lappend(paths, path);
 		}
 		path = (Path *)
+#ifdef __PG_QUERY_PLAN__
+			pgqp_create_append_path(root,
+									grouped_rel,
+									paths,
+									NIL,
+									NIL,
+									NULL,
+									0,
+									false,
+									-1);
+#else
 			create_append_path(root,
 							   grouped_rel,
 							   paths,
@@ -3661,6 +4341,7 @@ create_degenerate_grouping_paths(PlannerInfo *root, RelOptInfo *input_rel,
 							   0,
 							   false,
 							   -1);
+#endif
 	}
 	else
 	{
@@ -3717,6 +4398,9 @@ create_ordinary_grouping_paths(PlannerInfo *root, RelOptInfo *input_rel,
 		 * partial partitionwise aggregation.  But if partial aggregation is
 		 * not supported in general then we can't use it for partitionwise
 		 * aggregation either.
+		 *
+		 * Check parse->groupClause not processed_groupClause, because it's
+		 * okay if some of the partitioning columns were proved redundant.
 		 */
 		if (extra->patype == PARTITIONWISE_AGGREGATE_FULL &&
 			group_by_has_partkey(input_rel, extra->targetList,
@@ -3996,15 +4680,23 @@ consider_groupingsets_paths(PlannerInfo *root,
 										  (List *) parse->havingQual,
 										  strat,
 										  new_rollups,
+#if PG_VERSION_NUM >= 160000
+										  agg_costs));
+#else
 										  agg_costs,
 										  dNumGroups));
+#endif
 		return;
 	}
 
 	/*
 	 * If we have sorted input but nothing we can do with it, bail.
 	 */
+#if PG_VERSION_NUM >= 160000
+	if (gd->rollups == NIL)
+#else
 	if (list_length(gd->rollups) == 0)
+#endif
 		return;
 
 	/*
@@ -4155,8 +4847,12 @@ consider_groupingsets_paths(PlannerInfo *root,
 											  (List *) parse->havingQual,
 											  AGG_MIXED,
 											  rollups,
+#if PG_VERSION_NUM >= 160000
+											  agg_costs));
+#else
 											  agg_costs,
 											  dNumGroups));
+#endif
 		}
 	}
 
@@ -4171,8 +4867,12 @@ consider_groupingsets_paths(PlannerInfo *root,
 										  (List *) parse->havingQual,
 										  AGG_SORTED,
 										  gd->rollups,
+#if PG_VERSION_NUM >= 160000
+										  agg_costs));
+#else
 										  agg_costs,
 										  dNumGroups));
+#endif
 }
 
 /*
@@ -4522,14 +5222,80 @@ create_partial_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 
 	cheapest_partial_path = linitial(input_rel->partial_pathlist);
 
+#if PG_VERSION_NUM >= 160000
+	distinctExprs = get_sortgrouplist_exprs(root->processed_distinctClause,
+											parse->targetList);
+#else
 	distinctExprs = get_sortgrouplist_exprs(parse->distinctClause,
 											parse->targetList);
+#endif
 
 	/* estimate how many distinct rows we'll get from each worker */
 	numDistinctRows = estimate_num_groups(root, distinctExprs,
 										  cheapest_partial_path->rows,
 										  NULL, NULL);
 
+#if PG_VERSION_NUM >= 160000
+	/*
+	 * Try sorting the cheapest path and incrementally sorting any paths with
+	 * presorted keys and put a unique paths atop of those.
+	 */
+	if (grouping_is_sortable(root->processed_distinctClause))
+	{
+		foreach(lc, input_rel->partial_pathlist)
+		{
+			Path	   *input_path = (Path *) lfirst(lc);
+			Path	   *sorted_path;
+			bool		is_sorted;
+			int			presorted_keys;
+
+			is_sorted = pathkeys_count_contained_in(root->distinct_pathkeys,
+													input_path->pathkeys,
+													&presorted_keys);
+
+			if (is_sorted)
+				sorted_path = input_path;
+			else
+			{
+				/*
+				 * Try at least sorting the cheapest path and also try
+				 * incrementally sorting any path which is partially sorted
+				 * already (no need to deal with paths which have presorted
+				 * keys when incremental sort is disabled unless it's the
+				 * cheapest partial path).
+				 */
+				if (input_path != cheapest_partial_path &&
+					(presorted_keys == 0 || !enable_incremental_sort))
+					continue;
+
+				/*
+				 * We've no need to consider both a sort and incremental sort.
+				 * We'll just do a sort if there are no presorted keys and an
+				 * incremental sort when there are presorted keys.
+				 */
+				if (presorted_keys == 0 || !enable_incremental_sort)
+					sorted_path = (Path *) create_sort_path(root,
+															partial_distinct_rel,
+															input_path,
+															root->distinct_pathkeys,
+															-1.0);
+				else
+					sorted_path = (Path *) create_incremental_sort_path(root,
+																		partial_distinct_rel,
+																		input_path,
+																		root->distinct_pathkeys,
+																		presorted_keys,
+																		-1.0);
+			}
+
+			add_partial_path(partial_distinct_rel, (Path *)
+							 create_upper_unique_path(root, partial_distinct_rel,
+													  sorted_path,
+													  list_length(root->distinct_pathkeys),
+													  numDistinctRows));
+		}
+	}
+#else						/* #if PG_VERSION_NUM >= 160000 */
 	/* first try adding unique paths atop of sorted paths */
 	if (grouping_is_sortable(parse->distinctClause))
 	{
@@ -4548,6 +5314,7 @@ create_partial_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 			}
 		}
 	}
+#endif						/* #if PG_VERSION_NUM >= 160000 */
 
 	/*
 	 * Now try hash aggregate paths, if enabled and hashing is possible. Since
@@ -4555,7 +5322,11 @@ create_partial_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	 * path here, we treat enable_hashagg as a hard off-switch rather than the
 	 * slightly softer variant in create_final_distinct_paths.
 	 */
+#if PG_VERSION_NUM >= 160000
+	if (enable_hashagg && grouping_is_hashable(root->processed_distinctClause))
+#else
 	if (enable_hashagg && grouping_is_hashable(parse->distinctClause))
+#endif
 	{
 		add_partial_path(partial_distinct_rel, (Path *)
 						 create_agg_path(root,
@@ -4564,7 +5335,11 @@ create_partial_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 										 cheapest_partial_path->pathtarget,
 										 AGG_HASHED,
 										 AGGSPLIT_SIMPLE,
+#if PG_VERSION_NUM >= 160000
+										 root->processed_distinctClause,
+#else
 										 parse->distinctClause,
+#endif
 										 NIL,
 										 NULL,
 										 numDistinctRows));
@@ -4589,7 +5364,11 @@ create_partial_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 
 	if (partial_distinct_rel->partial_pathlist != NIL)
 	{
+#ifdef __PG_QUERY_PLAN__
+		pgqp_generate_gather_paths(root, partial_distinct_rel, true);
+#else
 		generate_gather_paths(root, partial_distinct_rel, true);
+#endif
 		set_cheapest(partial_distinct_rel);
 
 		/*
@@ -4617,8 +5396,10 @@ create_final_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	Path	   *cheapest_input_path = input_rel->cheapest_total_path;
 	double		numDistinctRows;
 	bool		allow_hash;
+#if PG_VERSION_NUM < 160000
 	Path	   *path;
 	ListCell   *lc;
+#endif
 
 	/* Estimate number of distinct rows there will be */
 	if (parse->groupClause || parse->groupingSets || parse->hasAggs ||
@@ -4638,8 +5419,13 @@ create_final_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 		 */
 		List	   *distinctExprs;
 
+#if PG_VERSION_NUM >= 160000
+		distinctExprs = get_sortgrouplist_exprs(root->processed_distinctClause,
+												parse->targetList);
+#else
 		distinctExprs = get_sortgrouplist_exprs(parse->distinctClause,
 												parse->targetList);
+#endif
 		numDistinctRows = estimate_num_groups(root, distinctExprs,
 											  cheapest_input_path->rows,
 											  NULL, NULL);
@@ -4648,12 +5434,18 @@ create_final_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	/*
 	 * Consider sort-based implementations of DISTINCT, if possible.
 	 */
+#if PG_VERSION_NUM >= 160000
+	if (grouping_is_sortable(root->processed_distinctClause))
+#else
 	if (grouping_is_sortable(parse->distinctClause))
+#endif
 	{
 		/*
-		 * First, if we have any adequately-presorted paths, just stick a
-		 * Unique node on those.  Then consider doing an explicit sort of the
-		 * cheapest input path and Unique'ing that.
+		 * Firstly, if we have any adequately-presorted paths, just stick a
+		 * Unique node on those.  We also, consider doing an explicit sort of
+		 * the cheapest input path and Unique'ing that.  If any paths have
+		 * presorted keys then we'll create an incremental sort atop of those
+		 * before adding a unique node on the top.
 		 *
 		 * When we have DISTINCT ON, we must sort by the more rigorous of
 		 * DISTINCT and ORDER BY, else it won't have the desired behavior.
@@ -4663,6 +5455,10 @@ create_final_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 		 * the other.)
 		 */
 		List	   *needed_pathkeys;
+#if PG_VERSION_NUM >= 160000
+		ListCell   *lc;
+		double		limittuples = root->distinct_pathkeys == NIL ? 1.0 : -1.0;
+#endif
 
 		if (parse->hasDistinctOn &&
 			list_length(root->distinct_pathkeys) <
@@ -4671,6 +5467,95 @@ create_final_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 		else
 			needed_pathkeys = root->distinct_pathkeys;
 
+#if PG_VERSION_NUM >= 160000
+		foreach(lc, input_rel->pathlist)
+		{
+			Path	   *input_path = (Path *) lfirst(lc);
+			Path	   *sorted_path;
+			bool		is_sorted;
+			int			presorted_keys;
+
+			is_sorted = pathkeys_count_contained_in(needed_pathkeys,
+													input_path->pathkeys,
+													&presorted_keys);
+
+			if (is_sorted)
+				sorted_path = input_path;
+			else
+			{
+				/*
+				 * Try at least sorting the cheapest path and also try
+				 * incrementally sorting any path which is partially sorted
+				 * already (no need to deal with paths which have presorted
+				 * keys when incremental sort is disabled unless it's the
+				 * cheapest input path).
+				 */
+				if (input_path != cheapest_input_path &&
+					(presorted_keys == 0 || !enable_incremental_sort))
+					continue;
+
+				/*
+				 * We've no need to consider both a sort and incremental sort.
+				 * We'll just do a sort if there are no presorted keys and an
+				 * incremental sort when there are presorted keys.
+				 */
+				if (presorted_keys == 0 || !enable_incremental_sort)
+					sorted_path = (Path *) create_sort_path(root,
+															distinct_rel,
+															input_path,
+															needed_pathkeys,
+															limittuples);
+				else
+					sorted_path = (Path *) create_incremental_sort_path(root,
+																		distinct_rel,
+																		input_path,
+																		needed_pathkeys,
+																		presorted_keys,
+																		limittuples);
+			}
+
+			/*
+			 * distinct_pathkeys may have become empty if all of the pathkeys
+			 * were determined to be redundant.  If all of the pathkeys are
+			 * redundant then each DISTINCT target must only allow a single
+			 * value, therefore all resulting tuples must be identical (or at
+			 * least indistinguishable by an equality check).  We can uniquify
+			 * these tuples simply by just taking the first tuple.  All we do
+			 * here is add a path to do "LIMIT 1" atop of 'sorted_path'.  When
+			 * doing a DISTINCT ON we may still have a non-NIL sort_pathkeys
+			 * list, so we must still only do this with paths which are
+			 * correctly sorted by sort_pathkeys.
+			 */
+			if (root->distinct_pathkeys == NIL)
+			{
+				Node	   *limitCount;
+
+				limitCount = (Node *) makeConst(INT8OID, -1, InvalidOid,
+												sizeof(int64),
+												Int64GetDatum(1), false,
+												FLOAT8PASSBYVAL);
+
+				/*
+				 * If the query already has a LIMIT clause, then we could end
+				 * up with a duplicate LimitPath in the final plan. That does
+				 * not seem worth troubling over too much.
+				 */
+				add_path(distinct_rel, (Path *)
+						 create_limit_path(root, distinct_rel, sorted_path,
+										   NULL, limitCount,
+										   LIMIT_OPTION_COUNT, 0, 1));
+			}
+			else
+			{
+				add_path(distinct_rel, (Path *)
+						 create_upper_unique_path(root, distinct_rel,
+												  sorted_path,
+												  list_length(root->distinct_pathkeys),
+												  numDistinctRows));
+			}
+		}
+	}
+#else		/* #if PG_VERSION_NUM >= 160000 */
 		foreach(lc, input_rel->pathlist)
 		{
 			Path	   *path = (Path *) lfirst(lc);
@@ -4710,6 +5595,7 @@ create_final_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 										  list_length(root->distinct_pathkeys),
 										  numDistinctRows));
 	}
+#endif		/* #if PG_VERSION_NUM >= 160000 */
 
 	/*
 	 * Consider hash-based implementations of DISTINCT, if possible.
@@ -4730,7 +5616,11 @@ create_final_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	else
 		allow_hash = true;		/* default */
 
+#if PG_VERSION_NUM >= 160000
+	if (allow_hash && grouping_is_hashable(root->processed_distinctClause))
+#else
 	if (allow_hash && grouping_is_hashable(parse->distinctClause))
+#endif
 	{
 		/* Generate hashed aggregate path --- no sort needed */
 		add_path(distinct_rel, (Path *)
@@ -4740,7 +5630,11 @@ create_final_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 								 cheapest_input_path->pathtarget,
 								 AGG_HASHED,
 								 AGGSPLIT_SIMPLE,
+#if PG_VERSION_NUM >= 160000
+								 root->processed_distinctClause,
+#else
 								 parse->distinctClause,
+#endif
 								 NIL,
 								 NULL,
 								 numDistinctRows));
@@ -4748,7 +5642,7 @@ create_final_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 
 	return distinct_rel;
 }
-#else
+#else	/* #if PG_VERSION_NUM >= 150000 */
 /*
  * create_distinct_paths
  *
@@ -4944,7 +5838,8 @@ create_distinct_paths(PlannerInfo *root,
 
 	return distinct_rel;
 }
-#endif							/* #if PG_VERSION_NUM >= 150000 */
+#endif							/* #if else PG_VERSION_NUM >= 150000 */
+
 
 /*
  * create_ordered_paths
@@ -4996,13 +5891,60 @@ create_ordered_paths(PlannerInfo *root,
 	foreach(lc, input_rel->pathlist)
 	{
 		Path	   *input_path = (Path *) lfirst(lc);
+#if PG_VERSION_NUM >= 160000
+		Path	   *sorted_path;
+#else
 		Path	   *sorted_path = input_path;
+#endif
 		bool		is_sorted;
 		int			presorted_keys;
 
 		is_sorted = pathkeys_count_contained_in(root->sort_pathkeys,
 												input_path->pathkeys, &presorted_keys);
 
+#if PG_VERSION_NUM >= 160000
+		if (is_sorted)
+			sorted_path = input_path;
+		else
+		{
+			/*
+			 * Try at least sorting the cheapest path and also try
+			 * incrementally sorting any path which is partially sorted
+			 * already (no need to deal with paths which have presorted keys
+			 * when incremental sort is disabled unless it's the cheapest
+			 * input path).
+			 */
+			if (input_path != cheapest_input_path &&
+				(presorted_keys == 0 || !enable_incremental_sort))
+				continue;
+
+			/*
+			 * We've no need to consider both a sort and incremental sort.
+			 * We'll just do a sort if there are no presorted keys and an
+			 * incremental sort when there are presorted keys.
+			 */
+			if (presorted_keys == 0 || !enable_incremental_sort)
+				sorted_path = (Path *) create_sort_path(root,
+														ordered_rel,
+														input_path,
+														root->sort_pathkeys,
+														limit_tuples);
+			else
+				sorted_path = (Path *) create_incremental_sort_path(root,
+																	ordered_rel,
+																	input_path,
+																	root->sort_pathkeys,
+																	presorted_keys,
+																	limit_tuples);
+		}
+
+		/* Add projection step if needed */
+		if (sorted_path->pathtarget != target)
+			sorted_path = apply_projection_to_path(root, ordered_rel,
+												   sorted_path, target);
+
+		add_path(ordered_rel, sorted_path);
+#else						/* #if PG_VERSION_NUM >= 160000 */
 		if (is_sorted)
 		{
 			/* Use the input path as is, but add a projection step if needed */
@@ -5059,7 +6001,6 @@ create_ordered_paths(PlannerInfo *root,
 																root->sort_pathkeys,
 																presorted_keys,
 																limit_tuples);
-
 			/* Add projection step if needed */
 			if (sorted_path->pathtarget != target)
 				sorted_path = apply_projection_to_path(root, ordered_rel,
@@ -5067,6 +6008,7 @@ create_ordered_paths(PlannerInfo *root,
 
 			add_path(ordered_rel, sorted_path);
 		}
+#endif						/* #if PG_VERSION_NUM >= 160000 */
 	}
 
 	/*
@@ -5105,11 +6047,19 @@ create_ordered_paths(PlannerInfo *root,
 			total_groups = cheapest_partial_path->rows *
 				cheapest_partial_path->parallel_workers;
 			path = (Path *)
+#ifdef __PG_QUERY_PLAN__
+				pgqp_create_gather_merge_path(root, ordered_rel,
+											  path,
+											  path->pathtarget,
+											  root->sort_pathkeys, NULL,
+											  &total_groups);
+#else
 				create_gather_merge_path(root, ordered_rel,
 										 path,
 										 path->pathtarget,
 										 root->sort_pathkeys, NULL,
 										 &total_groups);
+#endif
 
 			/* Add projection step if needed */
 			if (path->pathtarget != target)
@@ -5128,7 +6078,9 @@ create_ordered_paths(PlannerInfo *root,
 		 */
 		if (enable_incremental_sort && list_length(root->sort_pathkeys) > 1)
 		{
+#if PG_VERSION_NUM < 160000
 			ListCell   *lc;
+#endif
 
 			foreach(lc, input_rel->partial_pathlist)
 			{
@@ -5166,11 +6118,19 @@ create_ordered_paths(PlannerInfo *root,
 				total_groups = input_path->rows *
 					input_path->parallel_workers;
 				sorted_path = (Path *)
+#ifdef __PG_QUERY_PLAN__
+					pgqp_create_gather_merge_path(root, ordered_rel,
+												  sorted_path,
+												  sorted_path->pathtarget,
+												  root->sort_pathkeys, NULL,
+												  &total_groups);
+#else
 					create_gather_merge_path(root, ordered_rel,
 											 sorted_path,
 											 sorted_path->pathtarget,
 											 root->sort_pathkeys, NULL,
 											 &total_groups);
+#endif
 
 				/* Add projection step if needed */
 				if (sorted_path->pathtarget != target)
@@ -5257,8 +6217,14 @@ make_group_input_target(PlannerInfo *root, PathTarget *final_target)
 		Expr	   *expr = (Expr *) lfirst(lc);
 		Index		sgref = get_pathtarget_sortgroupref(final_target, i);
 
+#if PG_VERSION_NUM >= 160000
+		if (sgref && root->processed_groupClause &&
+			get_sortgroupref_clause_noerr(sgref,
+										  root->processed_groupClause) != NULL)
+#else
 		if (sgref && parse->groupClause &&
 			get_sortgroupref_clause_noerr(sgref, parse->groupClause) != NULL)
+#endif
 		{
 			/*
 			 * It's a grouping column, so add it to the input target as-is.
@@ -5326,7 +6292,9 @@ make_partial_grouping_target(PlannerInfo *root,
 							 PathTarget *grouping_target,
 							 Node *havingQual)
 {
+#if PG_VERSION_NUM < 160000
 	Query	   *parse = root->parse;
+#endif
 	PathTarget *partial_target;
 	List	   *non_group_cols;
 	List	   *non_group_exprs;
@@ -5342,8 +6310,14 @@ make_partial_grouping_target(PlannerInfo *root,
 		Expr	   *expr = (Expr *) lfirst(lc);
 		Index		sgref = get_pathtarget_sortgroupref(grouping_target, i);
 
+#if PG_VERSION_NUM >= 160000
+		if (sgref && root->processed_groupClause &&
+			get_sortgroupref_clause_noerr(sgref,
+										  root->processed_groupClause) != NULL)
+#else
 		if (sgref && parse->groupClause &&
 			get_sortgroupref_clause_noerr(sgref, parse->groupClause) != NULL)
+#endif
 		{
 			/*
 			 * It's a grouping column, so add it to the partial_target as-is.
@@ -5496,6 +6470,152 @@ postprocess_setop_tlist(List *new_tlist, List *orig_tlist)
 	return new_tlist;
 }
 
+// #ifndef __PG_QUERY_PLAN__
+/*
+ * optimize_window_clauses
+ *		Call each WindowFunc's prosupport function to see if we're able to
+ *		make any adjustments to any of the WindowClause's so that the executor
+ *		can execute the window functions in a more optimal way.
+ *
+ * Currently we only allow adjustments to the WindowClause's frameOptions.  We
+ * may allow more things to be done here in the future.
+ */
+static void
+optimize_window_clauses(PlannerInfo *root, WindowFuncLists *wflists)
+{
+	List	   *windowClause = root->parse->windowClause;
+	ListCell   *lc;
+
+	foreach(lc, windowClause)
+	{
+		WindowClause *wc = lfirst_node(WindowClause, lc);
+		ListCell   *lc2;
+		int			optimizedFrameOptions = 0;
+
+		Assert(wc->winref <= wflists->maxWinRef);
+
+		/* skip any WindowClauses that have no WindowFuncs */
+		if (wflists->windowFuncs[wc->winref] == NIL)
+			continue;
+
+		foreach(lc2, wflists->windowFuncs[wc->winref])
+		{
+			SupportRequestOptimizeWindowClause req;
+			SupportRequestOptimizeWindowClause *res;
+			WindowFunc *wfunc = lfirst_node(WindowFunc, lc2);
+			Oid			prosupport;
+
+			prosupport = get_func_support(wfunc->winfnoid);
+
+			/* Check if there's a support function for 'wfunc' */
+			if (!OidIsValid(prosupport))
+				break;			/* can't optimize this WindowClause */
+
+			req.type = T_SupportRequestOptimizeWindowClause;
+			req.window_clause = wc;
+			req.window_func = wfunc;
+			req.frameOptions = wc->frameOptions;
+
+			/* call the support function */
+			res = (SupportRequestOptimizeWindowClause *)
+				DatumGetPointer(OidFunctionCall1(prosupport,
+												 PointerGetDatum(&req)));
+
+			/*
+			 * Skip to next WindowClause if the support function does not
+			 * support this request type.
+			 */
+			if (res == NULL)
+				break;
+
+			/*
+			 * Save these frameOptions for the first WindowFunc for this
+			 * WindowClause.
+			 */
+			if (foreach_current_index(lc2) == 0)
+				optimizedFrameOptions = res->frameOptions;
+
+			/*
+			 * On subsequent WindowFuncs, if the frameOptions are not the same
+			 * then we're unable to optimize the frameOptions for this
+			 * WindowClause.
+			 */
+			else if (optimizedFrameOptions != res->frameOptions)
+				break;			/* skip to the next WindowClause, if any */
+		}
+
+		/* adjust the frameOptions if all WindowFunc's agree that it's ok */
+		if (lc2 == NULL && wc->frameOptions != optimizedFrameOptions)
+		{
+			ListCell   *lc3;
+
+			/* apply the new frame options */
+			wc->frameOptions = optimizedFrameOptions;
+
+			/*
+			 * We now check to see if changing the frameOptions has caused
+			 * this WindowClause to be a duplicate of some other WindowClause.
+			 * This can only happen if we have multiple WindowClauses, so
+			 * don't bother if there's only 1.
+			 */
+			if (list_length(windowClause) == 1)
+				continue;
+
+			/*
+			 * Do the duplicate check and reuse the existing WindowClause if
+			 * we find a duplicate.
+			 */
+			foreach(lc3, windowClause)
+			{
+				WindowClause *existing_wc = lfirst_node(WindowClause, lc3);
+
+				/* skip over the WindowClause we're currently editing */
+				if (existing_wc == wc)
+					continue;
+
+				/*
+				 * Perform the same duplicate check that is done in
+				 * transformWindowFuncCall.
+				 */
+				if (equal(wc->partitionClause, existing_wc->partitionClause) &&
+					equal(wc->orderClause, existing_wc->orderClause) &&
+					wc->frameOptions == existing_wc->frameOptions &&
+					equal(wc->startOffset, existing_wc->startOffset) &&
+					equal(wc->endOffset, existing_wc->endOffset))
+				{
+					ListCell   *lc4;
+
+					/*
+					 * Now move each WindowFunc in 'wc' into 'existing_wc'.
+					 * This required adjusting each WindowFunc's winref and
+					 * moving the WindowFuncs in 'wc' to the list of
+					 * WindowFuncs in 'existing_wc'.
+					 */
+					foreach(lc4, wflists->windowFuncs[wc->winref])
+					{
+						WindowFunc *wfunc = lfirst_node(WindowFunc, lc4);
+
+						wfunc->winref = existing_wc->winref;
+					}
+
+					/* move list items */
+					wflists->windowFuncs[existing_wc->winref] = list_concat(wflists->windowFuncs[existing_wc->winref],
+																			wflists->windowFuncs[wc->winref]);
+					wflists->windowFuncs[wc->winref] = NIL;
+
+					/*
+					 * transformWindowFuncCall() should have made sure there
+					 * are no other duplicates, so we needn't bother looking
+					 * any further.
+					 */
+					break;
+				}
+			}
+		}
+	}
+}
+// #endif /* __PG_QUERY_PLAN__ */
+
 /*
  * select_active_windows
  *		Create a list of the "active" window clauses (ie, those referenced
@@ -5580,6 +6700,14 @@ select_active_windows(PlannerInfo *root, WindowFuncLists *wflists)
  * Sort the windows by the required sorting clauses. First, compare the sort
  * clauses themselves. Second, if one window's clauses are a prefix of another
  * one's clauses, put the window with more sort clauses first.
+ *
+ * We purposefully sort by the highest tleSortGroupRef first.  Since
+ * tleSortGroupRefs are assigned for the query's DISTINCT and ORDER BY first
+ * and because here we sort the lowest tleSortGroupRefs last, if a
+ * WindowClause is sharing a tleSortGroupRef with the query's DISTINCT or
+ * ORDER BY clause, this makes it more likely that the final WindowAgg will
+ * provide presorted input for the query's DISTINCT or ORDER BY clause, thus
+ * reducing the total number of sorts required for the query.
  */
 static int
 common_prefix_cmp(const void *a, const void *b)
@@ -5655,7 +6783,9 @@ make_window_input_target(PlannerInfo *root,
 						 PathTarget *final_target,
 						 List *activeWindows)
 {
+#if PG_VERSION_NUM < 160000
 	Query	   *parse = root->parse;
+#endif
 	PathTarget *input_target;
 	Bitmapset  *sgrefs;
 	List	   *flattenable_cols;
@@ -5663,7 +6793,11 @@ make_window_input_target(PlannerInfo *root,
 	int			i;
 	ListCell   *lc;
 
+#if PG_VERSION_NUM >= 160000
+	Assert(root->parse->hasWindowFuncs);
+#else
 	Assert(parse->hasWindowFuncs);
+#endif
 
 	/*
 	 * Collect the sortgroupref numbers of window PARTITION/ORDER BY clauses
@@ -5690,7 +6824,11 @@ make_window_input_target(PlannerInfo *root,
 	}
 
 	/* Add in sortgroupref numbers of GROUP BY clauses, too */
+#if PG_VERSION_NUM >= 160000
+	foreach(lc, root->processed_groupClause)
+#else
 	foreach(lc, parse->groupClause)
+#endif
 	{
 		SortGroupClause *grpcl = lfirst_node(SortGroupClause, lc);
 
@@ -5764,6 +6902,9 @@ make_window_input_target(PlannerInfo *root,
  *		Create a pathkeys list describing the required input ordering
  *		for the given WindowClause.
  *
+ * Modifies wc's partitionClause to remove any clauses which are deemed
+ * redundant by the pathkey logic.
+ *
  * The required ordering is first the PARTITION keys, then the ORDER keys.
  * In the future we might try to implement windowing using hashing, in which
  * case the ordering could be relaxed, but for now we always sort.
@@ -5772,8 +6913,12 @@ static List *
 make_pathkeys_for_window(PlannerInfo *root, WindowClause *wc,
 						 List *tlist)
 {
+#if PG_VERSION_NUM >= 160000
+	List	   *window_pathkeys = NIL;
+#else
 	List	   *window_pathkeys;
 	List	   *window_sortclauses;
+#endif
 
 	/* Throw error if can't sort */
 	if (!grouping_is_sortable(wc->partitionClause))
@@ -5787,6 +6932,48 @@ make_pathkeys_for_window(PlannerInfo *root, WindowClause *wc,
 				 errmsg("could not implement window ORDER BY"),
 				 errdetail("Window ordering columns must be of sortable datatypes.")));
 
+#if PG_VERSION_NUM >= 160000
+	/*
+	 * First fetch the pathkeys for the PARTITION BY clause.  We can safely
+	 * remove any clauses from the wc->partitionClause for redundant pathkeys.
+	 */
+	if (wc->partitionClause != NIL)
+	{
+		bool		sortable;
+
+		window_pathkeys = make_pathkeys_for_sortclauses_extended(root,
+																 &wc->partitionClause,
+																 tlist,
+																 true,
+																 &sortable);
+
+		Assert(sortable);
+	}
+
+	/*
+	 * In principle, we could also consider removing redundant ORDER BY items
+	 * too as doing so does not alter the result of peer row checks done by
+	 * the executor.  However, we must *not* remove the ordering column for
+	 * RANGE OFFSET cases, as the executor needs that for in_range tests even
+	 * if it's known to be equal to some partitioning column.
+	 */
+	if (wc->orderClause != NIL)
+	{
+		List	   *orderby_pathkeys;
+
+		orderby_pathkeys = make_pathkeys_for_sortclauses(root,
+														 wc->orderClause,
+														 tlist);
+
+		/* Okay, make the combined pathkeys */
+		if (window_pathkeys != NIL)
+			window_pathkeys = append_pathkeys(window_pathkeys, orderby_pathkeys);
+		else
+			window_pathkeys = orderby_pathkeys;
+	}
+
+	return window_pathkeys;
+#else						/* #if PG_VERSION_NUM >= 160000 */
 	/* Okay, make the combined pathkeys */
 	window_sortclauses = list_concat_copy(wc->partitionClause, wc->orderClause);
 	window_pathkeys = make_pathkeys_for_sortclauses(root,
@@ -5794,6 +6981,7 @@ make_pathkeys_for_window(PlannerInfo *root, WindowClause *wc,
 													tlist);
 	list_free(window_sortclauses);
 	return window_pathkeys;
+#endif						/* #if PG_VERSION_NUM >= 160000 */
 }
 
 /*
@@ -6316,6 +7504,9 @@ plan_cluster_use_sort(Oid tableOid, Oid indexOid)
 	root->query_level = 1;
 	root->planner_cxt = CurrentMemoryContext;
 	root->wt_param_id = -1;
+#if PG_VERSION_NUM >= 160000
+	root->join_domains = list_make1(makeNode(JoinDomain));
+#endif
 
 	/* Build a minimal RTE for the rel */
 	rte = makeNode(RangeTblEntry);
@@ -6327,6 +7518,9 @@ plan_cluster_use_sort(Oid tableOid, Oid indexOid)
 	rte->inh = false;
 	rte->inFromCl = true;
 	query->rtable = list_make1(rte);
+#if PG_VERSION_NUM >= 160000
+	addRTEPermissionInfo(&query->rteperminfos, rte);
+#endif
 
 	/* Set up RTE/RelOptInfo arrays */
 	setup_simple_rel_arrays(root);
@@ -6449,6 +7643,9 @@ plan_create_index_workers(Oid tableOid, Oid indexOid)
 	root->query_level = 1;
 	root->planner_cxt = CurrentMemoryContext;
 	root->wt_param_id = -1;
+#if PG_VERSION_NUM >= 160000
+	root->join_domains = list_make1(makeNode(JoinDomain));
+#endif
 
 	/*
 	 * Build a minimal RTE.
@@ -6467,6 +7664,9 @@ plan_create_index_workers(Oid tableOid, Oid indexOid)
 	rte->inh = true;
 	rte->inFromCl = true;
 	query->rtable = list_make1(rte);
+#if PG_VERSION_NUM >= 160000
+	addRTEPermissionInfo(&query->rteperminfos, rte);
+#endif
 
 	/* Set up RTE/RelOptInfo arrays */
 	setup_simple_rel_arrays(root);
@@ -6568,12 +7768,15 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 	{
 		/*
 		 * Use any available suitably-sorted path as input, and also consider
-		 * sorting the cheapest-total path.
+		 * sorting the cheapest-total path and incremental sort on any paths
+		 * with presorted keys.
 		 */
 		foreach(lc, input_rel->pathlist)
 		{
 			Path	   *path = (Path *) lfirst(lc);
+#if PG_VERSION_NUM < 160000
 			Path	   *path_original = path;
+#endif
 			bool		is_sorted;
 			int			presorted_keys;
 
@@ -6581,6 +7784,40 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 													path->pathkeys,
 													&presorted_keys);
 
+#if PG_VERSION_NUM >= 160000
+			if (!is_sorted)
+			{
+				/*
+				 * Try at least sorting the cheapest path and also try
+				 * incrementally sorting any path which is partially sorted
+				 * already (no need to deal with paths which have presorted
+				 * keys when incremental sort is disabled unless it's the
+				 * cheapest input path).
+				 */
+				if (path != cheapest_path &&
+					(presorted_keys == 0 || !enable_incremental_sort))
+					continue;
+
+				/*
+				 * We've no need to consider both a sort and incremental sort.
+				 * We'll just do a sort if there are no presorted keys and an
+				 * incremental sort when there are presorted keys.
+				 */
+				if (presorted_keys == 0 || !enable_incremental_sort)
+					path = (Path *) create_sort_path(root,
+													 grouped_rel,
+													 path,
+													 root->group_pathkeys,
+													 -1.0);
+				else
+					path = (Path *) create_incremental_sort_path(root,
+																 grouped_rel,
+																 path,
+																 root->group_pathkeys,
+																 presorted_keys,
+																 -1.0);
+			}
+#else						/* #if PG_VERSION_NUM >= 160000 */
 			if (path == cheapest_path || is_sorted)
 			{
 				/* Sort the cheapest-total path if it isn't already sorted */
@@ -6664,6 +7901,7 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 														 root->group_pathkeys,
 														 presorted_keys,
 														 -1.0);
+#endif						/* #if else PG_VERSION_NUM >= 160000 */
 
 			/* Now decide what to stick atop it */
 			if (parse->groupingSets)
@@ -6685,7 +7923,11 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 										 grouped_rel->reltarget,
 										 parse->groupClause ? AGG_SORTED : AGG_PLAIN,
 										 AGGSPLIT_SIMPLE,
+#if PG_VERSION_NUM >= 160000
+										 root->processed_groupClause,
+#else
 										 parse->groupClause,
+#endif
 										 havingQual,
 										 agg_costs,
 										 dNumGroups));
@@ -6700,7 +7942,11 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 						 create_group_path(root,
 										   grouped_rel,
 										   path,
+#if PG_VERSION_NUM >= 160000
+										   root->processed_groupClause,
+#else
 										   parse->groupClause,
+#endif
 										   havingQual,
 										   dNumGroups));
 			}
@@ -6720,7 +7966,9 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 			foreach(lc, partially_grouped_rel->pathlist)
 			{
 				Path	   *path = (Path *) lfirst(lc);
+#if PG_VERSION_NUM < 160000
 				Path	   *path_original = path;
+#endif
 				bool		is_sorted;
 				int			presorted_keys;
 
@@ -6728,10 +7976,47 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 														path->pathkeys,
 														&presorted_keys);
 
+#if PG_VERSION_NUM < 160000
 				/*
 				 * Insert a Sort node, if required.  But there's no point in
 				 * sorting anything but the cheapest path.
 				 */
+#endif
+#if PG_VERSION_NUM >= 160000
+				if (!is_sorted)
+				{
+					/*
+					 * Try at least sorting the cheapest path and also try
+					 * incrementally sorting any path which is partially
+					 * sorted already (no need to deal with paths which have
+					 * presorted keys when incremental sort is disabled unless
+					 * it's the cheapest input path).
+					 */
+					if (path != partially_grouped_rel->cheapest_total_path &&
+						(presorted_keys == 0 || !enable_incremental_sort))
+						continue;
+
+					/*
+					 * We've no need to consider both a sort and incremental
+					 * sort.  We'll just do a sort if there are no pre-sorted
+					 * keys and an incremental sort when there are presorted
+					 * keys.
+					 */
+					if (presorted_keys == 0 || !enable_incremental_sort)
+						path = (Path *) create_sort_path(root,
+														 grouped_rel,
+														 path,
+														 root->group_pathkeys,
+														 -1.0);
+					else
+						path = (Path *) create_incremental_sort_path(root,
+																	 grouped_rel,
+																	 path,
+																	 root->group_pathkeys,
+																	 presorted_keys,
+																	 -1.0);
+				}
+#else								/*  #if PG_VERSION_NUM >= 160000 */
 				if (!is_sorted)
 				{
 					if (path != partially_grouped_rel->cheapest_total_path)
@@ -6742,6 +8027,7 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 													 root->group_pathkeys,
 													 -1.0);
 				}
+#endif								/*  #if else PG_VERSION_NUM >= 160000 */
 
 				if (parse->hasAggs)
 					add_path(grouped_rel, (Path *)
@@ -6751,7 +8037,11 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 											 grouped_rel->reltarget,
 											 parse->groupClause ? AGG_SORTED : AGG_PLAIN,
 											 AGGSPLIT_FINAL_DESERIAL,
+#if PG_VERSION_NUM >= 160000
+											 root->processed_groupClause,
+#else
 											 parse->groupClause,
+#endif
 											 havingQual,
 											 agg_final_costs,
 											 dNumGroups));
@@ -6760,10 +8050,15 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 							 create_group_path(root,
 											   grouped_rel,
 											   path,
+#if PG_VERSION_NUM >= 160000
+											   root->processed_groupClause,
+#else
 											   parse->groupClause,
+#endif
 											   havingQual,
 											   dNumGroups));
 
+#if PG_VERSION_NUM < 160000
 				/*
 				 * Now we may consider incremental sort on this path, but only
 				 * when the path is not already sorted and when incremental
@@ -6813,9 +8108,11 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 											   parse->groupClause,
 											   havingQual,
 											   dNumGroups));
+#endif						/* #if PG_VERSION_NUM < 160000 */
 			}
 		}
 	}
+/// #endif						/* #if PG_VERSION_NUM >= 160000 */
 
 	if (can_hash)
 	{
@@ -6840,7 +8137,11 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 									 grouped_rel->reltarget,
 									 AGG_HASHED,
 									 AGGSPLIT_SIMPLE,
+#if PG_VERSION_NUM >= 160000
+									 root->processed_groupClause,
+#else
 									 parse->groupClause,
+#endif
 									 havingQual,
 									 agg_costs,
 									 dNumGroups));
@@ -6861,7 +8162,11 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 									 grouped_rel->reltarget,
 									 AGG_HASHED,
 									 AGGSPLIT_FINAL_DESERIAL,
+#if PG_VERSION_NUM >= 160000
+									 root->processed_groupClause,
+#else
 									 parse->groupClause,
+#endif
 									 havingQual,
 									 agg_final_costs,
 									 dNumGroups));
@@ -7013,11 +8318,76 @@ create_partial_grouping_paths(PlannerInfo *root,
 		 * Use any available suitably-sorted path as input, and also consider
 		 * sorting the cheapest partial path.
 		 */
+
+#if PG_VERSION_NUM >= 160000
 		foreach(lc, input_rel->pathlist)
 		{
 			Path	   *path = (Path *) lfirst(lc);
 			bool		is_sorted;
+			int			presorted_keys;
 
+			is_sorted = pathkeys_count_contained_in(root->group_pathkeys,
+													path->pathkeys,
+													&presorted_keys);
+			if (!is_sorted)
+			{
+				/*
+				 * Try at least sorting the cheapest path and also try
+				 * incrementally sorting any path which is partially sorted
+				 * already (no need to deal with paths which have presorted
+				 * keys when incremental sort is disabled unless it's the
+				 * cheapest input path).
+				 */
+				if (path != cheapest_total_path &&
+					(presorted_keys == 0 || !enable_incremental_sort))
+					continue;
+
+				/*
+				 * We've no need to consider both a sort and incremental sort.
+				 * We'll just do a sort if there are no presorted keys and an
+				 * incremental sort when there are presorted keys.
+				 */
+				if (presorted_keys == 0 || !enable_incremental_sort)
+					path = (Path *) create_sort_path(root,
+													 partially_grouped_rel,
+													 path,
+													 root->group_pathkeys,
+													 -1.0);
+				else
+					path = (Path *) create_incremental_sort_path(root,
+																 partially_grouped_rel,
+																 path,
+																 root->group_pathkeys,
+																 presorted_keys,
+																 -1.0);
+			}
+
+			if (parse->hasAggs)
+				add_path(partially_grouped_rel, (Path *)
+						 create_agg_path(root,
+										 partially_grouped_rel,
+										 path,
+										 partially_grouped_rel->reltarget,
+										 parse->groupClause ? AGG_SORTED : AGG_PLAIN,
+										 AGGSPLIT_INITIAL_SERIAL,
+										 root->processed_groupClause,
+										 NIL,
+										 agg_partial_costs,
+										 dNumPartialGroups));
+			else
+				add_path(partially_grouped_rel, (Path *)
+						 create_group_path(root,
+										   partially_grouped_rel,
+										   path,
+										   root->processed_groupClause,
+										   NIL,
+										   dNumPartialGroups));
+		}
+#else						/* #if PG_VERSION_NUM >= 160000 */
+		foreach(lc, input_rel->pathlist)
+		{
+			Path	   *path = (Path *) lfirst(lc);
+			bool		is_sorted;
 			is_sorted = pathkeys_contained_in(root->group_pathkeys,
 											  path->pathkeys);
 			if (path == cheapest_total_path || is_sorted)
@@ -7052,7 +8422,9 @@ create_partial_grouping_paths(PlannerInfo *root,
 											   dNumPartialGroups));
 			}
 		}
+#endif						/* #if else PG_VERSION_NUM >= 160000 */
 
+#if PG_VERSION_NUM < 160000
 		/*
 		 * Consider incremental sort on all partial paths, if enabled.
 		 *
@@ -7109,11 +8481,78 @@ create_partial_grouping_paths(PlannerInfo *root,
 											   dNumPartialGroups));
 			}
 		}
-
+#endif						/* #if PG_VERSION_NUM < 160000 */
 	}
-
 	if (can_sort && cheapest_partial_path != NULL)
 	{
+#if PG_VERSION_NUM >= 160000
+		/* Similar to above logic, but for partial paths. */
+		foreach(lc, input_rel->partial_pathlist)
+		{
+			Path	   *path = (Path *) lfirst(lc);
+			bool		is_sorted;
+			int			presorted_keys;
+
+			is_sorted = pathkeys_count_contained_in(root->group_pathkeys,
+													path->pathkeys,
+													&presorted_keys);
+
+			if (!is_sorted)
+			{
+				/*
+				 * Try at least sorting the cheapest path and also try
+				 * incrementally sorting any path which is partially sorted
+				 * already (no need to deal with paths which have presorted
+				 * keys when incremental sort is disabled unless it's the
+				 * cheapest input path).
+				 */
+				if (path != cheapest_partial_path &&
+					(presorted_keys == 0 || !enable_incremental_sort))
+					continue;
+
+				/*
+				 * We've no need to consider both a sort and incremental sort.
+				 * We'll just do a sort if there are no presorted keys and an
+				 * incremental sort when there are presorted keys.
+				 */
+				if (presorted_keys == 0 || !enable_incremental_sort)
+					path = (Path *) create_sort_path(root,
+													 partially_grouped_rel,
+													 path,
+													 root->group_pathkeys,
+													 -1.0);
+				else
+					path = (Path *) create_incremental_sort_path(root,
+																 partially_grouped_rel,
+																 path,
+																 root->group_pathkeys,
+																 presorted_keys,
+																 -1.0);
+			}
+
+			if (parse->hasAggs)
+				add_partial_path(partially_grouped_rel, (Path *)
+								 create_agg_path(root,
+												 partially_grouped_rel,
+												 path,
+												 partially_grouped_rel->reltarget,
+												 parse->groupClause ? AGG_SORTED : AGG_PLAIN,
+												 AGGSPLIT_INITIAL_SERIAL,
+												 root->processed_groupClause,
+												 NIL,
+												 agg_partial_costs,
+												 dNumPartialPartialGroups));
+			else
+				add_partial_path(partially_grouped_rel, (Path *)
+								 create_group_path(root,
+												   partially_grouped_rel,
+												   path,
+												   root->processed_groupClause,
+												   NIL,
+												   dNumPartialPartialGroups));
+		}
+	}
+#else						/* #if PG_VERSION_NUM >= 160000 */
 		/* Similar to above logic, but for partial paths. */
 		foreach(lc, input_rel->partial_pathlist)
 		{
@@ -7208,6 +8647,7 @@ create_partial_grouping_paths(PlannerInfo *root,
 												   dNumPartialPartialGroups));
 		}
 	}
+#endif						/* #if else PG_VERSION_NUM >= 160000 */
 
 	/*
 	 * Add a partially-grouped HashAgg Path where possible
@@ -7224,7 +8664,11 @@ create_partial_grouping_paths(PlannerInfo *root,
 								 partially_grouped_rel->reltarget,
 								 AGG_HASHED,
 								 AGGSPLIT_INITIAL_SERIAL,
+#if PG_VERSION_NUM >= 160000
+								 root->processed_groupClause,
+#else
 								 parse->groupClause,
+#endif
 								 NIL,
 								 agg_partial_costs,
 								 dNumPartialGroups));
@@ -7242,7 +8686,11 @@ create_partial_grouping_paths(PlannerInfo *root,
 										 partially_grouped_rel->reltarget,
 										 AGG_HASHED,
 										 AGGSPLIT_INITIAL_SERIAL,
+#if PG_VERSION_NUM >= 160000
+										 root->processed_groupClause,
+#else
 										 parse->groupClause,
+#endif
 										 NIL,
 										 agg_partial_costs,
 										 dNumPartialPartialGroups));
@@ -7281,6 +8729,7 @@ create_partial_grouping_paths(PlannerInfo *root,
  */
 static void
 gather_grouping_paths(PlannerInfo *root, RelOptInfo *rel)
+
 {
 	ListCell   *lc;
 	Path	   *cheapest_partial_path;
@@ -7306,6 +8755,15 @@ gather_grouping_paths(PlannerInfo *root, RelOptInfo *rel)
 										 root->group_pathkeys,
 										 -1.0);
 		path = (Path *)
+#ifdef __PG_QUERY_PLAN__
+			pgqp_create_gather_merge_path(root,
+										  rel,
+										  path,
+										  rel->reltarget,
+										  root->group_pathkeys,
+										  NULL,
+										  &total_groups);
+#else
 			create_gather_merge_path(root,
 									 rel,
 									 path,
@@ -7313,6 +8771,7 @@ gather_grouping_paths(PlannerInfo *root, RelOptInfo *rel)
 									 root->group_pathkeys,
 									 NULL,
 									 &total_groups);
+#endif
 
 		add_path(rel, path);
 	}
@@ -7353,6 +8812,15 @@ gather_grouping_paths(PlannerInfo *root, RelOptInfo *rel)
 													 -1.0);
 
 		path = (Path *)
+#ifdef __PG_QUERY_PLAN__
+			pgqp_create_gather_merge_path(root,
+										  rel,
+										  path,
+										  rel->reltarget,
+										  root->group_pathkeys,
+										  NULL,
+										  &total_groups);
+#else
 			create_gather_merge_path(root,
 									 rel,
 									 path,
@@ -7360,6 +8828,7 @@ gather_grouping_paths(PlannerInfo *root, RelOptInfo *rel)
 									 root->group_pathkeys,
 									 NULL,
 									 &total_groups);
+#endif
 
 		add_path(rel, path);
 	}
@@ -7574,6 +9043,7 @@ apply_scanjoin_target_to_paths(PlannerInfo *root,
 #endif
 
 #if PG_VERSION_NUM >= 150000
+		/* Adjust each partition. */
 		i = -1;
 		while ((i = bms_next_member(rel->live_parts, i)) >= 0)
 #else
@@ -7589,7 +9059,9 @@ apply_scanjoin_target_to_paths(PlannerInfo *root,
 			AppendRelInfo **appinfos;
 			int			nappinfos;
 			List	   *child_scanjoin_targets = NIL;
+#if PG_VERSION_NUM < 160000
 			ListCell   *lc;
+#endif
 
 #if PG_VERSION_NUM >= 150000
 			Assert(child_rel != NULL);
@@ -7633,7 +9105,11 @@ apply_scanjoin_target_to_paths(PlannerInfo *root,
 		}
 
 		/* Build new paths for this relation by appending child paths. */
+#ifdef __PG_QUERY_PLAN__
+		pgqp_add_paths_to_append_rel(root, rel, live_children);
+#else
 		add_paths_to_append_rel(root, rel, live_children);
+#endif
 	}
 
 	/*
@@ -7685,7 +9161,7 @@ create_partitionwise_grouping_paths(PlannerInfo *root,
 									PartitionwiseAggregateType patype,
 									GroupPathExtraData *extra)
 {
-#if PG_VERSION_NUM >= 150000
+#if PG_VERSION_NUM >= 160000
 	int			i;
 #else
 	int			nparts = input_rel->nparts;
@@ -7813,8 +9289,13 @@ create_partitionwise_grouping_paths(PlannerInfo *root,
 	{
 		Assert(partially_grouped_live_children != NIL);
 
+#ifdef __PG_QUERY_PLAN__
+		pgqp_add_paths_to_append_rel(root, partially_grouped_rel,
+									 partially_grouped_live_children);
+#else
 		add_paths_to_append_rel(root, partially_grouped_rel,
 								partially_grouped_live_children);
+#endif
 
 		/*
 		 * We need call set_cheapest, since the finalization step will use the
@@ -7829,7 +9310,11 @@ create_partitionwise_grouping_paths(PlannerInfo *root,
 	{
 		Assert(grouped_live_children != NIL);
 
+#ifdef __PG_QUERY_PLAN__
+		pgqp_add_paths_to_append_rel(root, grouped_rel, grouped_live_children);
+#else
 		add_paths_to_append_rel(root, grouped_rel, grouped_live_children);
+#endif
 	}
 }
 

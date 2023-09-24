@@ -377,12 +377,13 @@ build_subplan(PlannerInfo *root, Plan *plan, PlannerInfo *subroot,
 		Node	   *arg = pitem->item;
 
 		/*
-		 * The Var, PlaceHolderVar, or Aggref has already been adjusted to
-		 * have the correct varlevelsup, phlevelsup, or agglevelsup.
+		 * The Var, PlaceHolderVar, Aggref or GroupingFunc has already been
+		 * adjusted to have the correct varlevelsup, phlevelsup, or
+		 * agglevelsup.
 		 *
-		 * If it's a PlaceHolderVar or Aggref, its arguments might contain
-		 * SubLinks, which have not yet been processed (see the comments for
-		 * SS_replace_correlation_vars).  Do that now.
+		 * If it's a PlaceHolderVar, Aggref or GroupingFunc, its arguments
+		 * might contain SubLinks, which have not yet been processed (see the
+		 * comments for SS_replace_correlation_vars).  Do that now.
 		 */
 #if PG_VERSION_NUM >= 150000
 		if (IsA(arg, PlaceHolderVar) ||
@@ -392,7 +393,11 @@ build_subplan(PlannerInfo *root, Plan *plan, PlannerInfo *subroot,
 		if (IsA(arg, PlaceHolderVar) ||
 			IsA(arg, Aggref))
 #endif
+#ifdef __PG_QUERY_PLAN__
+			arg = pgqp_SS_process_sublinks(root, arg, false);
+#else
 			arg = SS_process_sublinks(root, arg, false);
+#endif
 
 		splan->parParam = lappend_int(splan->parParam, pitem->paramId);
 		splan->args = lappend(splan->args, arg);
@@ -882,8 +887,7 @@ hash_ok_operator(OpExpr *expr)
 	if (opid == ARRAY_EQ_OP)
 #endif
 	{
-		/* array_eq is strict, but must check input type to ensure hashable */
-		/* XXX record_eq will need same treatment when it becomes hashable */
+		/* these are strict, but must check input type to ensure hashable */
 		Node	   *leftarg = linitial(expr->args);
 
 		return op_hashjoinable(opid, exprType(leftarg));
@@ -1057,8 +1061,7 @@ SS_process_ctes(PlannerInfo *root)
 
 		/*
 		 * CTE scans are not considered for parallelism (cf
-		 * set_rel_consider_parallel), and even if they were, initPlans aren't
-		 * parallel-safe.
+		 * set_rel_consider_parallel).
 		 */
 		splan->parallel_safe = false;
 		splan->setParam = NIL;
@@ -1197,13 +1200,17 @@ inline_cte(PlannerInfo *root, CommonTableExpr *cte)
 	context.ctename = cte->ctename;
 	/* Start at levelsup = -1 because we'll immediately increment it */
 	context.levelsup = -1;
+#if PG_VERSION_NUM < 160000
 	context.refcount = cte->cterefcount;
+#endif
 	context.ctequery = castNode(Query, cte->ctequery);
 
 	(void) inline_cte_walker((Node *) root->parse, &context);
 
+#if PG_VERSION_NUM < 160000
 	/* Assert we replaced all references */
 	Assert(context.refcount == 0);
+#endif
 }
 
 static bool
@@ -1267,8 +1274,10 @@ inline_cte_walker(Node *node, inline_cte_walker_context *context)
 			rte->coltypmods = NIL;
 			rte->colcollations = NIL;
 
+#if PG_VERSION_NUM < 160000
 			/* Count the number of replacements we've done */
 			context->refcount--;
+#endif
 		}
 
 		return false;
@@ -1529,7 +1538,12 @@ convert_EXISTS_sublink_to_join(PlannerInfo *root, SubLink *sublink,
 	 */
 	clause_varnos = pull_varnos(root, whereClause);
 	upper_varnos = NULL;
+#if PG_VERSION_NUM >= 160000
+	varno = -1;
+	while ((varno = bms_next_member(clause_varnos, varno)) >= 0)
+#else
 	while ((varno = bms_first_member(clause_varnos)) >= 0)
+#endif
 	{
 		if (varno <= rtoffset)
 			upper_varnos = bms_add_member(upper_varnos, varno);
@@ -1544,8 +1558,17 @@ convert_EXISTS_sublink_to_join(PlannerInfo *root, SubLink *sublink,
 	if (!bms_is_subset(upper_varnos, available_rels))
 		return NULL;
 
+#if PG_VERSION_NUM >= 160000
+	/*
+	 * Now we can attach the modified subquery rtable to the parent. This also
+	 * adds subquery's RTEPermissionInfos into the upper query.
+	 */
+	CombineRangeTables(&parse->rtable, &parse->rteperminfos,
+					   subselect->rtable, subselect->rteperminfos);
+#else
 	/* Now we can attach the modified subquery rtable to the parent */
 	parse->rtable = list_concat(parse->rtable, subselect->rtable);
+#endif
 
 	/*
 	 * And finally, build the JoinExpr node.
@@ -2003,7 +2026,6 @@ process_sublinks_mutator(Node *node, process_sublinks_context *context)
 	}
 
 #if PG_VERSION_NUM >= 150000
-
 	/*
 	 * Don't recurse into the arguments of an outer PHV, Aggref or
 	 * GroupingFunc here.  Any SubLinks in the arguments have to be dealt with
@@ -2027,7 +2049,6 @@ process_sublinks_mutator(Node *node, process_sublinks_context *context)
 			return node;
 	}
 #else
-
 	/*
 	 * Don't recurse into the arguments of an outer PHV or aggregate here. Any
 	 * SubLinks in the arguments have to be dealt with at the outer query
@@ -2157,7 +2178,7 @@ SS_identify_outer_params(PlannerInfo *root)
 	outer_params = NULL;
 	for (proot = root->parent_root; proot != NULL; proot = proot->parent_root)
 	{
-		/* Include ordinary Var/PHV/Aggref params */
+		/* Include ordinary Var/PHV/Aggref/GroupingFunc params */
 		foreach(l, proot->plan_params)
 		{
 			PlannerParamItem *pitem = (PlannerParamItem *) lfirst(l);
@@ -2188,24 +2209,35 @@ SS_identify_outer_params(PlannerInfo *root)
  * If any initPlans have been created in the current query level, they will
  * get attached to the Plan tree created from whichever Path we select from
  * the given rel.  Increment all that rel's Paths' costs to account for them,
- * and make sure the paths get marked as parallel-unsafe, since we can't
- * currently transmit initPlans to parallel workers.
+ * and if any of the initPlans are parallel-unsafe, mark all the rel's Paths
+ * parallel-unsafe as well.
  *
  * This is separate from SS_attach_initplans because we might conditionally
  * create more initPlans during create_plan(), depending on which Path we
  * select.  However, Paths that would generate such initPlans are expected
- * to have included their cost already.
+ * to have included their cost and parallel-safety effects already.
  */
 void
 SS_charge_for_initplans(PlannerInfo *root, RelOptInfo *final_rel)
 {
 	Cost		initplan_cost;
+#if PG_VERSION_NUM >= 160000
+	bool		unsafe_initplans;
+#endif
 	ListCell   *lc;
 
 	/* Nothing to do if no initPlans */
 	if (root->init_plans == NIL)
 		return;
 
+#if PG_VERSION_NUM >= 160000
+	/*
+	 * Compute the cost increment just once, since it will be the same for all
+	 * Paths.  Also check for parallel-unsafe initPlans.
+	 */
+	SS_compute_initplan_cost(root->init_plans,
+							 &initplan_cost, &unsafe_initplans);
+#else
 	/*
 	 * Compute the cost increment just once, since it will be the same for all
 	 * Paths.  We assume each initPlan gets run once during top plan startup.
@@ -2219,10 +2251,22 @@ SS_charge_for_initplans(PlannerInfo *root, RelOptInfo *final_rel)
 
 		initplan_cost += initsubplan->startup_cost + initsubplan->per_call_cost;
 	}
+#endif
 
 	/*
 	 * Now adjust the costs and parallel_safe flags.
 	 */
+#if PG_VERSION_NUM >= 160000
+	foreach(lc, final_rel->pathlist)
+	{
+		Path	   *path = (Path *) lfirst(lc);
+
+		path->startup_cost += initplan_cost;
+		path->total_cost += initplan_cost;
+		if (unsafe_initplans)
+			path->parallel_safe = false;
+	}
+#else
 	foreach(lc, final_rel->pathlist)
 	{
 		Path	   *path = (Path *) lfirst(lc);
@@ -2231,16 +2275,81 @@ SS_charge_for_initplans(PlannerInfo *root, RelOptInfo *final_rel)
 		path->total_cost += initplan_cost;
 		path->parallel_safe = false;
 	}
+#endif
 
+#if PG_VERSION_NUM >= 160000
+	/*
+	 * Adjust partial paths' costs too, or forget them entirely if we must
+	 * consider the rel parallel-unsafe.
+	 */
+	if (unsafe_initplans)
+	{
+		final_rel->partial_pathlist = NIL;
+		final_rel->consider_parallel = false;
+	}
+	else
+	{
+		foreach(lc, final_rel->partial_pathlist)
+		{
+			Path	   *path = (Path *) lfirst(lc);
+
+			path->startup_cost += initplan_cost;
+			path->total_cost += initplan_cost;
+		}
+	}
+#else
 	/*
 	 * Forget about any partial paths and clear consider_parallel, too;
 	 * they're not usable if we attached an initPlan.
 	 */
 	final_rel->partial_pathlist = NIL;
 	final_rel->consider_parallel = false;
+#endif
 
 	/* We needn't do set_cheapest() here, caller will do it */
 }
+
+#ifndef __PG_QUERY_PLAN__
+#if PG_VERSION_NUM >= 160000
+/*
+ * SS_compute_initplan_cost - count up the cost delta for some initplans
+ *
+ * The total cost returned in *initplan_cost_p should be added to both the
+ * startup and total costs of the plan node the initplans get attached to.
+ * We also report whether any of the initplans are not parallel-safe.
+ *
+ * The primary user of this is SS_charge_for_initplans, but it's also
+ * used in adjusting costs when we move initplans to another plan node.
+ */
+void
+SS_compute_initplan_cost(List *init_plans,
+						 Cost *initplan_cost_p,
+						 bool *unsafe_initplans_p)
+{
+	Cost		initplan_cost;
+	bool		unsafe_initplans;
+	ListCell   *lc;
+
+	/*
+	 * We assume each initPlan gets run once during top plan startup.  This is
+	 * a conservative overestimate, since in fact an initPlan might be
+	 * executed later than plan startup, or even not at all.
+	 */
+	initplan_cost = 0;
+	unsafe_initplans = false;
+	foreach(lc, init_plans)
+	{
+		SubPlan    *initsubplan = lfirst_node(SubPlan, lc);
+
+		initplan_cost += initsubplan->startup_cost + initsubplan->per_call_cost;
+		if (!initsubplan->parallel_safe)
+			unsafe_initplans = true;
+	}
+	*initplan_cost_p = initplan_cost;
+	*unsafe_initplans_p = unsafe_initplans;
+}
+#endif
+#endif						/* ifndef __PG_QUERY_PLAN__ */
 
 /*
  * SS_attach_initplans - attach initplans to topmost plan node
@@ -2250,8 +2359,10 @@ SS_charge_for_initplans(PlannerInfo *root, RelOptInfo *final_rel)
  * (In principle the initPlans could go in any node at or above where they're
  * referenced; but there seems no reason to put them any lower than the
  * topmost node, so we don't bother to track exactly where they came from.)
- * We do not touch the plan node's cost; the initplans should have been
- * accounted for in path costing.
+ *
+ * We do not touch the plan node's cost or parallel_safe flag.  The initplans
+ * must have been accounted for in SS_charge_for_initplans, or by any later
+ * code that adds initplans via SS_make_initplan_from_plan.
  */
 void
 SS_attach_initplans(PlannerInfo *root, Plan *plan)
@@ -2629,7 +2740,9 @@ finalize_plan(PlannerInfo *root, Plan *plan,
 
 		case T_Append:
 			{
+#if PG_VERSION_NUM < 160000
 				ListCell   *l;
+#endif
 
 				foreach(l, ((Append *) plan)->appendplans)
 				{
@@ -2646,7 +2759,9 @@ finalize_plan(PlannerInfo *root, Plan *plan,
 
 		case T_MergeAppend:
 			{
+#if PG_VERSION_NUM < 160000
 				ListCell   *l;
+#endif
 
 				foreach(l, ((MergeAppend *) plan)->mergeplans)
 				{
@@ -2663,7 +2778,9 @@ finalize_plan(PlannerInfo *root, Plan *plan,
 
 		case T_BitmapAnd:
 			{
+#if PG_VERSION_NUM < 160000
 				ListCell   *l;
+#endif
 
 				foreach(l, ((BitmapAnd *) plan)->bitmapplans)
 				{
@@ -2680,7 +2797,9 @@ finalize_plan(PlannerInfo *root, Plan *plan,
 
 		case T_BitmapOr:
 			{
+#if PG_VERSION_NUM < 160000
 				ListCell   *l;
+#endif
 
 				foreach(l, ((BitmapOr *) plan)->bitmapplans)
 				{
@@ -2697,7 +2816,9 @@ finalize_plan(PlannerInfo *root, Plan *plan,
 
 		case T_NestLoop:
 			{
+#if PG_VERSION_NUM < 160000
 				ListCell   *l;
+#endif
 
 				finalize_primnode((Node *) ((Join *) plan)->joinqual,
 								  &context);
@@ -2725,6 +2846,13 @@ finalize_plan(PlannerInfo *root, Plan *plan,
 			finalize_primnode((Node *) ((HashJoin *) plan)->hashclauses,
 							  &context);
 			break;
+
+#if PG_VERSION_NUM >= 160000
+		case T_Hash:
+			finalize_primnode((Node *) ((Hash *) plan)->hashkeys,
+							  &context);
+			break;
+#endif
 
 		case T_Limit:
 			finalize_primnode(((Limit *) plan)->limitOffset,
@@ -2826,7 +2954,9 @@ finalize_plan(PlannerInfo *root, Plan *plan,
 			break;
 
 		case T_ProjectSet:
+#if PG_VERSION_NUM < 160000
 		case T_Hash:
+#endif
 		case T_Material:
 		case T_Sort:
 		case T_IncrementalSort:
@@ -2905,6 +3035,7 @@ finalize_plan(PlannerInfo *root, Plan *plan,
 	/* but not any initplan setParams */
 	plan->extParam = bms_del_members(plan->extParam, initSetParam);
 
+#if PG_VERSION_NUM < 160000
 	/*
 	 * For speed at execution time, make sure extParam/allParam are actually
 	 * NULL if they are empty sets.
@@ -2913,13 +3044,14 @@ finalize_plan(PlannerInfo *root, Plan *plan,
 		plan->extParam = NULL;
 	if (bms_is_empty(plan->allParam))
 		plan->allParam = NULL;
+#endif
 
 	return plan->allParam;
 }
 
 /*
- * finalize_primnode: add IDs of all PARAM_EXEC params appearing in the given
- * expression tree to the result set.
+ * finalize_primnode: add IDs of all PARAM_EXEC params that appear (or will
+ * appear) in the given expression tree to the result set.
  */
 static bool
 finalize_primnode(Node *node, finalize_primnode_context *context)
@@ -2936,7 +3068,30 @@ finalize_primnode(Node *node, finalize_primnode_context *context)
 		}
 		return false;			/* no more to do here */
 	}
+#if PG_VERSION_NUM >= 160000
+	else if (IsA(node, Aggref))
+	{
+		/*
+		 * Check to see if the aggregate will be replaced by a Param
+		 * referencing a subquery output during setrefs.c.  If so, we must
+		 * account for that Param here.  (For various reasons, it's not
+		 * convenient to perform that substitution earlier than setrefs.c, nor
+		 * to perform this processing after setrefs.c.  Thus we need a wart
+		 * here.)
+		 */
+		Aggref	   *aggref = (Aggref *) node;
+		Param	   *aggparam;
+
+		aggparam = find_minmax_agg_replacement_param(context->root, aggref);
+		if (aggparam != NULL)
+			context->paramids = bms_add_member(context->paramids,
+											   aggparam->paramid);
+		/* Fall through to examine the agg's arguments */
+	}
+	else if (IsA(node, SubPlan))
+#else
 	if (IsA(node, SubPlan))
+#endif
 	{
 		SubPlan    *subplan = (SubPlan *) node;
 		Plan	   *plan = planner_subplan_get_plan(context->root, subplan);
@@ -3054,6 +3209,9 @@ SS_make_initplan_from_plan(PlannerInfo *root,
 							   node->plan_id, prm->paramid);
 	get_first_col_type(plan, &node->firstColType, &node->firstColTypmod,
 					   &node->firstColCollation);
+#if PG_VERSION_NUM >= 160000
+	node->parallel_safe = plan->parallel_safe;
+#endif
 	node->setParam = list_make1_int(prm->paramid);
 
 	root->init_plans = lappend(root->init_plans, node);

@@ -49,6 +49,9 @@ extern GatherMergePath *pgqp_create_gather_merge_path(PlannerInfo *root, RelOptI
 extern GatherPath *pgqp_create_gather_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
 										   PathTarget *target, Relids required_outer, double *rows);
 extern SubqueryScanPath *pgqp_create_subqueryscan_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
+#if PG_VERSION_NUM >= 160000
+													   bool trivial_pathtarget,
+#endif
 													   List *pathkeys, Relids required_outer);
 extern Path *pgqp_create_ctescan_path(PlannerInfo *root, RelOptInfo *rel, Relids required_outer);
 extern Path *pgqp_create_namedtuplestorescan_path(PlannerInfo *root, RelOptInfo *rel,

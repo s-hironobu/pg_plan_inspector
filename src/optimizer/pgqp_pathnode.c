@@ -121,7 +121,7 @@ compare_path_costs(Path *path1, Path *path2, CostSelector criterion)
 
 #ifndef __PG_QUERY_PLAN__
 /*
- * compare_path_fractional_costs
+ * compare_fractional_path_costs
  *	  Return -1, 0, or +1 according as path1 is cheaper, the same cost,
  *	  or more expensive than path2 for fetching the specified fraction
  *	  of the total tuples.
@@ -1033,9 +1033,7 @@ create_samplescan_path(PlannerInfo *root, RelOptInfo *rel, Relids required_outer
  * 'indexorderbycols' is an integer list of index column numbers (zero based)
  *			the ordering operators can be used with.
  * 'pathkeys' describes the ordering of the path.
- * 'indexscandir' is ForwardScanDirection or BackwardScanDirection
- *			for an ordered index, or NoMovementScanDirection for
- *			an unordered index.
+ * 'indexscandir' is either ForwardScanDirection or BackwardScanDirection.
  * 'indexonly' is true if an index-only scan is wanted.
  * 'required_outer' is the set of outer relids for a parameterized path.
  * 'loop_count' is the number of repetitions of the indexscan to factor into
@@ -1412,6 +1410,19 @@ create_append_path(PlannerInfo *root,
 	pathnode->path.parent = rel;
 	pathnode->path.pathtarget = rel->reltarget;
 
+#if PG_VERSION_NUM >= 160000
+	/*
+	 * If this is for a baserel (not a join or non-leaf partition), we prefer
+	 * to apply get_baserel_parampathinfo to construct a full ParamPathInfo
+	 * for the path.  This supports building a Memoize path atop this path,
+	 * and if this is a partitioned table the info may be useful for run-time
+	 * pruning (cf make_partition_pruneinfo()).
+	 *
+	 * However, if we don't have "root" then that won't work and we fall back
+	 * on the simpler get_appendrel_parampathinfo.  There's no point in doing
+	 * the more expensive thing for a dummy path, either.
+	 */
+#else
 	/*
 	 * When generating an Append path for a partitioned table, there may be
 	 * parameterized quals that are useful for run-time pruning.  Hence,
@@ -1421,7 +1432,12 @@ create_append_path(PlannerInfo *root,
 	 * partition, and it's not necessary anyway in that case.  Must skip it if
 	 * we don't have "root", too.)
 	 */
+#endif
+#if PG_VERSION_NUM >= 160000
+	if (rel->reloptkind == RELOPT_BASEREL && root && subpaths != NIL)
+#else
 	if (root && rel->reloptkind == RELOPT_BASEREL && IS_PARTITIONED_REL(rel))
+#endif
 #ifdef __PG_QUERY_PLAN__
 		pathnode->path.param_info = pgqp_get_baserel_parampathinfo(root,
 																   rel,
@@ -1468,7 +1484,11 @@ create_append_path(PlannerInfo *root,
 	 * Apply query-wide LIMIT if known and path is for sole base relation.
 	 * (Handling this at this low level is a bit klugy.)
 	 */
+#if PG_VERSION_NUM >= 160000
+	if (root != NULL && bms_equal(rel->relids, root->all_query_rels))
+#else
 	if (root != NULL && bms_equal(rel->relids, root->all_baserels))
+#endif
 		pathnode->limit_tuples = root->limit_tuples;
 	else
 		pathnode->limit_tuples = -1.0;
@@ -1486,6 +1506,18 @@ create_append_path(PlannerInfo *root,
 
 	Assert(!parallel_aware || pathnode->path.parallel_safe);
 
+#if PG_VERSION_NUM >= 160000
+	/*
+	 * If there's exactly one child path then the output of the Append is
+	 * necessarily ordered the same as the child's, so we can inherit the
+	 * child's pathkeys if any, overriding whatever the caller might've said.
+	 * Furthermore, if the child's parallel awareness matches the Append's,
+	 * then the Append is a no-op and will be discarded later (in setrefs.c).
+	 * Then we can inherit the child's size and cost too, effectively charging
+	 * zero for the Append.  Otherwise, we must do the normal costsize
+	 * calculation.
+	 */
+#else
 	/*
 	 * If there's exactly one child path, the Append is a no-op and will be
 	 * discarded later (in setrefs.c); therefore, we can inherit the child's
@@ -1493,14 +1525,28 @@ create_append_path(PlannerInfo *root,
 	 * caller might've said).  Otherwise, we must do the normal costsize
 	 * calculation.
 	 */
+#endif
 	if (list_length(pathnode->subpaths) == 1)
 	{
 		Path	   *child = (Path *) linitial(pathnode->subpaths);
 
+#if PG_VERSION_NUM >= 160000
+		if (child->parallel_aware == parallel_aware)
+		{
+			pathnode->path.rows = child->rows;
+			pathnode->path.startup_cost = child->startup_cost;
+			pathnode->path.total_cost = child->total_cost;
+		}
+		else
+			cost_append(pathnode);
+		/* Must do this last, else cost_append complains */
+		pathnode->path.pathkeys = child->pathkeys;
+#else
 		pathnode->path.rows = child->rows;
 		pathnode->path.startup_cost = child->startup_cost;
 		pathnode->path.total_cost = child->total_cost;
 		pathnode->path.pathkeys = child->pathkeys;
+#endif
 	}
 	else
 		cost_append(pathnode);
@@ -1588,7 +1634,11 @@ create_merge_append_path(PlannerInfo *root,
 	 * Apply query-wide LIMIT if known and path is for sole base relation.
 	 * (Handling this at this low level is a bit klugy.)
 	 */
+#if PG_VERSION_NUM >= 160000
+	if (bms_equal(rel->relids, root->all_query_rels))
+#else
 	if (bms_equal(rel->relids, root->all_baserels))
+#endif
 		pathnode->limit_tuples = root->limit_tuples;
 	else
 		pathnode->limit_tuples = -1.0;
@@ -1635,6 +1685,21 @@ create_merge_append_path(PlannerInfo *root,
 		Assert(bms_equal(PATH_REQ_OUTER(subpath), required_outer));
 	}
 
+#if PG_VERSION_NUM >= 160000
+	/*
+	 * Now we can compute total costs of the MergeAppend.  If there's exactly
+	 * one child path and its parallel awareness matches that of the
+	 * MergeAppend, then the MergeAppend is a no-op and will be discarded
+	 * later (in setrefs.c); otherwise we do the normal cost calculation.
+	 */
+	if (list_length(subpaths) == 1 &&
+		((Path *) linitial(subpaths))->parallel_aware ==
+		pathnode->path.parallel_aware)
+	{
+		pathnode->path.startup_cost = input_startup_cost;
+		pathnode->path.total_cost = input_total_cost;
+	}
+#else
 	/*
 	 * Now we can compute total costs of the MergeAppend.  If there's exactly
 	 * one child path, the MergeAppend is a no-op and will be discarded later
@@ -1645,6 +1710,7 @@ create_merge_append_path(PlannerInfo *root,
 		pathnode->path.startup_cost = input_startup_cost;
 		pathnode->path.total_cost = input_total_cost;
 	}
+#endif
 	else
 		cost_merge_append(&pathnode->path, root,
 						  pathkeys, list_length(subpaths),
@@ -2176,13 +2242,24 @@ create_gather_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
  * create_subqueryscan_path
  *	  Creates a path corresponding to a scan of a subquery,
  *	  returning the pathnode.
+ *
+ * Caller must pass trivial_pathtarget = true if it believes rel->reltarget to
+ * be trivial, ie just a fetch of all the subquery output columns in order.
+ * While we could determine that here, the caller can usually do it more
+ * efficiently (or at least amortize it over multiple calls).
  */
 SubqueryScanPath *
 #ifdef __PG_QUERY_PLAN__
 pgqp_create_subqueryscan_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
+#if PG_VERSION_NUM >= 160000
+							  bool trivial_pathtarget,
+#endif
 							  List *pathkeys, Relids required_outer)
 #else
 create_subqueryscan_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
+#if PG_VERSION_NUM >= 160000
+						 bool trivial_pathtarget,
+#endif
 						 List *pathkeys, Relids required_outer)
 #endif
 {
@@ -2205,7 +2282,12 @@ create_subqueryscan_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
 	pathnode->path.pathkeys = pathkeys;
 	pathnode->subpath = subpath;
 
+#if PG_VERSION_NUM >= 160000
+	cost_subqueryscan(pathnode, root, rel, pathnode->path.param_info,
+					  trivial_pathtarget);
+#else
 	cost_subqueryscan(pathnode, root, rel, pathnode->path.param_info);
+#endif
 
 	return pathnode;
 }
@@ -2473,6 +2555,9 @@ create_foreignscan_path(PlannerInfo *root, RelOptInfo *rel,
 						List *pathkeys,
 						Relids required_outer,
 						Path *fdw_outerpath,
+#if PG_VERSION_NUM >= 160000
+						List *fdw_restrictinfo,
+#endif
 						List *fdw_private)
 {
 	ForeignPath *pathnode = makeNode(ForeignPath);
@@ -2499,6 +2584,9 @@ create_foreignscan_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->path.pathkeys = pathkeys;
 
 	pathnode->fdw_outerpath = fdw_outerpath;
+#if PG_VERSION_NUM >= 160000
+	pathnode->fdw_restrictinfo = fdw_restrictinfo;
+#endif
 	pathnode->fdw_private = fdw_private;
 
 	return pathnode;
@@ -2524,6 +2612,9 @@ create_foreign_join_path(PlannerInfo *root, RelOptInfo *rel,
 						 List *pathkeys,
 						 Relids required_outer,
 						 Path *fdw_outerpath,
+#if PG_VERSION_NUM >= 160000
+						 List *fdw_restrictinfo,
+#endif
 						 List *fdw_private)
 {
 	ForeignPath *pathnode = makeNode(ForeignPath);
@@ -2551,6 +2642,9 @@ create_foreign_join_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->path.pathkeys = pathkeys;
 
 	pathnode->fdw_outerpath = fdw_outerpath;
+#if PG_VERSION_NUM >= 160000
+	pathnode->fdw_restrictinfo = fdw_restrictinfo;
+#endif
 	pathnode->fdw_private = fdw_private;
 
 	return pathnode;
@@ -2575,6 +2669,9 @@ create_foreign_upper_path(PlannerInfo *root, RelOptInfo *rel,
 						  double rows, Cost startup_cost, Cost total_cost,
 						  List *pathkeys,
 						  Path *fdw_outerpath,
+#if PG_VERSION_NUM >= 160000
+						  List *fdw_restrictinfo,
+#endif
 						  List *fdw_private)
 {
 	ForeignPath *pathnode = makeNode(ForeignPath);
@@ -2598,6 +2695,9 @@ create_foreign_upper_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->path.pathkeys = pathkeys;
 
 	pathnode->fdw_outerpath = fdw_outerpath;
+#if PG_VERSION_NUM >= 160000
+	pathnode->fdw_restrictinfo = fdw_restrictinfo;
+#endif
 	pathnode->fdw_private = fdw_private;
 
 	return pathnode;
@@ -2713,12 +2813,17 @@ create_nestloop_path(PlannerInfo *root,
 	 * restrict_clauses that are due to be moved into the inner path.  We have
 	 * to do this now, rather than postpone the work till createplan time,
 	 * because the restrict_clauses list can affect the size and cost
-	 * estimates for this path.
+	 * estimates for this path.  We detect such clauses by checking for serial
+	 * number match to clauses already enforced in the inner path.
 	 */
 	if (bms_overlap(inner_req_outer, outer_path->parent->relids))
 	{
+#if PG_VERSION_NUM >= 160000
+		Bitmapset  *enforced_serials = get_param_path_clause_serials(inner_path);
+#else
 		Relids		inner_and_outer = bms_union(inner_path->parent->relids,
 												inner_req_outer);
+#endif
 		List	   *jclauses = NIL;
 		ListCell   *lc;
 
@@ -2726,10 +2831,15 @@ create_nestloop_path(PlannerInfo *root,
 		{
 			RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
 
+#if PG_VERSION_NUM >= 160000
+			if (!bms_is_member(rinfo->rinfo_serial, enforced_serials))
+				jclauses = lappend(jclauses, rinfo);
+#else
 			if (!join_clause_is_movable_into(rinfo,
 											 inner_path->parent->relids,
 											 inner_and_outer))
 				jclauses = lappend(jclauses, rinfo);
+#endif
 		}
 		restrict_clauses = jclauses;
 	}
@@ -3418,12 +3528,21 @@ create_group_path(PlannerInfo *root,
 	pathnode->groupClause = groupClause;
 	pathnode->qual = qual;
 
+#ifdef __PG_QUERY_PLAN__
+	pgqp_cost_group(&pathnode->path, root,
+					list_length(groupClause),
+					numGroups,
+					qual,
+					subpath->startup_cost, subpath->total_cost,
+					subpath->rows);
+#else
 	cost_group(&pathnode->path, root,
 			   list_length(groupClause),
 			   numGroups,
 			   qual,
 			   subpath->startup_cost, subpath->total_cost,
 			   subpath->rows);
+#endif
 
 	/* add tlist eval cost for each output row */
 	pathnode->path.startup_cost += target->cost.startup;
@@ -3581,8 +3700,12 @@ create_groupingsets_path(PlannerInfo *root,
 						 List *having_qual,
 						 AggStrategy aggstrategy,
 						 List *rollups,
+#if PG_VERSION_NUM >= 160000
+						 const AggClauseCosts *agg_costs)
+#else
 						 const AggClauseCosts *agg_costs,
 						 double numGroups)
+#endif
 {
 	GroupingSetsPath *pathnode = makeNode(GroupingSetsPath);
 	PathTarget *target = rel->reltarget;
@@ -3755,8 +3878,12 @@ create_minmaxagg_path(PlannerInfo *root,
 	/* For now, assume we are above any joins, so no parameterization */
 	pathnode->path.param_info = NULL;
 	pathnode->path.parallel_aware = false;
+#if PG_VERSION_NUM >= 160000
+	pathnode->path.parallel_safe = true;	/* might change below */
+#else
 	/* A MinMaxAggPath implies use of subplans, so cannot be parallel-safe */
 	pathnode->path.parallel_safe = false;
+#endif
 	pathnode->path.parallel_workers = 0;
 	/* Result is one unordered row */
 	pathnode->path.rows = 1;
@@ -3765,13 +3892,17 @@ create_minmaxagg_path(PlannerInfo *root,
 	pathnode->mmaggregates = mmaggregates;
 	pathnode->quals = quals;
 
-	/* Calculate cost of all the initplans ... */
+	/* Calculate cost of all the initplans, and check parallel safety */
 	initplan_cost = 0;
 	foreach(lc, mmaggregates)
 	{
 		MinMaxAggInfo *mminfo = (MinMaxAggInfo *) lfirst(lc);
 
 		initplan_cost += mminfo->pathcost;
+#if PG_VERSION_NUM >= 160000
+		if (!mminfo->path->parallel_safe)
+			pathnode->path.parallel_safe = false;
+#endif
 	}
 
 	/* add tlist eval cost for each output row, plus cpu_tuple_cost */
@@ -3792,6 +3923,19 @@ create_minmaxagg_path(PlannerInfo *root,
 		pathnode->path.total_cost += qual_cost.startup + qual_cost.per_tuple;
 	}
 
+#if PG_VERSION_NUM >= 160000
+	/*
+	 * If the initplans were all parallel-safe, also check safety of the
+	 * target and quals.  (The Result node itself isn't parallelizable, but if
+	 * we are in a subquery then it can be useful for the outer query to know
+	 * that this one is parallel-safe.)
+	 */
+	if (pathnode->path.parallel_safe)
+		pathnode->path.parallel_safe =
+			is_parallel_safe(root, (Node *) target->exprs) &&
+			is_parallel_safe(root, (Node *) quals);
+#endif
+
 	return pathnode;
 }
 #endif							/* #ifndef __PG_QUERY_PLAN__ */
@@ -3806,6 +3950,10 @@ create_minmaxagg_path(PlannerInfo *root,
  * 'target' is the PathTarget to be computed
  * 'windowFuncs' is a list of WindowFunc structs
  * 'winclause' is a WindowClause that is common to all the WindowFuncs
+ * 'qual' WindowClause.runconditions from lower-level WindowAggPaths.
+ *		Must always be NIL when topwindow == false
+ * 'topwindow' pass as true only for the top-level WindowAgg. False for all
+ *		intermediate WindowAggs.
  *
  * The input must be sorted according to the WindowClause's PARTITION keys
  * plus ORDER BY keys.
@@ -3863,8 +4011,12 @@ create_windowagg_path(PlannerInfo *root,
 	 */
 	cost_windowagg(&pathnode->path, root,
 				   windowFuncs,
+#if PG_VERSION_NUM >= 160000
+				   winclause,
+#else
 				   list_length(winclause->partitionClause),
 				   list_length(winclause->orderClause),
+#endif
 				   subpath->startup_cost,
 				   subpath->total_cost,
 				   subpath->rows);
@@ -4048,7 +4200,8 @@ create_lockrows_path(PlannerInfo *root, RelOptInfo *rel,
 #ifndef __PG_QUERY_PLAN__
 /*
  * create_modifytable_path
- *	  Creates a pathnode that represents performing INSERT/UPDATE/DELETE mods
+ *	  Creates a pathnode that represents performing INSERT/UPDATE/DELETE/MERGE
+ *	  mods
  *
  * 'rel' is the parent relation associated with the result
  * 'subpath' is a Path producing source data
@@ -4066,20 +4219,22 @@ create_lockrows_path(PlannerInfo *root, RelOptInfo *rel,
  * 'rowMarks' is a list of PlanRowMarks (non-locking only)
  * 'onconflict' is the ON CONFLICT clause, or NULL
  * 'epqParam' is the ID of Param for EvalPlanQual re-eval
+ * 'mergeActionLists' is a list of lists of MERGE actions (one per rel)
  */
-ModifyTablePath *create_modifytable_path(PlannerInfo *root, RelOptInfo *rel,
-										 Path *subpath,
-										 CmdType operation, bool canSetTag,
-										 Index nominalRelation, Index rootRelation,
-										 bool partColsUpdated,
-										 List *resultRelations,
-										 List *updateColnosLists,
-										 List *withCheckOptionLists, List *returningLists,
-										 List *rowMarks, OnConflictExpr *onconflict,
+ModifyTablePath *
+create_modifytable_path(PlannerInfo *root, RelOptInfo *rel,
+						Path *subpath,
+						CmdType operation, bool canSetTag,
+						Index nominalRelation, Index rootRelation,
+						bool partColsUpdated,
+						List *resultRelations,
+						List *updateColnosLists,
+						List *withCheckOptionLists, List *returningLists,
+						List *rowMarks, OnConflictExpr *onconflict,
 #if PG_VERSION_NUM >= 150000
-										 List *mergeActionLists, int epqParam)
+						List *mergeActionLists, int epqParam)
 #else
-										 int epqParam)
+						int epqParam)
 #endif
 {
 	ModifyTablePath *pathnode = makeNode(ModifyTablePath);
@@ -4329,7 +4484,11 @@ reparameterize_path(PlannerInfo *root, Path *path,
 			return create_seqscan_path(root, rel, required_outer, 0);
 #endif
 		case T_SampleScan:
+#ifdef __PG_QUERY_PLAN__
+			return (Path *) pgqp_create_samplescan_path(root, rel, required_outer);
+#else
 			return (Path *) create_samplescan_path(root, rel, required_outer);
+#endif
 		case T_IndexScan:
 		case T_IndexOnlyScan:
 			{
@@ -4378,12 +4537,50 @@ reparameterize_path(PlannerInfo *root, Path *path,
 		case T_SubqueryScan:
 			{
 				SubqueryScanPath *spath = (SubqueryScanPath *) path;
+#if PG_VERSION_NUM >= 160000
+				Path	   *subpath = spath->subpath;
+				bool		trivial_pathtarget;
 
+				/*
+				 * If existing node has zero extra cost, we must have decided
+				 * its target is trivial.  (The converse is not true, because
+				 * it might have a trivial target but quals to enforce; but in
+				 * that case the new node will too, so it doesn't matter
+				 * whether we get the right answer here.)
+				 */
+				trivial_pathtarget =
+					(subpath->total_cost == spath->path.total_cost);
+
+#ifdef __PG_QUERY_PLAN__
+				return (Path *) pgqp_create_subqueryscan_path(root,
+															  rel,
+															  subpath,
+															  trivial_pathtarget,
+															  spath->path.pathkeys,
+															  required_outer);
+#else
+				return (Path *) create_subqueryscan_path(root,
+														 rel,
+														 subpath,
+														 trivial_pathtarget,
+														 spath->path.pathkeys,
+														 required_outer);
+#endif
+#else
+#ifdef __PG_QUERY_PLAN__
+				return (Path *) pgqp_create_subqueryscan_path(root,
+															  rel,
+															  spath->subpath,
+															  spath->path.pathkeys,
+															  required_outer);
+#else
 				return (Path *) create_subqueryscan_path(root,
 														 rel,
 														 spath->subpath,
 														 spath->path.pathkeys,
 														 required_outer);
+#endif
+#endif
 			}
 		case T_Result:
 			/* Supported only for RTE_RESULT scan paths */
@@ -4404,9 +4601,16 @@ reparameterize_path(PlannerInfo *root, Path *path,
 				{
 					Path	   *spath = (Path *) lfirst(lc);
 
+#ifdef __PG_QUERY_PLAN__
+					spath = pgqp_reparameterize_path(root, spath,
+													 required_outer,
+													 loop_count);
+#else
 					spath = reparameterize_path(root, spath,
 												required_outer,
 												loop_count);
+#endif
+
 					if (spath == NULL)
 						return NULL;
 					/* We have to re-split the regular and partial paths */
@@ -4417,16 +4621,65 @@ reparameterize_path(PlannerInfo *root, Path *path,
 					i++;
 				}
 				return (Path *)
+#ifdef __PG_QUERY_PLAN__
+					pgqp_create_append_path(root, rel, childpaths, partialpaths,
+											apath->path.pathkeys, required_outer,
+											apath->path.parallel_workers,
+											apath->path.parallel_aware,
+											-1);
+#else
 					create_append_path(root, rel, childpaths, partialpaths,
 									   apath->path.pathkeys, required_outer,
 									   apath->path.parallel_workers,
 									   apath->path.parallel_aware,
 									   -1);
+#endif
 			}
+#if PG_VERSION_NUM >= 160000
+		case T_Material:
+			{
+				MaterialPath *mpath = (MaterialPath *) path;
+				Path	   *spath = mpath->subpath;
+
+#ifdef __PG_QUERY_PLAN__
+				spath = pgqp_reparameterize_path(root, spath,
+												 required_outer,
+												 loop_count);
+#else
+				spath = reparameterize_path(root, spath,
+											required_outer,
+											loop_count);
+#endif
+				if (spath == NULL)
+					return NULL;
+				return (Path *) create_material_path(rel, spath);
+			}
+#endif
 		case T_Memoize:
 			{
 				MemoizePath *mpath = (MemoizePath *) path;
+#if PG_VERSION_NUM >= 160000
+				Path	   *spath = mpath->subpath;
 
+#ifdef __PG_QUERY_PLAN__
+				spath = pgqp_reparameterize_path(root, spath,
+												 required_outer,
+												 loop_count);
+#else
+				spath = reparameterize_path(root, spath,
+											required_outer,
+											loop_count);
+#endif
+				if (spath == NULL)
+					return NULL;
+				return (Path *) create_memoize_path(root, rel,
+													spath,
+													mpath->param_exprs,
+													mpath->hash_operators,
+													mpath->singlerow,
+													mpath->binary_mode,
+													mpath->calls);
+#else
 				return (Path *) create_memoize_path(root, rel,
 													mpath->subpath,
 													mpath->param_exprs,
@@ -4436,6 +4689,7 @@ reparameterize_path(PlannerInfo *root, Path *path,
 													mpath->binary_mode,
 #endif
 													mpath->calls);
+#endif
 			}
 		default:
 			break;
@@ -4460,7 +4714,12 @@ reparameterize_path(PlannerInfo *root, Path *path,
  * path->parent, which does not change during the translation. Hence those
  * members are copied as they are.
  *
+#if PG_VERSION_NUM >= 160000
+ * Currently, only a few path types are supported here, though more could be
+ * added at need.  We return NULL if we can't reparameterize the given path.
+#else
  * If the given path can not be reparameterized, the function returns NULL.
+#endif
  */
 Path *
 reparameterize_path_by_child(PlannerInfo *root, Path *path,
@@ -4471,11 +4730,19 @@ reparameterize_path_by_child(PlannerInfo *root, Path *path,
 	( (newnode) = makeNode(nodetype), \
 	  memcpy((newnode), (node), sizeof(nodetype)) )
 
+#if PG_VERSION_NUM >= 160000
 #define ADJUST_CHILD_ATTRS(node) \
+	((node) = \
+	 (List *) adjust_appendrel_attrs_multilevel(root, (Node *) (node), \
+												child_rel, \
+												child_rel->top_parent))
+#else
+#define ADJUST_CHILD_ATTRS(node)				\
 	((node) = \
 	 (List *) adjust_appendrel_attrs_multilevel(root, (Node *) (node), \
 												child_rel->relids, \
 												child_rel->top_parent_relids))
+#endif
 
 #define REPARAMETERIZE_CHILD_PATH(path) \
 do { \
@@ -4574,6 +4841,10 @@ do { \
 				FLAT_COPY_PATH(fpath, path, ForeignPath);
 				if (fpath->fdw_outerpath)
 					REPARAMETERIZE_CHILD_PATH(fpath->fdw_outerpath);
+#if PG_VERSION_NUM >= 160000
+				if (fpath->fdw_restrictinfo)
+					ADJUST_CHILD_ATTRS(fpath->fdw_restrictinfo);
+#endif
 
 				/* Hand over to FDW if needed. */
 				rfpc_func =
@@ -4591,6 +4862,10 @@ do { \
 
 				FLAT_COPY_PATH(cpath, path, CustomPath);
 				REPARAMETERIZE_CHILD_PATH_LIST(cpath->custom_paths);
+#if PG_VERSION_NUM >= 160000
+				if (cpath->custom_restrictinfo)
+					ADJUST_CHILD_ATTRS(cpath->custom_restrictinfo);
+#endif
 				if (cpath->methods &&
 					cpath->methods->ReparameterizeCustomPathByChild)
 					cpath->custom_private =
@@ -4670,12 +4945,27 @@ do { \
 			}
 			break;
 
+#if PG_VERSION_NUM >= 160000
+		case T_MaterialPath:
+			{
+				MaterialPath *mpath;
+
+				FLAT_COPY_PATH(mpath, path, MaterialPath);
+				REPARAMETERIZE_CHILD_PATH(mpath->subpath);
+				new_path = (Path *) mpath;
+			}
+			break;
+#endif
+
 		case T_MemoizePath:
 			{
 				MemoizePath *mpath;
 
 				FLAT_COPY_PATH(mpath, path, MemoizePath);
 				REPARAMETERIZE_CHILD_PATH(mpath->subpath);
+#if PG_VERSION_NUM >= 160000
+				ADJUST_CHILD_ATTRS(mpath->param_exprs);
+#endif
 				new_path = (Path *) mpath;
 			}
 			break;
@@ -4703,9 +4993,15 @@ do { \
 	 */
 	old_ppi = new_path->param_info;
 	required_outer =
+#if PG_VERSION_NUM >= 160000
+		adjust_child_relids_multilevel(root, old_ppi->ppi_req_outer,
+									   child_rel,
+									   child_rel->top_parent);
+#else
 		adjust_child_relids_multilevel(root, old_ppi->ppi_req_outer,
 									   child_rel->relids,
 									   child_rel->top_parent_relids);
+#endif
 
 	/* If we already have a PPI for this parameterization, just return it */
 	new_ppi = find_param_path_info(new_path->parent, required_outer);
@@ -4727,6 +5023,9 @@ do { \
 		new_ppi->ppi_rows = old_ppi->ppi_rows;
 		new_ppi->ppi_clauses = old_ppi->ppi_clauses;
 		ADJUST_CHILD_ATTRS(new_ppi->ppi_clauses);
+#if PG_VERSION_NUM >= 160000
+		new_ppi->ppi_serials = bms_copy(old_ppi->ppi_serials);
+#endif
 		rel->ppilist = lappend(rel->ppilist, new_ppi);
 
 		MemoryContextSwitchTo(oldcontext);

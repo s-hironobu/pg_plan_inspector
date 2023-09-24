@@ -106,7 +106,9 @@ static void get_join_index_paths(PlannerInfo *root, RelOptInfo *rel,
 								 List **considered_relids);
 static bool eclass_already_used(EquivalenceClass *parent_ec, Relids oldrelids,
 								List *indexjoinclauses);
+#if PG_VERSION_NUM < 160000
 static bool bms_equal_any(Relids relids, List *relids_list);
+#endif
 static void get_index_paths(PlannerInfo *root, RelOptInfo *rel,
 							IndexOptInfo *index, IndexClauseSet *clauses,
 							List **bitindexpaths);
@@ -160,6 +162,9 @@ static IndexClause *match_clause_to_indexcol(PlannerInfo *root,
 											 RestrictInfo *rinfo,
 											 int indexcol,
 											 IndexOptInfo *index);
+#if PG_VERSION_NUM >= 160000
+static bool IsBooleanOpfamily(Oid opfamily);
+#endif
 static IndexClause *match_boolean_index_clause(PlannerInfo *root,
 											   RestrictInfo *rinfo,
 											   int indexcol, IndexOptInfo *index);
@@ -381,7 +386,9 @@ create_index_paths(PlannerInfo *root, RelOptInfo *rel)
 	if (bitjoinpaths != NIL)
 	{
 		List	   *all_path_outers;
+#if PG_VERSION_NUM < 160000
 		ListCell   *lc;
+#endif
 
 		/* Identify each distinct parameterization seen in bitjoinpaths */
 		all_path_outers = NIL;
@@ -390,8 +397,13 @@ create_index_paths(PlannerInfo *root, RelOptInfo *rel)
 			Path	   *path = (Path *) lfirst(lc);
 			Relids		required_outer = PATH_REQ_OUTER(path);
 
+#if PG_VERSION_NUM >= 160000
+			all_path_outers = list_append_unique(all_path_outers,
+												 required_outer);
+#else
 			if (!bms_equal_any(required_outer, all_path_outers))
 				all_path_outers = lappend(all_path_outers, required_outer);
+#endif
 		}
 
 		/* Now, for each distinct parameterization set ... */
@@ -542,8 +554,13 @@ consider_index_join_outer_rels(PlannerInfo *root, RelOptInfo *rel,
 		int			num_considered_relids;
 
 		/* If we already tried its relids set, no need to do so again */
+#if PG_VERSION_NUM >= 160000
+		if (list_member(*considered_relids, clause_relids))
+			continue;
+#else
 		if (bms_equal_any(clause_relids, *considered_relids))
 			continue;
+#endif
 
 		/*
 		 * Generate the union of this clause's relids set with each
@@ -637,8 +654,13 @@ get_join_index_paths(PlannerInfo *root, RelOptInfo *rel,
 	int			indexcol;
 
 	/* If we already considered this relids set, don't repeat the work */
+#if PG_VERSION_NUM >= 160000
+	if (list_member(*considered_relids, relids))
+		return;
+#else
 	if (bms_equal_any(relids, *considered_relids))
 		return;
+#endif
 
 	/* Identify indexclauses usable with this relids set */
 	MemSet(&clauseset, 0, sizeof(clauseset));
@@ -719,6 +741,7 @@ eclass_already_used(EquivalenceClass *parent_ec, Relids oldrelids,
 	return false;
 }
 
+#if PG_VERSION_NUM < 160000
 /*
  * bms_equal_any
  *		True if relids is bms_equal to any member of relids_list
@@ -737,7 +760,7 @@ bms_equal_any(Relids relids, List *relids_list)
 	}
 	return false;
 }
-
+#endif
 
 /*
  * get_index_paths
@@ -994,9 +1017,11 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 
 	/* We do not want the index's rel itself listed in outer_relids */
 	outer_relids = bms_del_member(outer_relids, rel->relid);
+#if PG_VERSION_NUM < 160000
 	/* Enforce convention that outer_relids is exactly NULL if empty */
 	if (bms_is_empty(outer_relids))
 		outer_relids = NULL;
+#endif
 
 	/* Compute loop_count for cost estimation purposes */
 	loop_count = get_loop_count(root, rel->relid, outer_relids);
@@ -1022,6 +1047,22 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 	}
 	else if (index->amcanorderbyop && pathkeys_possibly_useful)
 	{
+#if PG_VERSION_NUM >= 160000
+		/*
+		 * See if we can generate ordering operators for query_pathkeys or at
+		 * least some prefix thereof.  Matching to just a prefix of the
+		 * query_pathkeys will allow an incremental sort to be considered on
+		 * the index's partially sorted results.
+		 */
+		match_pathkeys_to_index(index, root->query_pathkeys,
+								&orderbyclauses,
+								&orderbyclausecols);
+		if (list_length(root->query_pathkeys) == list_length(orderbyclauses))
+			useful_pathkeys = root->query_pathkeys;
+		else
+			useful_pathkeys = list_copy_head(root->query_pathkeys,
+											 list_length(orderbyclauses));
+#else
 		/* see if we can generate ordering operators for query_pathkeys */
 		match_pathkeys_to_index(index, root->query_pathkeys,
 								&orderbyclauses,
@@ -1030,6 +1071,7 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 			useful_pathkeys = root->query_pathkeys;
 		else
 			useful_pathkeys = NIL;
+#endif
 	}
 	else
 	{
@@ -1061,9 +1103,13 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 									   orderbyclauses,
 									   orderbyclausecols,
 									   useful_pathkeys,
+#if PG_VERSION_NUM >= 160000
+									   ForwardScanDirection,
+#else
 									   index_is_ordered ?
 									   ForwardScanDirection :
 									   NoMovementScanDirection,
+#endif
 									   index_only_scan,
 									   outer_relids,
 									   loop_count,
@@ -1074,9 +1120,13 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 								  orderbyclauses,
 								  orderbyclausecols,
 								  useful_pathkeys,
+#if PG_VERSION_NUM >= 160000
+								  ForwardScanDirection,
+#else
 								  index_is_ordered ?
 								  ForwardScanDirection :
 								  NoMovementScanDirection,
+#endif
 								  index_only_scan,
 								  outer_relids,
 								  loop_count,
@@ -1098,9 +1148,13 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 										   orderbyclauses,
 										   orderbyclausecols,
 										   useful_pathkeys,
+#if PG_VERSION_NUM >= 160000
+										   ForwardScanDirection,
+#else
 										   index_is_ordered ?
 										   ForwardScanDirection :
 										   NoMovementScanDirection,
+#endif
 										   index_only_scan,
 										   outer_relids,
 										   loop_count,
@@ -1111,9 +1165,13 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 									  orderbyclauses,
 									  orderbyclausecols,
 									  useful_pathkeys,
+#if PG_VERSION_NUM >= 160000
+									  ForwardScanDirection,
+#else
 									  index_is_ordered ?
 									  ForwardScanDirection :
 									  NoMovementScanDirection,
+#endif
 									  index_only_scan,
 									  outer_relids,
 									  loop_count,
@@ -1384,11 +1442,20 @@ generate_bitmap_or_paths(PlannerInfo *root, RelOptInfo *rel,
 			}
 			else
 			{
+#if PG_VERSION_NUM >= 160000
+				RestrictInfo *ri = castNode(RestrictInfo, orarg);
+#else
 				RestrictInfo *rinfo = castNode(RestrictInfo, orarg);
+#endif
 				List	   *orargs;
 
+#if PG_VERSION_NUM >= 160000
+				Assert(!restriction_is_or_clause(ri));
+				orargs = list_make1(ri);
+#else
 				Assert(!restriction_is_or_clause(rinfo));
 				orargs = list_make1(rinfo);
+#endif
 
 				indlist = build_paths_for_OR(root, rel,
 											 orargs,
@@ -1918,7 +1985,9 @@ check_index_only(RelOptInfo *rel, IndexOptInfo *index)
 	bool		result;
 	Bitmapset  *attrs_used = NULL;
 	Bitmapset  *index_canreturn_attrs = NULL;
+#if PG_VERSION_NUM < 160000
 	Bitmapset  *index_cannotreturn_attrs = NULL;
+#endif
 	ListCell   *lc;
 	int			i;
 
@@ -1957,12 +2026,17 @@ check_index_only(RelOptInfo *rel, IndexOptInfo *index)
 	}
 
 	/*
+#if PG_VERSION_NUM >= 160000
+	 * Construct a bitmapset of columns that the index can return back in an
+	 * index-only scan.
+#else
 	 * Construct a bitmapset of columns that the index can return back in an
 	 * index-only scan.  If there are multiple index columns containing the
 	 * same attribute, all of them must be capable of returning the value,
 	 * since we might recheck operators on any of them.  (Potentially we could
 	 * be smarter about that, but it's such a weird situation that it doesn't
 	 * seem worth spending a lot of sweat on.)
+#endif
 	 */
 	for (i = 0; i < index->ncolumns; i++)
 	{
@@ -1975,6 +2049,12 @@ check_index_only(RelOptInfo *rel, IndexOptInfo *index)
 		if (attno == 0)
 			continue;
 
+#if PG_VERSION_NUM >= 160000
+		if (index->canreturn[i])
+			index_canreturn_attrs =
+				bms_add_member(index_canreturn_attrs,
+							   attno - FirstLowInvalidHeapAttributeNumber);
+#else
 		if (index->canreturn[i])
 			index_canreturn_attrs =
 				bms_add_member(index_canreturn_attrs,
@@ -1983,17 +2063,22 @@ check_index_only(RelOptInfo *rel, IndexOptInfo *index)
 			index_cannotreturn_attrs =
 				bms_add_member(index_cannotreturn_attrs,
 							   attno - FirstLowInvalidHeapAttributeNumber);
+#endif
 	}
 
+#if PG_VERSION_NUM < 160000
 	index_canreturn_attrs = bms_del_members(index_canreturn_attrs,
 											index_cannotreturn_attrs);
+#endif
 
 	/* Do we have all the necessary attributes? */
 	result = bms_is_subset(attrs_used, index_canreturn_attrs);
 
 	bms_free(attrs_used);
 	bms_free(index_canreturn_attrs);
+#if PG_VERSION_NUM < 160000
 	bms_free(index_cannotreturn_attrs);
+#endif
 
 	return result;
 }
@@ -2312,7 +2397,11 @@ match_clause_to_index(PlannerInfo *root,
 		/* Ignore duplicates */
 		foreach(lc, clauseset->indexclauses[indexcol])
 		{
+#if PG_VERSION_NUM >= 160000
+			iclause = (IndexClause *) lfirst(lc);
+#else
 			IndexClause *iclause = (IndexClause *) lfirst(lc);
+#endif
 
 			if (iclause->rinfo == rinfo)
 				return;
@@ -2466,6 +2555,25 @@ match_clause_to_indexcol(PlannerInfo *root,
 
 	return NULL;
 }
+
+#if PG_VERSION_NUM >= 160000
+/*
+ * IsBooleanOpfamily
+ *	  Detect whether an opfamily supports boolean equality as an operator.
+ *
+ * If the opfamily OID is in the range of built-in objects, we can rely
+ * on hard-wired knowledge of which built-in opfamilies support this.
+ * For extension opfamilies, there's no choice but to do a catcache lookup.
+ */
+static bool
+IsBooleanOpfamily(Oid opfamily)
+{
+	if (opfamily < FirstNormalObjectId)
+		return IsBuiltinBooleanOpfamily(opfamily);
+	else
+		return op_in_opfamily(BooleanEqualOperator, opfamily);
+}
+#endif
 
 /*
  * match_boolean_index_clause
@@ -3150,6 +3258,14 @@ expand_indexqual_rowcompare(PlannerInfo *root,
 
 			rc->rctype = (RowCompareType) op_strategy;
 			rc->opnos = new_ops;
+#if PG_VERSION_NUM >= 160000
+			rc->opfamilies = list_copy_head(clause->opfamilies,
+											matching_cols);
+			rc->inputcollids = list_copy_head(clause->inputcollids,
+											  matching_cols);
+			rc->largs = list_copy_head(var_args, matching_cols);
+			rc->rargs = list_copy_head(non_var_args, matching_cols);
+#else
 			rc->opfamilies = list_truncate(list_copy(clause->opfamilies),
 										   matching_cols);
 			rc->inputcollids = list_truncate(list_copy(clause->inputcollids),
@@ -3158,6 +3274,7 @@ expand_indexqual_rowcompare(PlannerInfo *root,
 									  matching_cols);
 			rc->rargs = list_truncate(copyObject(non_var_args),
 									  matching_cols);
+#endif
 			iclause->indexquals = list_make1(make_simple_restrictinfo(root,
 																	  (Expr *) rc));
 		}
@@ -3185,6 +3302,23 @@ expand_indexqual_rowcompare(PlannerInfo *root,
  *				----  ROUTINES TO CHECK ORDERING OPERATORS	----
  ****************************************************************************/
 
+#if PG_VERSION_NUM >= 160000
+/*
+ * match_pathkeys_to_index
+ *		For the given 'index' and 'pathkeys', output a list of suitable ORDER
+ *		BY expressions, each of the form "indexedcol operator pseudoconstant",
+ *		along with an integer list of the index column numbers (zero based)
+ *		that each clause would be used with.
+ *
+ * This attempts to find an ORDER BY and index column number for all items in
+ * the pathkey list, however, if we're unable to match any given pathkey to an
+ * index column, we return just the ones matched by the function so far.  This
+ * allows callers who are interested in partial matches to get them.  Callers
+ * can determine a partial match vs a full match by checking the outputted
+ * list lengths.  A full match will have one item in the output lists for each
+ * item in the given 'pathkeys' list.
+ */
+#else
 /*
  * match_pathkeys_to_index
  *		Test whether an index can produce output ordered according to the
@@ -3198,13 +3332,16 @@ expand_indexqual_rowcompare(PlannerInfo *root,
  * On success, the result list is ordered by pathkeys, and in fact is
  * one-to-one with the requested pathkeys.
  */
+#endif
 static void
 match_pathkeys_to_index(IndexOptInfo *index, List *pathkeys,
 						List **orderby_clauses_p,
 						List **clause_columns_p)
 {
+#if PG_VERSION_NUM < 160000
 	List	   *orderby_clauses = NIL;
 	List	   *clause_columns = NIL;
+#endif
 	ListCell   *lc1;
 
 	*orderby_clauses_p = NIL;	/* set default results */
@@ -3220,10 +3357,12 @@ match_pathkeys_to_index(IndexOptInfo *index, List *pathkeys,
 		bool		found = false;
 		ListCell   *lc2;
 
+#if PG_VERSION_NUM < 160000
 		/*
 		 * Note: for any failure to match, we just return NIL immediately.
 		 * There is no value in matching just some of the pathkeys.
 		 */
+#endif
 
 		/* Pathkey must request default sort order for the target opfamily */
 		if (pathkey->pk_strategy != BTLessStrategyNumber ||
@@ -3269,8 +3408,13 @@ match_pathkeys_to_index(IndexOptInfo *index, List *pathkeys,
 												   pathkey->pk_opfamily);
 				if (expr)
 				{
+#if PG_VERSION_NUM >= 160000
+					*orderby_clauses_p = lappend(*orderby_clauses_p, expr);
+					*clause_columns_p = lappend_int(*clause_columns_p, indexcol);
+#else
 					orderby_clauses = lappend(orderby_clauses, expr);
 					clause_columns = lappend_int(clause_columns, indexcol);
+#endif
 					found = true;
 					break;
 				}
@@ -3280,12 +3424,23 @@ match_pathkeys_to_index(IndexOptInfo *index, List *pathkeys,
 				break;
 		}
 
+#if PG_VERSION_NUM >= 160000
+		/*
+		 * Return the matches found so far when this pathkey couldn't be
+		 * matched to the index.
+		 */
+		if (!found)
+			return;
+#else
 		if (!found)				/* fail if no match for this pathkey */
 			return;
+#endif
 	}
 
+#if PG_VERSION_NUM < 160000
 	*orderby_clauses_p = orderby_clauses;	/* success! */
 	*clause_columns_p = clause_columns;
+#endif
 }
 
 /*
@@ -3481,15 +3636,40 @@ check_index_predicates(PlannerInfo *root, RelOptInfo *rel)
 	 * Add on any equivalence-derivable join clauses.  Computing the correct
 	 * relid sets for generate_join_implied_equalities is slightly tricky
 	 * because the rel could be a child rel rather than a true baserel, and in
+#if PG_VERSION_NUM >= 160000
+	 * that case we must subtract its parents' relid(s) from all_query_rels.
+	 * Additionally, we mustn't consider clauses that are only computable
+	 * after outer joins that can null the rel.
+#else
 	 * that case we must remove its parents' relid(s) from all_baserels.
+#endif
 	 */
+#if PG_VERSION_NUM >= 160000
+	if (rel->reloptkind == RELOPT_OTHER_MEMBER_REL)
+		otherrels = bms_difference(root->all_query_rels,
+								   find_childrel_parents(root, rel));
+	else
+		otherrels = bms_difference(root->all_query_rels, rel->relids);
+	otherrels = bms_del_members(otherrels, rel->nulling_relids);
+#else
 	if (rel->reloptkind == RELOPT_OTHER_MEMBER_REL)
 		otherrels = bms_difference(root->all_baserels,
 								   find_childrel_parents(root, rel));
 	else
 		otherrels = bms_difference(root->all_baserels, rel->relids);
+#endif
 
 	if (!bms_is_empty(otherrels))
+#if PG_VERSION_NUM >= 160000
+		clauselist =
+			list_concat(clauselist,
+						generate_join_implied_equalities(root,
+														 bms_union(rel->relids,
+																   otherrels),
+														 otherrels,
+														 rel,
+														 NULL));
+#else
 		clauselist =
 			list_concat(clauselist,
 						generate_join_implied_equalities(root,
@@ -3497,7 +3677,22 @@ check_index_predicates(PlannerInfo *root, RelOptInfo *rel)
 																   otherrels),
 														 otherrels,
 														 rel));
+#endif
 
+#if PG_VERSION_NUM >= 160000
+	/*
+	 * Normally we remove quals that are implied by a partial index's
+	 * predicate from indrestrictinfo, indicating that they need not be
+	 * checked explicitly by an indexscan plan using this index.  However, if
+	 * the rel is a target relation of UPDATE/DELETE/MERGE/SELECT FOR UPDATE,
+	 * we cannot remove such quals from the plan, because they need to be in
+	 * the plan so that they will be properly rechecked by EvalPlanQual
+	 * testing.  Some day we might want to remove such quals from the main
+	 * plan anyway and pass them through to EvalPlanQual via a side channel;
+	 * but for now, we just don't remove implied quals at all for target
+	 * relations.
+	 */
+#else
 	/*
 	 * Normally we remove quals that are implied by a partial index's
 	 * predicate from indrestrictinfo, indicating that they need not be
@@ -3509,6 +3704,7 @@ check_index_predicates(PlannerInfo *root, RelOptInfo *rel)
 	 * and pass them through to EvalPlanQual via a side channel; but for now,
 	 * we just don't remove implied quals at all for target relations.
 	 */
+#endif
 	is_target_rel = (bms_is_member(rel->relid, root->all_result_relids) ||
 					 get_plan_rowmark(root->rowMarks, rel->relid) != NULL);
 
@@ -3678,6 +3874,18 @@ relation_has_unique_index_for(PlannerInfo *root, RelOptInfo *rel,
 		IndexOptInfo *ind = (IndexOptInfo *) lfirst(ic);
 		int			c;
 
+#if PG_VERSION_NUM >= 160000
+		/*
+		 * If the index is not unique, or not immediately enforced, or if it's
+		 * a partial index, it's useless here.  We're unable to make use of
+		 * predOK partial unique indexes due to the fact that
+		 * check_index_predicates() also makes use of join predicates to
+		 * determine if the partial index is usable. Here we need proofs that
+		 * hold true before any joins are evaluated.
+		 */
+		if (!ind->unique || !ind->immediate || ind->indpred != NIL)
+			continue;
+#else
 		/*
 		 * If the index is not unique, or not immediately enforced, or if it's
 		 * a partial index that doesn't match the query, it's useless here.
@@ -3685,6 +3893,7 @@ relation_has_unique_index_for(PlannerInfo *root, RelOptInfo *rel,
 		if (!ind->unique || !ind->immediate ||
 			(ind->indpred != NIL && !ind->predOK))
 			continue;
+#endif
 
 		/*
 		 * Try to find each index column in the lists of conditions.  This is
@@ -3862,9 +4071,16 @@ match_index_to_operand(Node *operand,
 		/*
 		 * Simple index column; operand must be a matching Var.
 		 */
+#if PG_VERSION_NUM >= 160000
+		if (operand && IsA(operand, Var) &&
+			index->rel->relid == ((Var *) operand)->varno &&
+			indkey == ((Var *) operand)->varattno &&
+			((Var *) operand)->varnullingrels == NULL)
+#else
 		if (operand && IsA(operand, Var) &&
 			index->rel->relid == ((Var *) operand)->varno &&
 			indkey == ((Var *) operand)->varattno)
+#endif
 			return true;
 	}
 	else

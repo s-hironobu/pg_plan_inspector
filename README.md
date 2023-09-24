@@ -53,7 +53,7 @@ Many methods I learned in statistics as a student are now classified as Machine 
 ## 1. Supported Versions
 
 
-This framework supports PostgreSQL versions 15, 14 and 13.
+This framework supports PostgreSQL versions: 16, 15, 14 and 13.
 
 ## 2. Installation and Usage
 
@@ -203,6 +203,7 @@ Version 0.2 (POC model)
 
 ## Change Log
 
+ - 24th September 2023: Supported PG 16.
  - 24th March 2023: Added an experimental feature that temporarily expands the work_mem area during the query execution. See [README-tools.md](./README-tools.md).
  - 15th December 2021: Version 0.2 Released.
  - 28th July 2021: Version 0.1 Released.

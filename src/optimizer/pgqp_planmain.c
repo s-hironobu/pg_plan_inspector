@@ -89,6 +89,10 @@ query_planner(PlannerInfo *root,
 	root->full_join_clauses = NIL;
 	root->join_info_list = NIL;
 	root->placeholder_list = NIL;
+#if PG_VERSION_NUM >= 160000
+	root->placeholder_array = NULL;
+	root->placeholder_array_size = 0;
+#endif
 	root->fkey_list = NIL;
 	root->initial_rels = NIL;
 
@@ -124,14 +128,22 @@ query_planner(PlannerInfo *root,
 				 * quals are parallel-restricted.  (We need not check
 				 * final_rel->reltarget because it's empty at this point.
 				 * Anything parallel-restricted in the query tlist will be
-				 * dealt with later.)  This is normally pretty silly, because
-				 * a Result-only plan would never be interesting to
-				 * parallelize.  However, if force_parallel_mode is on, then
-				 * we want to execute the Result in a parallel worker if
-				 * possible, so we must do this.
+				 * dealt with later.)  We should always do this in a subquery,
+				 * since it might be useful to use the subquery in parallel
+				 * paths in the parent level.  At top level this is normally
+				 * not worth the cycles, because a Result-only plan would
+				 * never be interesting to parallelize.  However, if
+				 * debug_parallel_query is on, then we want to execute the
+				 * Result in a parallel worker if possible, so we must check.
 				 */
+#if PG_VERSION_NUM >= 160000
+				if (root->glob->parallelModeOK &&
+					(root->query_level > 1 ||
+					 debug_parallel_query != DEBUG_PARALLEL_OFF))
+#else
 				if (root->glob->parallelModeOK &&
 					force_parallel_mode != FORCE_PARALLEL_OFF)
+#endif
 					final_rel->consider_parallel =
 						is_parallel_safe(root, parse->jointree->quals);
 
@@ -282,7 +294,7 @@ query_planner(PlannerInfo *root,
 #endif
 
 	/*
-	 * Distribute any UPDATE/DELETE row identity variables to the target
+	 * Distribute any UPDATE/DELETE/MERGE row identity variables to the target
 	 * relations.  This can't be done till we've finished expansion of
 	 * appendrels.
 	 */

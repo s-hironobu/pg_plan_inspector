@@ -46,6 +46,7 @@
 #include "utils/selfuncs.h"
 #include "utils/syscache.h"
 #ifdef __PG_QUERY_PLAN__
+#include "pgqp_costsize.h"
 #include "pgqp_preunion.h"
 #include "pgqp_pathnode.h"
 #include "pgqp_planner.h"
@@ -84,7 +85,12 @@ static List *generate_setop_tlist(List *colTypes, List *colCollations,
 								  Index varno,
 								  bool hack_constants,
 								  List *input_tlist,
+#if PG_VERSION_NUM >= 160000
+								  List *refnames_tlist,
+								  bool *trivial_tlist);
+#else
 								  List *refnames_tlist);
+#endif
 static List *generate_append_tlist(List *colTypes, List *colCollations,
 								   bool flag,
 								   List *input_tlists,
@@ -236,6 +242,9 @@ recurse_set_operations(Node *setOp, PlannerInfo *root,
 		Path	   *subpath;
 		Path	   *path;
 		List	   *tlist;
+#if PG_VERSION_NUM >= 160000
+		bool		trivial_tlist;
+#endif
 
 		Assert(subquery != NULL);
 
@@ -271,7 +280,12 @@ recurse_set_operations(Node *setOp, PlannerInfo *root,
 									 rtr->rtindex,
 									 true,
 									 subroot->processed_tlist,
+#if PG_VERSION_NUM >= 160000
+									 refnames_tlist,
+									 &trivial_tlist);
+#else
 									 refnames_tlist);
+#endif
 		rel->reltarget = create_pathtarget(root, tlist);
 
 		/* Return the fully-fledged tlist to caller, too */
@@ -314,9 +328,15 @@ recurse_set_operations(Node *setOp, PlannerInfo *root,
 		 */
 #ifdef __PG_QUERY_PLAN__
 		path = (Path *) pgqp_create_subqueryscan_path(root, rel, subpath,
+#if PG_VERSION_NUM >= 160000
+													  trivial_tlist,
+#endif
 													  NIL, NULL);
 #else
 		path = (Path *) create_subqueryscan_path(root, rel, subpath,
+#if PG_VERSION_NUM >= 160000
+												 trivial_tlist,
+#endif
 												 NIL, NULL);
 #endif
 
@@ -337,9 +357,15 @@ recurse_set_operations(Node *setOp, PlannerInfo *root,
 			partial_path = (Path *)
 #ifdef __PG_QUERY_PLAN__
 				pgqp_create_subqueryscan_path(root, rel, partial_subpath,
+#if PG_VERSION_NUM >= 160000
+											  trivial_tlist,
+#endif
 											  NIL, NULL);
 #else
 				create_subqueryscan_path(root, rel, partial_subpath,
+#if PG_VERSION_NUM >= 160000
+										 trivial_tlist,
+#endif
 										 NIL, NULL);
 #endif
 			add_partial_path(rel, partial_path);
@@ -408,6 +434,9 @@ recurse_set_operations(Node *setOp, PlannerInfo *root,
 			!tlist_same_collations(*pTargetList, colCollations, junkOK))
 		{
 			PathTarget *target;
+#if PG_VERSION_NUM >= 160000
+			bool		trivial_tlist;
+#endif
 			ListCell   *lc;
 
 			*pTargetList = generate_setop_tlist(colTypes, colCollations,
@@ -415,7 +444,12 @@ recurse_set_operations(Node *setOp, PlannerInfo *root,
 												0,
 												false,
 												*pTargetList,
+#if PG_VERSION_NUM >= 160000
+												refnames_tlist,
+												&trivial_tlist);
+#else
 												refnames_tlist);
+#endif
 			target = create_pathtarget(root, *pTargetList);
 
 			/* Apply projection to each path */
@@ -683,15 +717,22 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 	if (partial_paths_valid)
 	{
 		Path	   *ppath;
-		ListCell   *lc;
+		/* ListCell   *lc;*/
 		int			parallel_workers = 0;
 
 		/* Find the highest number of workers requested for any subpath. */
 		foreach(lc, partial_pathlist)
 		{
+#if PG_VERSION_NUM >= 160000
+			Path	   *subpath = lfirst(lc);
+
+			parallel_workers = Max(parallel_workers,
+								   subpath->parallel_workers);
+#else
 			Path	   *path = lfirst(lc);
 
 			parallel_workers = Max(parallel_workers, path->parallel_workers);
+#endif
 		}
 		Assert(parallel_workers > 0);
 
@@ -704,8 +745,13 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 		 */
 		if (enable_parallel_append)
 		{
+#if PG_VERSION_NUM >= 160000
+			parallel_workers = Max(parallel_workers,
+								   pg_leftmost_one_pos32(list_length(partial_pathlist)) + 1);
+#else
 			parallel_workers = Max(parallel_workers,
 								   fls(list_length(partial_pathlist)));
+#endif
 			parallel_workers = Min(parallel_workers,
 								   max_parallel_workers_per_gather);
 		}
@@ -1139,10 +1185,17 @@ choose_hashed_setop(PlannerInfo *root, List *groupClauses,
 	cost_sort(&sorted_p, root, NIL, sorted_p.total_cost,
 			  input_path->rows, input_path->pathtarget->width,
 			  0.0, work_mem, -1.0);
+#ifdef __PG_QUERY_PLAN__
+	pgqp_cost_group(&sorted_p, root, numGroupCols, dNumGroups,
+					NIL,
+					sorted_p.startup_cost, sorted_p.total_cost,
+					input_path->rows);
+#else
 	cost_group(&sorted_p, root, numGroupCols, dNumGroups,
 			   NIL,
 			   sorted_p.startup_cost, sorted_p.total_cost,
 			   input_path->rows);
+#endif
 
 	/*
 	 * Now make the decision using the top-level tuple fraction.  First we
@@ -1171,6 +1224,7 @@ choose_hashed_setop(PlannerInfo *root, List *groupClauses,
  * hack_constants: true to copy up constants (see comments in code)
  * input_tlist: targetlist of this node's input node
  * refnames_tlist: targetlist to take column names from
+ * trivial_tlist: output parameter, set to true if targetlist is trivial
  */
 static List *
 generate_setop_tlist(List *colTypes, List *colCollations,
@@ -1178,7 +1232,12 @@ generate_setop_tlist(List *colTypes, List *colCollations,
 					 Index varno,
 					 bool hack_constants,
 					 List *input_tlist,
+#if PG_VERSION_NUM >= 160000
+					 List *refnames_tlist,
+					 bool *trivial_tlist)
+#else
 					 List *refnames_tlist)
+#endif
 {
 	List	   *tlist = NIL;
 	int			resno = 1;
@@ -1188,6 +1247,10 @@ generate_setop_tlist(List *colTypes, List *colCollations,
 			   *rtlc;
 	TargetEntry *tle;
 	Node	   *expr;
+
+#if PG_VERSION_NUM >= 160000
+	*trivial_tlist = true;		/* until proven differently */
+#endif
 
 	forfour(ctlc, colTypes, cclc, colCollations,
 			itlc, input_tlist, rtlc, refnames_tlist)
@@ -1214,6 +1277,9 @@ generate_setop_tlist(List *colTypes, List *colCollations,
 		 * this only at the first level of subquery-scan plans; we don't want
 		 * phony constants appearing in the output tlists of upper-level
 		 * nodes!
+		 *
+		 * Note that copying a constant doesn't in itself require us to mark
+		 * the tlist nontrivial; see trivial_subqueryscan() in setrefs.c.
 		 */
 		if (hack_constants && inputtle->expr && IsA(inputtle->expr, Const))
 			expr = (Node *) inputtle->expr;
@@ -1239,6 +1305,9 @@ generate_setop_tlist(List *colTypes, List *colCollations,
 										 expr,
 										 colType,
 										 "UNION/INTERSECT/EXCEPT");
+#if PG_VERSION_NUM >= 160000
+			*trivial_tlist = false; /* the coercion makes it not trivial */
+#endif
 		}
 
 		/*
@@ -1252,10 +1321,20 @@ generate_setop_tlist(List *colTypes, List *colCollations,
 		 * Note we use RelabelType, not CollateExpr, since this expression
 		 * will reach the executor without any further processing.
 		 */
+#if PG_VERSION_NUM >= 160000
+		if (exprCollation(expr) != colColl)
+		{
+			expr = applyRelabelType(expr,
+									exprType(expr), exprTypmod(expr), colColl,
+									COERCE_IMPLICIT_CAST, -1, false);
+			*trivial_tlist = false; /* the relabel makes it not trivial */
+		}
+#else
 		if (exprCollation(expr) != colColl)
 			expr = applyRelabelType(expr,
 									exprType(expr), exprTypmod(expr), colColl,
 									COERCE_IMPLICIT_CAST, -1, false);
+#endif
 
 		tle = makeTargetEntry((Expr *) expr,
 							  (AttrNumber) resno++,
@@ -1288,6 +1367,9 @@ generate_setop_tlist(List *colTypes, List *colCollations,
 							  pstrdup("flag"),
 							  true);
 		tlist = lappend(tlist, tle);
+#if PG_VERSION_NUM >= 160000
+		*trivial_tlist = false; /* the extra entry makes it not trivial */
+#endif
 	}
 
 	return tlist;

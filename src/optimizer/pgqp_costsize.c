@@ -159,6 +159,9 @@ bool		enable_partitionwise_aggregate = false;
 bool		enable_parallel_append = true;
 bool		enable_parallel_hash = true;
 bool		enable_partition_pruning = true;
+#if PG_VERSION_NUM >= 160000
+bool		enable_presorted_aggregate = true;
+#endif
 bool		enable_async_append = true;
 
 typedef struct
@@ -179,7 +182,11 @@ static bool cost_qual_eval_walker(Node *node, cost_qual_eval_context *context);
 static void get_restriction_qual_cost(PlannerInfo *root, RelOptInfo *baserel,
 									  ParamPathInfo *param_info,
 									  QualCost *qpqual_cost);
+#if PG_VERSION_NUM >= 160000
+static bool has_indexed_join_quals(NestPath *path);
+#else
 static bool has_indexed_join_quals(NestPath *joinpath);
+#endif
 static double approx_tuple_count(PlannerInfo *root, JoinPath *path,
 								 List *quals);
 static double calc_joinrel_size_estimate(PlannerInfo *root,
@@ -200,6 +207,9 @@ static Cost append_nonpartial_cost(List *subpaths, int numpaths,
 								   int parallel_workers);
 #endif
 static void set_rel_width(PlannerInfo *root, RelOptInfo *rel);
+#if PG_VERSION_NUM >= 160000
+static int32 get_expr_width(PlannerInfo *root, const Node *expr);
+#endif
 static double relation_byte_size(double tuples, int width);
 static double page_size(double tuples, int width);
 static double get_parallel_divisor(Path *path);
@@ -857,6 +867,7 @@ extract_nonindex_conditions(List *qual_clauses, List *indexclauses)
 	return result;
 }
 
+
 #ifndef __PG_QUERY_PLAN__
 /*
  * index_pages_fetched
@@ -1050,9 +1061,15 @@ cost_bitmap_heap_scan(Path *path, PlannerInfo *root, RelOptInfo *baserel,
 	if (!enable_bitmapscan)
 		startup_cost += disable_cost;
 
+#ifdef __PG_QUERY_PLAN__
+	pages_fetched = pgqp_compute_bitmap_pages(root, baserel, bitmapqual,
+											  loop_count, &indexTotalCost,
+											  &tuples_fetched);
+#else
 	pages_fetched = compute_bitmap_pages(root, baserel, bitmapqual,
 										 loop_count, &indexTotalCost,
 										 &tuples_fetched);
+#endif
 
 	startup_cost += indexTotalCost;
 	T = (baserel->pages > 1) ? (double) baserel->pages : 1.0;
@@ -1194,7 +1211,11 @@ cost_bitmap_and_node(BitmapAndPath *path, PlannerInfo *root)
 		Cost		subCost;
 		Selectivity subselec;
 
+#ifdef __PG_QUERY_PLAN__
+		pgqp_cost_bitmap_tree_node(subpath, &subCost, &subselec);
+#else
 		cost_bitmap_tree_node(subpath, &subCost, &subselec);
+#endif
 
 		selec *= subselec;
 
@@ -1243,7 +1264,11 @@ cost_bitmap_or_node(BitmapOrPath *path, PlannerInfo *root)
 		Cost		subCost;
 		Selectivity subselec;
 
+#ifdef __PG_QUERY_PLAN__
+		pgqp_cost_bitmap_tree_node(subpath, &subCost, &subselec);
+#else
 		cost_bitmap_tree_node(subpath, &subCost, &subselec);
+#endif
 
 		selec += subselec;
 
@@ -1475,10 +1500,18 @@ cost_tidrangescan(Path *path, PlannerInfo *root,
  *
  * 'baserel' is the relation to be scanned
  * 'param_info' is the ParamPathInfo if this is a parameterized path, else NULL
+#if PG_VERSION_NUM >= 160000
+ * 'trivial_pathtarget' is true if the pathtarget is believed to be trivial.
+#endif
  */
 void
 cost_subqueryscan(SubqueryScanPath *path, PlannerInfo *root,
+#if PG_VERSION_NUM >= 160000
+				  RelOptInfo *baserel, ParamPathInfo *param_info,
+				  bool trivial_pathtarget)
+#else
 				  RelOptInfo *baserel, ParamPathInfo *param_info)
+#endif
 {
 	Cost		startup_cost;
 	Cost		run_cost;
@@ -1528,6 +1561,24 @@ cost_subqueryscan(SubqueryScanPath *path, PlannerInfo *root,
 	 */
 	path->path.startup_cost = path->subpath->startup_cost;
 	path->path.total_cost = path->subpath->total_cost;
+
+#if PG_VERSION_NUM >= 160000
+	/*
+	 * However, if there are no relevant restriction clauses and the
+	 * pathtarget is trivial, then we expect that setrefs.c will optimize away
+	 * the SubqueryScan plan node altogether, so we should just make its cost
+	 * and rowcount equal to the input path's.
+	 *
+	 * Note: there are some edge cases where createplan.c will apply a
+	 * different targetlist to the SubqueryScan node, thus falsifying our
+	 * current estimate of whether the target is trivial, and making the cost
+	 * estimate (though not the rowcount) wrong.  It does not seem worth the
+	 * extra complication to try to account for that exactly, especially since
+	 * that behavior falsifies other cost estimates as well.
+	 */
+	if (qpquals == NIL && trivial_pathtarget)
+		return;
+#endif
 
 	get_restriction_qual_cost(root, baserel, param_info, &qpqual_cost);
 
@@ -1975,8 +2026,6 @@ cost_tuplesort(Cost *startup_cost, Cost *run_cost,
 		 */
 		*startup_cost = comparison_cost * tuples * LOG2(tuples);
 
-		/* Disk costs */
-
 		/* Compute logM(r) as log(r) / log(M) */
 		if (nruns > mergeorder)
 			log_runs = ceil(log(nruns) / log(mergeorder));
@@ -2035,9 +2084,15 @@ cost_incremental_sort(Path *path,
 					  double input_tuples, int width, Cost comparison_cost, int sort_mem,
 					  double limit_tuples)
 {
+#if PG_VERSION_NUM >= 160000
+	Cost		startup_cost,
+				run_cost,
+				input_run_cost = input_total_cost - input_startup_cost;
+#else
 	Cost		startup_cost = 0,
 				run_cost = 0,
 				input_run_cost = input_total_cost - input_startup_cost;
+#endif
 	double		group_tuples,
 				input_groups;
 	Cost		group_startup_cost,
@@ -2045,10 +2100,16 @@ cost_incremental_sort(Path *path,
 				group_input_run_cost;
 	List	   *presortedExprs = NIL;
 	ListCell   *l;
+#if PG_VERSION_NUM <= 150000
 	int			i = 0;
+#endif
 	bool		unknown_varno = false;
 
+#if PG_VERSION_NUM >= 160000
+	Assert(presorted_keys > 0 && presorted_keys < list_length(pathkeys));
+#else
 	Assert(presorted_keys != 0);
+#endif
 
 	/*
 	 * We want to be sure the cost of a sort is never estimated as zero, even
@@ -2086,7 +2147,7 @@ cost_incremental_sort(Path *path,
 	{
 		PathKey    *key = (PathKey *) lfirst(l);
 		EquivalenceMember *member = (EquivalenceMember *)
-		linitial(key->pk_eclass->ec_members);
+					linitial(key->pk_eclass->ec_members);
 
 		/*
 		 * Check if the expression contains Var with "varno 0" so that we
@@ -2101,12 +2162,17 @@ cost_incremental_sort(Path *path,
 		/* expression not containing any Vars with "varno 0" */
 		presortedExprs = lappend(presortedExprs, member->em_expr);
 
+#if PG_VERSION_NUM >= 160000
+		if (foreach_current_index(l) + 1 >= presorted_keys)
+			break;
+#else
 		i++;
 		if (i >= presorted_keys)
 			break;
+#endif
 	}
 
-	/* Estimate number of groups with equal presorted keys. */
+	/* Estimate the number of groups with equal presorted keys. */
 	if (!unknown_varno)
 		input_groups = estimate_num_groups(root, presortedExprs, input_tuples,
 										   NULL, NULL);
@@ -2115,22 +2181,36 @@ cost_incremental_sort(Path *path,
 	group_input_run_cost = input_run_cost / input_groups;
 
 	/*
+#if PG_VERSION_NUM >= 160000
+	 * Estimate the average cost of sorting of one group where presorted keys
+	 * are equal.
+#else
 	 * Estimate average cost of sorting of one group where presorted keys are
 	 * equal.  Incremental sort is sensitive to distribution of tuples to the
 	 * groups, where we're relying on quite rough assumptions.  Thus, we're
 	 * pessimistic about incremental sort performance and increase its average
 	 * group size by half.
+#endif
 	 */
 	cost_tuplesort(&group_startup_cost, &group_run_cost,
+#if PG_VERSION_NUM >= 160000
+				   group_tuples, width, comparison_cost, sort_mem,
+#else
 				   1.5 * group_tuples, width, comparison_cost, sort_mem,
+#endif
 				   limit_tuples);
 
 	/*
 	 * Startup cost of incremental sort is the startup cost of its first group
 	 * plus the cost of its input.
 	 */
+#if PG_VERSION_NUM >= 160000
+	startup_cost = group_startup_cost + input_startup_cost +
+		group_input_run_cost;
+#else
 	startup_cost += group_startup_cost
 		+ input_startup_cost + group_input_run_cost;
+#endif
 
 	/*
 	 * After we started producing tuples from the first group, the cost of
@@ -2138,17 +2218,31 @@ cost_incremental_sort(Path *path,
 	 * group, plus the total cost to process the remaining groups, plus the
 	 * remaining cost of input.
 	 */
+#if PG_VERSION_NUM >= 160000
+	run_cost = group_run_cost + (group_run_cost + group_startup_cost) *
+		(input_groups - 1) + group_input_run_cost * (input_groups - 1);
+#else
 	run_cost += group_run_cost
 		+ (group_run_cost + group_startup_cost) * (input_groups - 1)
 		+ group_input_run_cost * (input_groups - 1);
+#endif
 
 	/*
 	 * Incremental sort adds some overhead by itself. Firstly, it has to
 	 * detect the sort groups. This is roughly equal to one extra copy and
+#if PG_VERSION_NUM >= 160000
+	 * comparison per tuple.
+#else
 	 * comparison per tuple. Secondly, it has to reset the tuplesort context
 	 * for every group.
+#endif
 	 */
 	run_cost += (cpu_tuple_cost + comparison_cost) * input_tuples;
+
+	/*
+	 * Additionally, we charge double cpu_tuple_cost for each input group to
+	 * account for the tuplesort_reset that's performed after each group.
+	 */
 	run_cost += 2.0 * cpu_tuple_cost * input_groups;
 
 	path->rows = input_tuples;
@@ -2259,7 +2353,12 @@ append_nonpartial_cost(List *subpaths, int numpaths, int parallel_workers)
 		costarr[min_index] += subpath->total_cost;
 
 		/* Update the new min cost array index */
+#if PG_VERSION_NUM >= 160000
+		min_index = 0;
+		for (int i = 0; i < arrlen; i++)
+#else
 		for (min_index = i = 0; i < arrlen; i++)
+#endif
 		{
 			if (costarr[i] < costarr[min_index])
 				min_index = i;
@@ -2267,7 +2366,12 @@ append_nonpartial_cost(List *subpaths, int numpaths, int parallel_workers)
 	}
 
 	/* Return the highest cost from the array */
+#if PG_VERSION_NUM >= 160000
+	max_index = 0;
+	for (int i = 0; i < arrlen; i++)
+#else
 	for (max_index = i = 0; i < arrlen; i++)
+#endif
 	{
 		if (costarr[i] > costarr[max_index])
 			max_index = i;
@@ -2300,13 +2404,21 @@ cost_append(AppendPath *apath)
 
 		if (pathkeys == NIL)
 		{
+#if PG_VERSION_NUM >= 160000
+			Path	   *firstsubpath = (Path *) linitial(apath->subpaths);
+#else
 			Path	   *subpath = (Path *) linitial(apath->subpaths);
+#endif
 
 			/*
 			 * For an unordered, non-parallel-aware Append we take the startup
 			 * cost as the startup cost of the first subpath.
 			 */
+#if PG_VERSION_NUM >= 160000
+			apath->path.startup_cost = firstsubpath->startup_cost;
+#else
 			apath->path.startup_cost = subpath->startup_cost;
+#endif
 
 			/* Compute rows and costs as sums of subplan rows and costs. */
 			foreach(l, apath->subpaths)
@@ -2570,6 +2682,9 @@ cost_memoize_rescan(PlannerInfo *root, MemoizePath *mpath,
 					Cost *rescan_startup_cost, Cost *rescan_total_cost)
 {
 	EstimationInfo estinfo;
+#if PG_VERSION_NUM >= 160000
+	ListCell   *lc;
+#endif
 	Cost		input_startup_cost = mpath->subpath->startup_cost;
 	Cost		input_total_cost = mpath->subpath->total_cost;
 	double		tuples = mpath->subpath->rows;
@@ -2593,11 +2708,19 @@ cost_memoize_rescan(PlannerInfo *root, MemoizePath *mpath,
 	 * To provide us with better estimations on how many cache entries we can
 	 * store at once, we make a call to the executor here to ask it what
 	 * memory overheads there are for a single cache entry.
+#if PG_VERSION_NUM <= 150000
 	 *
 	 * XXX we also store the cache key, but that's not accounted for here.
+#endif
 	 */
 	est_entry_bytes = relation_byte_size(tuples, width) +
 		ExecEstimateCacheEntryOverheadBytes(tuples);
+
+#if PG_VERSION_NUM >= 160000
+	/* include the estimated width for the cache keys */
+	foreach(lc, mpath->param_exprs)
+		est_entry_bytes += get_expr_width(root, (Node *) lfirst(lc));
+#endif
 
 	/* estimate on the upper limit of cache entries we can hold at once */
 	est_cache_entries = floor(hash_mem_bytes / est_entry_bytes);
@@ -2643,11 +2766,18 @@ cost_memoize_rescan(PlannerInfo *root, MemoizePath *mpath,
 	 * must look at how many scans are estimated in total for this node and
 	 * how many of those scans we expect to get a cache hit.
 	 */
+#if PG_VERSION_NUM >= 160000
+	hit_ratio = ((calls - ndistinct) / calls) *
+		(est_cache_entries / Max(ndistinct, est_cache_entries));
+
+	Assert(hit_ratio >= 0 && hit_ratio <= 1.0);
+#else
 	hit_ratio = 1.0 / ndistinct * Min(est_cache_entries, ndistinct) -
 		(ndistinct / calls);
 
 	/* Ensure we don't go negative */
 	hit_ratio = Max(hit_ratio, 0.0);
+#endif
 
 	/*
 	 * Set the total_cost accounting for the expected cache hit ratio.  We
@@ -2899,6 +3029,228 @@ cost_agg(Path *path, PlannerInfo *root,
 
 #ifndef __PG_QUERY_PLAN__
 /*
+ * get_windowclause_startup_tuples
+ *		Estimate how many tuples we'll need to fetch from a WindowAgg's
+ *		subnode before we can output the first WindowAgg tuple.
+ *
+ * How many tuples need to be read depends on the WindowClause.  For example,
+ * a WindowClause with no PARTITION BY and no ORDER BY requires that all
+ * subnode tuples are read and aggregated before the WindowAgg can output
+ * anything.  If there's a PARTITION BY, then we only need to look at tuples
+ * in the first partition.  Here we attempt to estimate just how many
+ * 'input_tuples' the WindowAgg will need to read for the given WindowClause
+ * before the first tuple can be output.
+ */
+static double
+get_windowclause_startup_tuples(PlannerInfo *root, WindowClause *wc,
+								double input_tuples)
+{
+	int			frameOptions = wc->frameOptions;
+	double		partition_tuples;
+	double		return_tuples;
+	double		peer_tuples;
+
+	/*
+	 * First, figure out how many partitions there are likely to be and set
+	 * partition_tuples according to that estimate.
+	 */
+	if (wc->partitionClause != NIL)
+	{
+		double		num_partitions;
+		List	   *partexprs = get_sortgrouplist_exprs(wc->partitionClause,
+														root->parse->targetList);
+
+		num_partitions = estimate_num_groups(root, partexprs, input_tuples,
+											 NULL, NULL);
+		list_free(partexprs);
+
+		partition_tuples = input_tuples / num_partitions;
+	}
+	else
+	{
+		/* all tuples belong to the same partition */
+		partition_tuples = input_tuples;
+	}
+
+	/* estimate the number of tuples in each peer group */
+	if (wc->orderClause != NIL)
+	{
+		double		num_groups;
+		List	   *orderexprs;
+
+		orderexprs = get_sortgrouplist_exprs(wc->orderClause,
+											 root->parse->targetList);
+
+		/* estimate out how many peer groups there are in the partition */
+		num_groups = estimate_num_groups(root, orderexprs,
+										 partition_tuples, NULL,
+										 NULL);
+		list_free(orderexprs);
+		peer_tuples = partition_tuples / num_groups;
+	}
+	else
+	{
+		/* no ORDER BY so only 1 tuple belongs in each peer group */
+		peer_tuples = 1.0;
+	}
+
+	if (frameOptions & FRAMEOPTION_END_UNBOUNDED_FOLLOWING)
+	{
+		/* include all partition rows */
+		return_tuples = partition_tuples;
+	}
+	else if (frameOptions & FRAMEOPTION_END_CURRENT_ROW)
+	{
+		if (frameOptions & FRAMEOPTION_ROWS)
+		{
+			/* just count the current row */
+			return_tuples = 1.0;
+		}
+		else if (frameOptions & (FRAMEOPTION_RANGE | FRAMEOPTION_GROUPS))
+		{
+			/*
+			 * When in RANGE/GROUPS mode, it's more complex.  If there's no
+			 * ORDER BY, then all rows in the partition are peers, otherwise
+			 * we'll need to read the first group of peers.
+			 */
+			if (wc->orderClause == NIL)
+				return_tuples = partition_tuples;
+			else
+				return_tuples = peer_tuples;
+		}
+		else
+		{
+			/*
+			 * Something new we don't support yet?  This needs attention.
+			 * We'll just return 1.0 in the meantime.
+			 */
+			Assert(false);
+			return_tuples = 1.0;
+		}
+	}
+	else if (frameOptions & FRAMEOPTION_END_OFFSET_PRECEDING)
+	{
+		/*
+		 * BETWEEN ... AND N PRECEDING will only need to read the WindowAgg's
+		 * subnode after N ROWS/RANGES/GROUPS.  N can be 0, but not negative,
+		 * so we'll just assume only the current row needs to be read to fetch
+		 * the first WindowAgg row.
+		 */
+		return_tuples = 1.0;
+	}
+	else if (frameOptions & FRAMEOPTION_END_OFFSET_FOLLOWING)
+	{
+		Const	   *endOffset = (Const *) wc->endOffset;
+		double		end_offset_value;
+
+		/* try and figure out the value specified in the endOffset. */
+		if (IsA(endOffset, Const))
+		{
+			if (endOffset->constisnull)
+			{
+				/*
+				 * NULLs are not allowed, but currently, there's no code to
+				 * error out if there's a NULL Const.  We'll only discover
+				 * this during execution.  For now, just pretend everything is
+				 * fine and assume that just the first row/range/group will be
+				 * needed.
+				 */
+				end_offset_value = 1.0;
+			}
+			else
+			{
+				switch (endOffset->consttype)
+				{
+					case INT2OID:
+						end_offset_value =
+							(double) DatumGetInt16(endOffset->constvalue);
+						break;
+					case INT4OID:
+						end_offset_value =
+							(double) DatumGetInt32(endOffset->constvalue);
+						break;
+					case INT8OID:
+						end_offset_value =
+							(double) DatumGetInt64(endOffset->constvalue);
+						break;
+					default:
+						end_offset_value =
+							partition_tuples / peer_tuples *
+							DEFAULT_INEQ_SEL;
+						break;
+				}
+			}
+		}
+		else
+		{
+			/*
+			 * When the end bound is not a Const, we'll just need to guess. We
+			 * just make use of DEFAULT_INEQ_SEL.
+			 */
+			end_offset_value =
+				partition_tuples / peer_tuples * DEFAULT_INEQ_SEL;
+		}
+
+		if (frameOptions & FRAMEOPTION_ROWS)
+		{
+			/* include the N FOLLOWING and the current row */
+			return_tuples = end_offset_value + 1.0;
+		}
+		else if (frameOptions & (FRAMEOPTION_RANGE | FRAMEOPTION_GROUPS))
+		{
+			/* include N FOLLOWING ranges/group and the initial range/group */
+			return_tuples = peer_tuples * (end_offset_value + 1.0);
+		}
+		else
+		{
+			/*
+			 * Something new we don't support yet?  This needs attention.
+			 * We'll just return 1.0 in the meantime.
+			 */
+			Assert(false);
+			return_tuples = 1.0;
+		}
+	}
+	else
+	{
+		/*
+		 * Something new we don't support yet?  This needs attention.  We'll
+		 * just return 1.0 in the meantime.
+		 */
+		Assert(false);
+		return_tuples = 1.0;
+	}
+
+	if (wc->partitionClause != NIL || wc->orderClause != NIL)
+	{
+		/*
+		 * Cap the return value to the estimated partition tuples and account
+		 * for the extra tuple WindowAgg will need to read to confirm the next
+		 * tuple does not belong to the same partition or peer group.
+		 */
+		return_tuples = Min(return_tuples + 1.0, partition_tuples);
+	}
+	else
+	{
+		/*
+		 * Cap the return value so it's never higher than the expected tuples
+		 * in the partition.
+		 */
+		return_tuples = Min(return_tuples, partition_tuples);
+	}
+
+	/*
+	 * We needn't worry about any EXCLUDE options as those only exclude rows
+	 * from being aggregated, not from being read from the WindowAgg's
+	 * subnode.
+	 */
+
+	return clamp_row_est(return_tuples);
+}
+#endif							/* #ifndef __PG_QUERY_PLAN__ */
+
+#ifndef __PG_QUERY_PLAN__
+/*
  * cost_windowagg
  *		Determines and returns the cost of performing a WindowAgg plan node,
  *		including the cost of its input.
@@ -2907,13 +3259,27 @@ cost_agg(Path *path, PlannerInfo *root,
  */
 void
 cost_windowagg(Path *path, PlannerInfo *root,
+#if PG_VERSION_NUM >= 160000
+			   List *windowFuncs, WindowClause *winclause,
+#else
 			   List *windowFuncs, int numPartCols, int numOrderCols,
+#endif
 			   Cost input_startup_cost, Cost input_total_cost,
 			   double input_tuples)
 {
 	Cost		startup_cost;
 	Cost		total_cost;
+#if PG_VERSION_NUM >= 160000
+	double		startup_tuples;
+	int			numPartCols;
+	int			numOrderCols;
+#endif
 	ListCell   *lc;
+
+#if PG_VERSION_NUM >= 160000
+	numPartCols = list_length(winclause->partitionClause);
+	numOrderCols = list_length(winclause->orderClause);
+#endif
 
 	startup_cost = input_startup_cost;
 	total_cost = input_total_cost;
@@ -2969,6 +3335,23 @@ cost_windowagg(Path *path, PlannerInfo *root,
 	path->rows = input_tuples;
 	path->startup_cost = startup_cost;
 	path->total_cost = total_cost;
+
+#if PG_VERSION_NUM >= 160000
+	/*
+	 * Also, take into account how many tuples we need to read from the
+	 * subnode in order to produce the first tuple from the WindowAgg.  To do
+	 * this we proportion the run cost (total cost not including startup cost)
+	 * over the estimated startup tuples.  We already included the startup
+	 * cost of the subnode, so we only need to do this when the estimated
+	 * startup tuples is above 1.0.
+	 */
+	startup_tuples = get_windowclause_startup_tuples(root, winclause,
+													 input_tuples);
+
+	if (startup_tuples > 1.0)
+		path->startup_cost += (total_cost - startup_cost) / input_tuples *
+			(startup_tuples - 1.0);
+#endif
 }
 #endif							/* #ifndef __PG_QUERY_PLAN__ */
 
@@ -3490,7 +3873,12 @@ initial_cost_mergejoin(PlannerInfo *root, JoinCostWorkspace *workspace,
 			outerstartsel = 0.0;
 			outerendsel = 1.0;
 		}
+#if PG_VERSION_NUM >= 160000
+		else if (jointype == JOIN_RIGHT ||
+				 jointype == JOIN_RIGHT_ANTI)
+#else
 		else if (jointype == JOIN_RIGHT)
+#endif
 		{
 			innerstartsel = 0.0;
 			innerendsel = 1.0;
@@ -4986,9 +5374,18 @@ compute_semi_anti_join_factors(PlannerInfo *root,
 	norm_sjinfo.syn_lefthand = outerrel->relids;
 	norm_sjinfo.syn_righthand = innerrel->relids;
 	norm_sjinfo.jointype = JOIN_INNER;
+#if PG_VERSION_NUM >= 160000
+	norm_sjinfo.ojrelid = 0;
+	norm_sjinfo.commute_above_l = NULL;
+	norm_sjinfo.commute_above_r = NULL;
+	norm_sjinfo.commute_below_l = NULL;
+	norm_sjinfo.commute_below_r = NULL;
+#endif
 	/* we don't bother trying to make the remaining fields valid */
 	norm_sjinfo.lhs_strict = false;
+#if PG_VERSION_NUM < 160000
 	norm_sjinfo.delay_upper_joins = false;
+#endif
 	norm_sjinfo.semi_can_btree = false;
 	norm_sjinfo.semi_can_hash = false;
 	norm_sjinfo.semi_operators = NIL;
@@ -5159,9 +5556,18 @@ approx_tuple_count(PlannerInfo *root, JoinPath *path, List *quals)
 	sjinfo.syn_lefthand = path->outerjoinpath->parent->relids;
 	sjinfo.syn_righthand = path->innerjoinpath->parent->relids;
 	sjinfo.jointype = JOIN_INNER;
+#if PG_VERSION_NUM >= 160000
+	sjinfo.ojrelid = 0;
+	sjinfo.commute_above_l = NULL;
+	sjinfo.commute_above_r = NULL;
+	sjinfo.commute_below_l = NULL;
+	sjinfo.commute_below_r = NULL;
+#endif
 	/* we don't bother trying to make the remaining fields valid */
 	sjinfo.lhs_strict = false;
+#if PG_VERSION_NUM < 160000
 	sjinfo.delay_upper_joins = false;
+#endif
 	sjinfo.semi_can_btree = false;
 	sjinfo.semi_can_hash = false;
 	sjinfo.semi_operators = NIL;
@@ -5381,10 +5787,16 @@ calc_joinrel_size_estimate(PlannerInfo *root,
 						   double outer_rows,
 						   double inner_rows,
 						   SpecialJoinInfo *sjinfo,
+#if PG_VERSION_NUM >= 160000
+						   List *restrictlist)
+#else
 						   List *restrictlist_in)
+#endif
 {
 	/* This apparently-useless variable dodges a compiler bug in VS2013: */
+#if PG_VERSION_NUM < 160000
 	List	   *restrictlist = restrictlist_in;
+#endif
 	JoinType	jointype = sjinfo->jointype;
 	Selectivity fkselec;
 	Selectivity jselec;
@@ -5845,7 +6257,11 @@ set_subquery_size_estimates(PlannerInfo *root, RelOptInfo *rel)
 	}
 
 	/* Now estimate number of output rows, etc */
+#ifdef __PG_QUERY_PLAN__
+	pgqp_set_baserel_size_estimates(root, rel);
+#else
 	set_baserel_size_estimates(root, rel);
+#endif
 }
 #endif							/* #ifndef __PG_QUERY_PLAN__ */
 
@@ -5885,7 +6301,11 @@ set_function_size_estimates(PlannerInfo *root, RelOptInfo *rel)
 	}
 
 	/* Now estimate number of output rows, etc */
+#ifdef __PG_QUERY_PLAN__
+	pgqp_set_baserel_size_estimates(root, rel);
+#else
 	set_baserel_size_estimates(root, rel);
+#endif
 }
 #endif							/* #ifndef __PG_QUERY_PLAN__ */
 
@@ -5909,7 +6329,11 @@ set_tablefunc_size_estimates(PlannerInfo *root, RelOptInfo *rel)
 	rel->tuples = 100;
 
 	/* Now estimate number of output rows, etc */
+#ifdef __PG_QUERY_PLAN__
+	pgqp_set_baserel_size_estimates(root, rel);
+#else
 	set_baserel_size_estimates(root, rel);
+#endif
 }
 #endif							/* #ifndef __PG_QUERY_PLAN__ */
 
@@ -5942,7 +6366,11 @@ set_values_size_estimates(PlannerInfo *root, RelOptInfo *rel)
 	rel->tuples = list_length(rte->values_lists);
 
 	/* Now estimate number of output rows, etc */
+#ifdef __PG_QUERY_PLAN__
+	pgqp_set_baserel_size_estimates(root, rel);
+#else
 	set_baserel_size_estimates(root, rel);
+#endif
 }
 #endif							/* #ifndef __PG_QUERY_PLAN__ */
 
@@ -5991,7 +6419,11 @@ set_cte_size_estimates(PlannerInfo *root, RelOptInfo *rel, double cte_rows)
 	}
 
 	/* Now estimate number of output rows, etc */
+#ifdef __PG_QUERY_PLAN__
+	pgqp_set_baserel_size_estimates(root, rel);
+#else
 	set_baserel_size_estimates(root, rel);
+#endif
 }
 #endif							/* #ifndef __PG_QUERY_PLAN__ */
 
@@ -6026,7 +6458,11 @@ set_namedtuplestore_size_estimates(PlannerInfo *root, RelOptInfo *rel)
 		rel->tuples = 1000;
 
 	/* Now estimate number of output rows, etc */
+#ifdef __PG_QUERY_PLAN__
+	pgqp_set_baserel_size_estimates(root, rel);
+#else
 	set_baserel_size_estimates(root, rel);
+#endif
 }
 #endif							/* #ifndef __PG_QUERY_PLAN__ */
 
@@ -6054,7 +6490,11 @@ set_result_size_estimates(PlannerInfo *root, RelOptInfo *rel)
 	rel->tuples = 1;
 
 	/* Now estimate number of output rows, etc */
+#ifdef __PG_QUERY_PLAN__
+	pgqp_set_baserel_size_estimates(root, rel);
+#else
 	set_baserel_size_estimates(root, rel);
+#endif
 }
 
 #ifndef __PG_QUERY_PLAN__
@@ -6190,7 +6630,11 @@ set_rel_width(PlannerInfo *root, RelOptInfo *rel)
 			 * scanning this rel, so be sure to include it in reltarget->cost.
 			 */
 			PlaceHolderVar *phv = (PlaceHolderVar *) node;
+#if PG_VERSION_NUM >= 160000
+			PlaceHolderInfo *phinfo = find_placeholder_info(root, phv);
+#else
 			PlaceHolderInfo *phinfo = find_placeholder_info(root, phv, false);
+#endif
 			QualCost	cost;
 
 			tuple_width += phinfo->ph_width;
@@ -6277,6 +6721,29 @@ set_pathtarget_cost_width(PlannerInfo *root, PathTarget *target)
 	target->cost.startup = 0;
 	target->cost.per_tuple = 0;
 
+#if PG_VERSION_NUM >= 160000
+	foreach(lc, target->exprs)
+	{
+		Node	   *node = (Node *) lfirst(lc);
+
+		tuple_width += get_expr_width(root, node);
+
+		/* For non-Vars, account for evaluation cost */
+		if (!IsA(node, Var))
+		{
+			QualCost	cost;
+
+			cost_qual_eval_node(&cost, node, root);
+			target->cost.startup += cost.startup;
+			target->cost.per_tuple += cost.per_tuple;
+		}
+	}
+
+	Assert(tuple_width >= 0);
+	target->width = tuple_width;
+
+	return target;
+#else
 	foreach(lc, target->exprs)
 	{
 		Node	   *node = (Node *) lfirst(lc);
@@ -6295,7 +6762,7 @@ set_pathtarget_cost_width(PlannerInfo *root, PathTarget *target)
 				var->varno < root->simple_rel_array_size)
 #else
 			if (var->varno < root->simple_rel_array_size)
-#endif
+#endif							/* #ifndef PG_VERSION_NUM >= 150000 */
 			{
 				RelOptInfo *rel = root->simple_rel_array[var->varno];
 
@@ -6343,8 +6810,58 @@ set_pathtarget_cost_width(PlannerInfo *root, PathTarget *target)
 	target->width = tuple_width;
 
 	return target;
+#endif							/* #ifndef PG_VERSION_NUM >= 160000 */
 }
 #endif							/* #ifndef __PG_QUERY_PLAN__ */
+
+/*
+ * get_expr_width
+ *		Estimate the width of the given expr attempting to use the width
+ *		cached in a Var's owning RelOptInfo, else fallback on the type's
+ *		average width when unable to or when the given Node is not a Var.
+ */
+static int32
+get_expr_width(PlannerInfo *root, const Node *expr)
+{
+	int32		width;
+
+	if (IsA(expr, Var))
+	{
+		const Var  *var = (const Var *) expr;
+
+		/* We should not see any upper-level Vars here */
+		Assert(var->varlevelsup == 0);
+
+		/* Try to get data from RelOptInfo cache */
+		if (!IS_SPECIAL_VARNO(var->varno) &&
+			var->varno < root->simple_rel_array_size)
+		{
+			RelOptInfo *rel = root->simple_rel_array[var->varno];
+
+			if (rel != NULL &&
+				var->varattno >= rel->min_attr &&
+				var->varattno <= rel->max_attr)
+			{
+				int			ndx = var->varattno - rel->min_attr;
+
+				if (rel->attr_widths[ndx] > 0)
+					return rel->attr_widths[ndx];
+			}
+		}
+
+		/*
+		 * No cached data available, so estimate using just the type info.
+		 */
+		width = get_typavgwidth(var->vartype, var->vartypmod);
+		Assert(width > 0);
+
+		return width;
+	}
+
+	width = get_typavgwidth(exprType(expr), exprTypmod(expr));
+	Assert(width > 0);
+	return width;
+}
 
 /*
  * relation_byte_size
@@ -6426,7 +6943,11 @@ compute_bitmap_pages(PlannerInfo *root, RelOptInfo *baserel, Path *bitmapqual,
 	 * Fetch total cost of obtaining the bitmap, as well as its total
 	 * selectivity.
 	 */
+#ifdef __PG_QUERY_PLAN__
+	pgqp_cost_bitmap_tree_node(bitmapqual, &indexTotalCost, &indexSelectivity);
+#else
 	cost_bitmap_tree_node(bitmapqual, &indexTotalCost, &indexSelectivity);
+#endif
 
 	/*
 	 * Estimate number of main-table pages fetched.
@@ -6489,7 +7010,7 @@ compute_bitmap_pages(PlannerInfo *root, RelOptInfo *baserel, Path *bitmapqual,
 		exact_pages = heap_pages - lossy_pages;
 
 		/*
-		 * If there are lossy pages then recompute the  number of tuples
+		 * If there are lossy pages then recompute the number of tuples
 		 * processed by the bitmap heap node.  We assume here that the chance
 		 * of a given tuple coming from an exact page is the same as the
 		 * chance that a given page is exact.  This might not be true, but

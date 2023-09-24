@@ -31,11 +31,18 @@ extern RelOptInfo *pgqp_build_join_rel(PlannerInfo *root,
 									   RelOptInfo *outer_rel,
 									   RelOptInfo *inner_rel,
 									   SpecialJoinInfo *sjinfo,
+#if PG_VERSION_NUM >= 160000
+									   List *pushed_down_joins,
+#endif
 									   List **restrictlist_ptr);
 extern RelOptInfo *pgqp_build_child_join_rel(PlannerInfo *root, RelOptInfo *outer_rel,
 											 RelOptInfo *inner_rel, RelOptInfo *parent_joinrel,
+#if PG_VERSION_NUM >= 160000
+											 List *restrictlist, SpecialJoinInfo *sjinfo);
+#else
 											 List *restrictlist, SpecialJoinInfo *sjinfo,
 											 JoinType jointype);
+#endif
 extern ParamPathInfo *pgqp_get_baserel_parampathinfo(PlannerInfo *root, RelOptInfo *baserel,
 													 Relids required_outer);
 extern ParamPathInfo *pgqp_get_joinrel_parampathinfo(PlannerInfo *root, RelOptInfo *joinrel,

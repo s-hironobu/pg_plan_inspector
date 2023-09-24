@@ -8,7 +8,11 @@
  *
  *
  * IDENTIFICATION
+#if PG_VERSION_NUM >= 160000
+ *	  src/backend/optimizer/util/inherit.c
+#else
  *	  src/backend/optimizer/path/inherit.c
+#endif
  *
  *-------------------------------------------------------------------------
  */
@@ -26,11 +30,17 @@
 #include "optimizer/inherit.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
+#if PG_VERSION_NUM >= 160000
+#include "optimizer/plancat.h"
+#endif
 #include "optimizer/planmain.h"
 #include "optimizer/planner.h"
 #include "optimizer/prep.h"
 #include "optimizer/restrictinfo.h"
 #include "parser/parsetree.h"
+#if PG_VERSION_NUM >= 160000
+#include "parser/parse_relation.h"
+#endif
 #include "partitioning/partdesc.h"
 #include "partitioning/partprune.h"
 #include "utils/rel.h"
@@ -39,11 +49,18 @@
 #include "pgqp_planner.h"
 #endif
 
-
+#if PG_VERSION_NUM >= 160000
+static void expand_partitioned_rtentry(PlannerInfo *root, RelOptInfo *relinfo,
+									   RangeTblEntry *parentrte,
+									   Index parentRTindex, Relation parentrel,
+									   Bitmapset *parent_updatedCols,
+									   PlanRowMark *top_parentrc, LOCKMODE lockmode);
+#else
 static void expand_partitioned_rtentry(PlannerInfo *root, RelOptInfo *relinfo,
 									   RangeTblEntry *parentrte,
 									   Index parentRTindex, Relation parentrel,
 									   PlanRowMark *top_parentrc, LOCKMODE lockmode);
+#endif
 static void expand_single_inheritance_child(PlannerInfo *root,
 											RangeTblEntry *parentrte,
 											Index parentRTindex, Relation parentrel,
@@ -52,6 +69,12 @@ static void expand_single_inheritance_child(PlannerInfo *root,
 											Index *childRTindex_p);
 static Bitmapset *translate_col_privs(const Bitmapset *parent_privs,
 									  List *translated_vars);
+#if PG_VERSION_NUM >= 160000
+static Bitmapset *translate_col_privs_multilevel(PlannerInfo *root,
+												 RelOptInfo *rel,
+												 RelOptInfo *parent_rel,
+												 Bitmapset *parent_cols);
+#endif
 static void expand_appendrel_subquery(PlannerInfo *root, RelOptInfo *rel,
 									  RangeTblEntry *rte, Index rti);
 
@@ -141,6 +164,12 @@ expand_inherited_rtentry(PlannerInfo *root, RelOptInfo *rel,
 	/* Scan the inheritance set and expand it */
 	if (oldrelation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
 	{
+#if PG_VERSION_NUM >= 160000
+		RTEPermissionInfo *perminfo;
+
+		perminfo = getRTEPermissionInfo(root->parse->rteperminfos, rte);
+#endif
+
 		/*
 		 * Partitioned table, so set up for partitioning.
 		 */
@@ -150,8 +179,15 @@ expand_inherited_rtentry(PlannerInfo *root, RelOptInfo *rel,
 		 * Recursively expand and lock the partitions.  While at it, also
 		 * extract the partition key columns of all the partitioned tables.
 		 */
+#if PG_VERSION_NUM >= 160000
+		expand_partitioned_rtentry(root, rel, rte, rti,
+								   oldrelation,
+								   perminfo->updatedCols,
+								   oldrc, lockmode);
+#else
 		expand_partitioned_rtentry(root, rel, rte, rti,
 								   oldrelation, oldrc, lockmode);
+#endif
 	}
 	else
 	{
@@ -301,7 +337,11 @@ expand_inherited_rtentry(PlannerInfo *root, RelOptInfo *rel,
 		 * Add the newly added Vars to parent's reltarget.  We needn't worry
 		 * about the children's reltargets, they'll be made later.
 		 */
+#if PG_VERSION_NUM >= 160000
+		add_vars_to_targetlist(root, newvars, bms_make_singleton(0));
+#else
 		add_vars_to_targetlist(root, newvars, bms_make_singleton(0), false);
+#endif
 	}
 
 	table_close(oldrelation, NoLock);
@@ -315,6 +355,9 @@ static void
 expand_partitioned_rtentry(PlannerInfo *root, RelOptInfo *relinfo,
 						   RangeTblEntry *parentrte,
 						   Index parentRTindex, Relation parentrel,
+#if PG_VERSION_NUM >= 160000
+						   Bitmapset *parent_updatedCols,
+#endif
 						   PlanRowMark *top_parentrc, LOCKMODE lockmode)
 {
 	PartitionDesc partdesc;
@@ -332,6 +375,17 @@ expand_partitioned_rtentry(PlannerInfo *root, RelOptInfo *relinfo,
 	/* A partitioned table should always have a partition descriptor. */
 	Assert(partdesc);
 
+#if PG_VERSION_NUM >= 160000
+	/*
+	 * Note down whether any partition key cols are being updated. Though it's
+	 * the root partitioned table's updatedCols we are interested in,
+	 * parent_updatedCols provided by the caller contains the root partrel's
+	 * updatedCols translated to match the attribute ordering of parentrel.
+	 */
+	if (!root->partColsUpdated)
+		root->partColsUpdated =
+			has_partition_attrs(parentrel, parent_updatedCols, NULL);
+#else
 	/*
 	 * Note down whether any partition key cols are being updated. Though it's
 	 * the root partitioned table's updatedCols we are interested in, we
@@ -347,6 +401,7 @@ expand_partitioned_rtentry(PlannerInfo *root, RelOptInfo *relinfo,
 	 * There shouldn't be any generated columns in the partition key.
 	 */
 	Assert(!has_partition_attrs(parentrel, parentrte->extraUpdatedCols, NULL));
+#endif
 
 	/* Nothing further to do here if there are no partitions. */
 	if (partdesc->nparts == 0)
@@ -415,10 +470,27 @@ expand_partitioned_rtentry(PlannerInfo *root, RelOptInfo *relinfo,
 												childrelinfo->relids);
 
 		/* If this child is itself partitioned, recurse */
+#if PG_VERSION_NUM >= 160000
+		if (childrel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+		{
+			AppendRelInfo *appinfo = root->append_rel_array[childRTindex];
+			Bitmapset  *child_updatedCols;
+
+			child_updatedCols = translate_col_privs(parent_updatedCols,
+													appinfo->translated_vars);
+
+			expand_partitioned_rtentry(root, childrelinfo,
+									   childrte, childRTindex,
+									   childrel,
+									   child_updatedCols,
+									   top_parentrc, lockmode);
+		}
+#else
 		if (childrel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
 			expand_partitioned_rtentry(root, childrelinfo,
 									   childrte, childRTindex,
 									   childrel, top_parentrc, lockmode);
+#endif
 
 		/* Close child relation, but keep locks */
 		table_close(childrel, NoLock);
@@ -462,6 +534,21 @@ expand_single_inheritance_child(PlannerInfo *root, RangeTblEntry *parentrte,
 	List	   *parent_colnames;
 	List	   *child_colnames;
 
+#if PG_VERSION_NUM >= 160000
+	/*
+	 * Build an RTE for the child, and attach to query's rangetable list. We
+	 * copy most scalar fields of the parent's RTE, but replace relation OID,
+	 * relkind, and inh for the child.  Set the child's securityQuals to
+	 * empty, because we only want to apply the parent's RLS conditions
+	 * regardless of what RLS properties individual children may have. (This
+	 * is an intentional choice to make inherited RLS work like regular
+	 * permissions checks.) The parent securityQuals will be propagated to
+	 * children along with other base restriction clauses, so we don't need to
+	 * do it here.  Other infrastructure of the parent RTE has to be
+	 * translated to match the child table's column ordering, which we do
+	 * below, so a "flat" copy is sufficient to start with.
+	 */
+#else
 	/*
 	 * Build an RTE for the child, and attach to query's rangetable list. We
 	 * copy most scalar fields of the parent's RTE, but replace relation OID,
@@ -477,6 +564,7 @@ expand_single_inheritance_child(PlannerInfo *root, RangeTblEntry *parentrte,
 	 * child table's column ordering, which we do below, so a "flat" copy is
 	 * sufficient to start with.
 	 */
+#endif
 	childrte = makeNode(RangeTblEntry);
 	memcpy(childrte, parentrte, sizeof(RangeTblEntry));
 	Assert(parentrte->rtekind == RTE_RELATION); /* else this is dubious */
@@ -490,8 +578,20 @@ expand_single_inheritance_child(PlannerInfo *root, RangeTblEntry *parentrte,
 	}
 	else
 		childrte->inh = false;
+#if PG_VERSION_NUM >= 160000
+	childrte->securityQuals = NIL;
+
+	/*
+	 * No permission checking for the child RTE unless it's the parent
+	 * relation in its child role, which only applies to traditional
+	 * inheritance.
+	 */
+	if (childOID != parentOID)
+		childrte->perminfoindex = 0;
+#else
 	childrte->requiredPerms = 0;
 	childrte->securityQuals = NIL;
+#endif
 
 	/* Link not-yet-fully-filled child RTE into data structures */
 	parse->rtable = lappend(parse->rtable, childrte);
@@ -553,6 +653,7 @@ expand_single_inheritance_child(PlannerInfo *root, RangeTblEntry *parentrte,
 	childrte->alias = childrte->eref = makeAlias(parentrte->eref->aliasname,
 												 child_colnames);
 
+#if PG_VERSION_NUM < 160000
 	/*
 	 * Translate the column permissions bitmaps to the child's attnums (we
 	 * have to build the translated_vars list before we can do this).  But if
@@ -580,6 +681,7 @@ expand_single_inheritance_child(PlannerInfo *root, RangeTblEntry *parentrte,
 		childrte->updatedCols = bms_copy(parentrte->updatedCols);
 		childrte->extraUpdatedCols = bms_copy(parentrte->extraUpdatedCols);
 	}
+#endif
 
 	/*
 	 * Store the RTE and appinfo in the respective PlannerInfo arrays, which
@@ -628,7 +730,7 @@ expand_single_inheritance_child(PlannerInfo *root, RangeTblEntry *parentrte,
 
 	/*
 	 * If we are creating a child of the query target relation (only possible
-	 * in UPDATE/DELETE), add it to all_result_relids, as well as
+	 * in UPDATE/DELETE/MERGE), add it to all_result_relids, as well as
 	 * leaf_result_relids if appropriate, and make sure that we generate
 	 * required row-identity data.
 	 */
@@ -666,6 +768,56 @@ expand_single_inheritance_child(PlannerInfo *root, RangeTblEntry *parentrte,
 		}
 	}
 }
+
+#if PG_VERSION_NUM >= 160000
+/*
+ * get_rel_all_updated_cols
+ * 		Returns the set of columns of a given "simple" relation that are
+ * 		updated by this query.
+ */
+Bitmapset *
+get_rel_all_updated_cols(PlannerInfo *root, RelOptInfo *rel)
+{
+	Index		relid;
+	RangeTblEntry *rte;
+	RTEPermissionInfo *perminfo;
+	Bitmapset  *updatedCols,
+			   *extraUpdatedCols;
+
+	Assert(root->parse->commandType == CMD_UPDATE);
+	Assert(IS_SIMPLE_REL(rel));
+
+	/*
+	 * We obtain updatedCols for the query's result relation.  Then, if
+	 * necessary, we map it to the column numbers of the relation for which
+	 * they were requested.
+	 */
+	relid = root->parse->resultRelation;
+	rte = planner_rt_fetch(relid, root);
+	perminfo = getRTEPermissionInfo(root->parse->rteperminfos, rte);
+
+	updatedCols = perminfo->updatedCols;
+
+	if (rel->relid != relid)
+	{
+		RelOptInfo *top_parent_rel = find_base_rel(root, relid);
+
+		Assert(IS_OTHER_REL(rel));
+
+		updatedCols = translate_col_privs_multilevel(root, rel, top_parent_rel,
+													 updatedCols);
+	}
+
+	/*
+	 * Now we must check to see if there are any generated columns that depend
+	 * on the updatedCols, and add them to the result.
+	 */
+	extraUpdatedCols = get_dependent_generated_columns(root, rel->relid,
+													   updatedCols);
+
+	return bms_union(updatedCols, extraUpdatedCols);
+}
+#endif
 
 /*
  * translate_col_privs
@@ -718,6 +870,47 @@ translate_col_privs(const Bitmapset *parent_privs,
 
 	return child_privs;
 }
+
+#if PG_VERSION_NUM >= 160000
+/*
+ * translate_col_privs_multilevel
+ *		Recursively translates the column numbers contained in 'parent_cols'
+ *		to the column numbers of a descendant relation given by 'rel'
+ *
+ * Note that because this is based on translate_col_privs, it will expand
+ * a whole-row reference into all inherited columns.  This is not an issue
+ * for current usages, but beware.
+ */
+static Bitmapset *
+translate_col_privs_multilevel(PlannerInfo *root, RelOptInfo *rel,
+							   RelOptInfo *parent_rel,
+							   Bitmapset *parent_cols)
+{
+	AppendRelInfo *appinfo;
+
+	/* Fast path for easy case. */
+	if (parent_cols == NULL)
+		return NULL;
+
+	/* Recurse if immediate parent is not the top parent. */
+	if (rel->parent != parent_rel)
+	{
+		if (rel->parent)
+			parent_cols = translate_col_privs_multilevel(root, rel->parent,
+														 parent_rel,
+														 parent_cols);
+		else
+			elog(ERROR, "rel with relid %u is not a child rel", rel->relid);
+	}
+
+	/* Now translate for this child. */
+	Assert(root->append_rel_array != NULL);
+	appinfo = root->append_rel_array[rel->relid];
+	Assert(appinfo != NULL);
+
+	return translate_col_privs(parent_cols, appinfo->translated_vars);
+}
+#endif
 
 /*
  * expand_appendrel_subquery
@@ -831,6 +1024,17 @@ apply_child_basequals(PlannerInfo *root, RelOptInfo *parentrel,
 				root->hasPseudoConstantQuals = true;
 			}
 			/* reconstitute RestrictInfo with appropriate properties */
+#if PG_VERSION_NUM >= 160000
+			childquals = lappend(childquals,
+								 make_restrictinfo(root,
+												   (Expr *) onecq,
+												   rinfo->is_pushed_down,
+												   rinfo->has_clone,
+												   rinfo->is_clone,
+												   pseudoconstant,
+												   rinfo->security_level,
+												   NULL, NULL, NULL));
+#else
 			childquals = lappend(childquals,
 								 make_restrictinfo(root,
 												   (Expr *) onecq,
@@ -839,6 +1043,7 @@ apply_child_basequals(PlannerInfo *root, RelOptInfo *parentrel,
 												   pseudoconstant,
 												   rinfo->security_level,
 												   NULL, NULL, NULL));
+#endif
 			/* track minimum security level among child quals */
 			cq_min_security = Min(cq_min_security, rinfo->security_level);
 		}
@@ -869,11 +1074,21 @@ apply_child_basequals(PlannerInfo *root, RelOptInfo *parentrel,
 				Expr	   *qual = (Expr *) lfirst(lc2);
 
 				/* not likely that we'd see constants here, so no check */
+#if PG_VERSION_NUM >= 160000
+				childquals = lappend(childquals,
+									 make_restrictinfo(root, qual,
+													   true,
+													   false, false,
+													   false,
+													   security_level,
+													   NULL, NULL, NULL));
+#else
 				childquals = lappend(childquals,
 									 make_restrictinfo(root, qual,
 													   true, false, false,
 													   security_level,
 													   NULL, NULL, NULL));
+#endif
 				cq_min_security = Min(cq_min_security, security_level);
 			}
 			security_level++;

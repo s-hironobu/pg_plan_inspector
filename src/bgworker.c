@@ -58,7 +58,11 @@ extern pgqpSharedState * pgqp;
  * Function declarations
  */
 void		pg_query_plan_main(Datum) pg_attribute_noreturn();
+#if PG_VERSION_NUM >= 160000
+PGDLLEXPORT void		pg_query_plan_main(Datum main_arg);
+#else
 void		pg_query_plan_main(Datum main_arg);
+#endif
 void		start_tx(void);
 void		commit_tx(void);
 

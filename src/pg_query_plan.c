@@ -40,7 +40,11 @@
 #include "utils/builtins.h"
 #include "utils/timestamp.h"
 #if PG_VERSION_NUM >= 140000
+#if PG_VERSION_NUM >= 160000
+#include "nodes/queryjumble.h"
+#else
 #include "utils/queryjumble.h"
+#endif
 #endif
 
 #ifdef __ADJUST_ROWS__
@@ -598,7 +602,11 @@ sig_get_query_plan(SIGNAL_ARGS)
 	MemoryContext oldcxt;
 	QueryDesc  *queryDesc;
 
+#if PG_VERSION_NUM >= 160000
+	sigprocmask(SIG_SETMASK, &BlockSig, NULL);
+#else
 	PG_SETMASK(&BlockSig);
+#endif
 
 	/*
 	 * Check the showing query plan feature is enabled or not
@@ -683,7 +691,11 @@ final:
 	if (pgqp->latch != NULL)
 		SetLatch(pgqp->latch);
 
+#if PG_VERSION_NUM >= 160000
+	sigprocmask(SIG_SETMASK, &UnBlockSig, NULL);
+#else
 	PG_SETMASK(&UnBlockSig);
+#endif
 
 	errno = save_errno;
 }
@@ -1314,7 +1326,11 @@ pg_query_plan(PG_FUNCTION_ARGS)
 		PgBackendStatus *beentry = NULL;
 		bool		parallel_worker;
 #undef PG_QUERY_PLAN_COLS
+#if PG_VERSION_NUM >= 160000
+		beentry = pgstat_get_beentry_by_backend_id(curr_backend);
+#else
 		beentry = pgstat_fetch_stat_beentry(curr_backend);
+#endif
 
 		if (beentry == NULL)
 			continue;
