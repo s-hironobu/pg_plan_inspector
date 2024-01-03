@@ -10,7 +10,7 @@
  * These query jumbling functions are only used in versions 12 and 13, because,
  * the query jumbling feature has been moved to PostgreSQL core in version 14.
  *
- * Copyright (c) 2021-2023, Hironobu Suzuki @ interdb.jp
+ * Copyright (c) 2021-2024, Hironobu Suzuki @ interdb.jp
  * Copyright (c) 2008-2024, PostgreSQL Global Development Group
  *
  *-------------------------------------------------------------------------

@@ -21,7 +21,7 @@
  * two slots of the ring buffer. This is because each query in a nested query
  * finishes at a different time.
  *
- * Copyright (c) 2021-2023, Hironobu Suzuki @ interdb.jp
+ * Copyright (c) 2021-2024, Hironobu Suzuki @ interdb.jp
  *
  *-------------------------------------------------------------------------
  */
