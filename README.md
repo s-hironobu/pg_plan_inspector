@@ -202,6 +202,7 @@ Version 0.2 (POC model)
 
 ## Change Log
 
+ - 24th September 2024: Removed support for PG 13 and 14.
  - 24th September 2024: Supported PG 17.
  - 24th September 2023: Supported PG 16.
  - 24th March 2023: Added an experimental feature that temporarily expands the work_mem area during the query execution. See [README-tools.md](./README-tools.md).
