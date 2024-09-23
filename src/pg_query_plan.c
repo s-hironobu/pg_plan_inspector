@@ -143,9 +143,7 @@ static int	pgqp_hash_max;
 static volatile sig_atomic_t got_siguser2 = false;
 
 /* Saved hook values in case of unload */
-#if PG_VERSION_NUM >= 150000
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
-#endif
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 static ExecutorStart_hook_type prev_ExecutorStart = NULL;
 static ExecutorRun_hook_type prev_ExecutorRun = NULL;
@@ -186,9 +184,7 @@ static RelOptInfo *pgqp_join_search(PlannerInfo *root, int levels_needed,
 									List *initial_rels);
 #endif
 
-#if PG_VERSION_NUM >= 150000
 static void pgqp_shmem_request(void);
-#endif
 static void pgqp_shmem_startup(void);
 static void pgqp_shmem_shutdown(int code, Datum arg);
 static Size pgqp_memsize(void);
@@ -338,10 +334,8 @@ _PG_init(void)
 #endif
 
 	/* Install hooks. */
-#if PG_VERSION_NUM >= 150000
 	prev_shmem_request_hook = shmem_request_hook;
 	shmem_request_hook = pgqp_shmem_request;
-#endif
 
 	prev_shmem_startup_hook = shmem_startup_hook;
 	shmem_startup_hook = pgqp_shmem_startup;
@@ -414,7 +408,6 @@ _PG_init(void)
 
 }
 
-#if PG_VERSION_NUM >= 150000
 static void
 pgqp_shmem_request(void)
 {
@@ -424,7 +417,6 @@ pgqp_shmem_request(void)
 	RequestAddinShmemSpace(pgqp_memsize());
 	RequestNamedLWLockTranche("pg_query_plan", 1);
 }
-#endif
 
 void
 _PG_fini(void)

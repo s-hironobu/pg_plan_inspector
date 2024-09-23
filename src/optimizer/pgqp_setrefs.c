@@ -101,11 +101,7 @@ typedef struct
 {
 	PlannerInfo *root;
 	indexed_tlist *subplan_itlist;
-#if PG_VERSION_NUM >= 150000
 	int			newvarno;
-#else
-	Index		newvarno;
-#endif
 	int			rtoffset;
 #if PG_VERSION_NUM >= 160000
 	NullingRelsMatch nrm_match;
@@ -113,14 +109,12 @@ typedef struct
 	double		num_exec;
 } fix_upper_expr_context;
 
-#if PG_VERSION_NUM >= 150000
 typedef struct
 {
 	PlannerInfo *root;
 	indexed_tlist *subplan_itlist;
 	int			newvarno;
 } fix_windowagg_cond_context;
-#endif
 
 #if PG_VERSION_NUM >= 160000
 /* Context info for flatten_rtes_walker() */
@@ -181,9 +175,6 @@ static Plan *set_indexonlyscan_references(PlannerInfo *root,
 static Plan *set_subqueryscan_references(PlannerInfo *root,
 										 SubqueryScan *plan,
 										 int rtoffset);
-#if PG_VERSION_NUM < 150000
-static bool trivial_subqueryscan(SubqueryScan *plan);
-#endif
 static Plan *clean_up_removed_plan_level(Plan *parent, Plan *child);
 static void set_foreignscan_references(PlannerInfo *root,
 									   ForeignScan *fscan,
@@ -211,11 +202,7 @@ static void set_dummy_tlist_references(Plan *plan, int rtoffset);
 static indexed_tlist *build_tlist_index(List *tlist);
 static Var *search_indexed_tlist_for_var(Var *var,
 										 indexed_tlist *itlist,
-#if PG_VERSION_NUM >= 150000
 										 int newvarno,
-#else
-										 Index newvarno,
-#endif
 #if PG_VERSION_NUM >= 160000
 										 int rtoffset,
 										 NullingRelsMatch nrm_match);
@@ -230,19 +217,11 @@ static Var *search_indexed_tlist_for_phv(PlaceHolderVar *phv,
 #endif
 static Var *search_indexed_tlist_for_non_var(Expr *node,
 											 indexed_tlist *itlist,
-#if PG_VERSION_NUM >= 150000
 											 int newvarno);
-#else
-											 Index newvarno);
-#endif
 static Var *search_indexed_tlist_for_sortgroupref(Expr *node,
 												  Index sortgroupref,
 												  indexed_tlist *itlist,
-#if PG_VERSION_NUM >= 150000
 												  int newvarno);
-#else
-												  Index newvarno);
-#endif
 static List *fix_join_expr(PlannerInfo *root,
 						   List *clauses,
 						   indexed_tlist *outer_itlist,
@@ -260,11 +239,7 @@ static Node *fix_join_expr_mutator(Node *node,
 static Node *fix_upper_expr(PlannerInfo *root,
 							Node *node,
 							indexed_tlist *subplan_itlist,
-#if PG_VERSION_NUM >= 150000
 							int newvarno,
-#else
-							Index newvarno,
-#endif
 #if PG_VERSION_NUM >= 160000
 							int rtoffset,
 							NullingRelsMatch nrm_match,
@@ -279,11 +254,9 @@ static List *set_returning_clause_references(PlannerInfo *root,
 											 Plan *topplan,
 											 Index resultRelation,
 											 int rtoffset);
-#if PG_VERSION_NUM >= 150000
 static List *set_windowagg_runcondition_references(PlannerInfo *root,
 												   List *runcondition,
 												   Plan *plan);
-#endif
 
 /*****************************************************************************
  *
@@ -364,9 +337,7 @@ pgqp_set_plan_references(PlannerInfo *root, Plan *plan)
 set_plan_references(PlannerInfo *root, Plan *plan)
 #endif
 {
-#if PG_VERSION_NUM >= 150000
 	Plan	   *result;
-#endif
 	PlannerGlobal *glob = root->glob;
 	int			rtoffset = list_length(glob->finalrtable);
 	ListCell   *lc;
@@ -419,7 +390,6 @@ set_plan_references(PlannerInfo *root, Plan *plan)
 		glob->appendRelations = lappend(glob->appendRelations, appinfo);
 	}
 
-#if PG_VERSION_NUM >= 150000
 	/* If needed, create workspace for processing AlternativeSubPlans */
 	if (root->hasAlternativeSubPlans)
 	{
@@ -428,9 +398,7 @@ set_plan_references(PlannerInfo *root, Plan *plan)
 		root->isUsedSubplan = (bool *)
 			palloc0(list_length(glob->subplans) * sizeof(bool));
 	}
-#endif
 
-#if PG_VERSION_NUM >= 150000
 	/* Now fix the Plan tree */
 	result = set_plan_refs(root, plan, rtoffset);
 
@@ -460,10 +428,6 @@ set_plan_references(PlannerInfo *root, Plan *plan)
 	}
 
 	return result;
-#else
-	/* Now fix the Plan tree */
-	return set_plan_refs(root, plan, rtoffset);
-#endif
 }
 
 /*
@@ -776,7 +740,6 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 				SeqScan    *splan = (SeqScan *) plan;
 
 
-#if PG_VERSION_NUM >= 150000
 				splan->scan.scanrelid += rtoffset;
 				splan->scan.plan.targetlist =
 					fix_scan_list(root, splan->scan.plan.targetlist,
@@ -784,15 +747,6 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 				splan->scan.plan.qual =
 					fix_scan_list(root, splan->scan.plan.qual,
 								  rtoffset, NUM_EXEC_QUAL(plan));
-#else
-				splan->scanrelid += rtoffset;
-				splan->plan.targetlist =
-					fix_scan_list(root, splan->plan.targetlist,
-								  rtoffset, NUM_EXEC_TLIST(plan));
-				splan->plan.qual =
-					fix_scan_list(root, splan->plan.qual,
-								  rtoffset, NUM_EXEC_QUAL(plan));
-#endif
 			}
 			break;
 		case T_SampleScan:
@@ -1129,8 +1083,6 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 			{
 				WindowAgg  *wplan = (WindowAgg *) plan;
 
-#if PG_VERSION_NUM >= 150000
-
 				/*
 				 * Adjust the WindowAgg's run conditions by swapping the
 				 * WindowFuncs references out to instead reference the Var in
@@ -1142,7 +1094,6 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 				wplan->runCondition = set_windowagg_runcondition_references(root,
 																			wplan->runCondition,
 																			(Plan *) wplan);
-#endif
 
 				set_upper_references(root, plan, rtoffset);
 
@@ -1155,7 +1106,6 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 					fix_scan_expr(root, wplan->startOffset, rtoffset, 1);
 				wplan->endOffset =
 					fix_scan_expr(root, wplan->endOffset, rtoffset, 1);
-#if PG_VERSION_NUM >= 150000
 				wplan->runCondition = fix_scan_list(root,
 													wplan->runCondition,
 													rtoffset,
@@ -1164,7 +1114,6 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 														wplan->runConditionOrig,
 														rtoffset,
 														NUM_EXEC_TLIST(plan));
-#endif
 			}
 			break;
 		case T_Result:
@@ -1220,9 +1169,8 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 		case T_ModifyTable:
 			{
 				ModifyTable *splan = (ModifyTable *) plan;
-#if PG_VERSION_NUM >= 150000
 				Plan	   *subplan = outerPlan(splan);
-#endif
+
 				Assert(splan->plan.targetlist == NIL);
 				Assert(splan->plan.qual == NIL);
 
@@ -1233,9 +1181,6 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 				if (splan->returningLists)
 				{
 					List	   *newRL = NIL;
-#if PG_VERSION_NUM < 150000
-					Plan	   *subplan = outerPlan(splan);
-#endif
 					ListCell   *lcrl,
 							   *lcrr;
 
@@ -1309,8 +1254,6 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 					splan->exclRelTlist =
 						fix_scan_list(root, splan->exclRelTlist, rtoffset, 1);
 				}
-
-#if PG_VERSION_NUM >= 150000
 
 				/*
 				 * The MERGE statement produces the target rows by performing
@@ -1411,8 +1354,6 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 					splan->mergeJoinConditions = newMJC;
 #endif
 				}
-
-#endif
 
 				splan->nominalRelation += rtoffset;
 				if (splan->rootRelation)
@@ -1526,12 +1467,8 @@ set_indexonlyscan_references(PlannerInfo *root,
 							 int rtoffset)
 {
 	indexed_tlist *index_itlist;
-#if PG_VERSION_NUM >= 150000
 	List	   *stripped_indextlist;
 	ListCell   *lc;
-#endif
-
-#if PG_VERSION_NUM >= 150000
 
 	/*
 	 * Vars in the plan node's targetlist, qual, and recheckqual must only
@@ -1550,9 +1487,6 @@ set_indexonlyscan_references(PlannerInfo *root,
 	}
 
 	index_itlist = build_tlist_index(stripped_indextlist);
-#else
-	index_itlist = build_tlist_index(plan->indextlist);
-#endif
 
 	plan->scan.scanrelid += rtoffset;
 	plan->scan.plan.targetlist = (List *)
@@ -1575,7 +1509,6 @@ set_indexonlyscan_references(PlannerInfo *root,
 					   NRM_EQUAL,
 #endif
 					   NUM_EXEC_QUAL((Plan *) plan));
-#if PG_VERSION_NUM >= 150000
 	plan->recheckqual = (List *)
 		fix_upper_expr(root,
 					   (Node *) plan->recheckqual,
@@ -1586,7 +1519,7 @@ set_indexonlyscan_references(PlannerInfo *root,
 					   NRM_EQUAL,
 #endif
 					   NUM_EXEC_QUAL((Plan *) plan));
-#endif					/* #if PG_VERSION_NUM >= 150000 */
+
 	/* indexqual is already transformed to reference index columns */
 	plan->indexqual = fix_scan_list(root, plan->indexqual,
 									rtoffset, 1);
@@ -1657,65 +1590,7 @@ set_subqueryscan_references(PlannerInfo *root,
 	return result;
 }
 
-#if PG_VERSION_NUM < 150000
-/*
- * trivial_subqueryscan
- *		Detect whether a SubqueryScan can be deleted from the plan tree.
- *
- * We can delete it if it has no qual to check and the targetlist just
- * regurgitates the output of the child plan.
- */
-static bool
-trivial_subqueryscan(SubqueryScan *plan)
-{
-	int			attrno;
-	ListCell   *lp,
-			   *lc;
 
-	if (plan->scan.plan.qual != NIL)
-		return false;
-
-	if (list_length(plan->scan.plan.targetlist) !=
-		list_length(plan->subplan->targetlist))
-		return false;			/* tlists not same length */
-
-	attrno = 1;
-	forboth(lp, plan->scan.plan.targetlist, lc, plan->subplan->targetlist)
-	{
-		TargetEntry *ptle = (TargetEntry *) lfirst(lp);
-		TargetEntry *ctle = (TargetEntry *) lfirst(lc);
-
-		if (ptle->resjunk != ctle->resjunk)
-			return false;		/* tlist doesn't match junk status */
-
-		/*
-		 * We accept either a Var referencing the corresponding element of the
-		 * subplan tlist, or a Const equaling the subplan element. See
-		 * generate_setop_tlist() for motivation.
-		 */
-		if (ptle->expr && IsA(ptle->expr, Var))
-		{
-			Var		   *var = (Var *) ptle->expr;
-
-			Assert(var->varno == plan->scan.scanrelid);
-			Assert(var->varlevelsup == 0);
-			if (var->varattno != attrno)
-				return false;	/* out of order */
-		}
-		else if (ptle->expr && IsA(ptle->expr, Const))
-		{
-			if (!equal(ptle->expr, ctle->expr))
-				return false;
-		}
-		else
-			return false;
-
-		attrno++;
-	}
-
-	return true;
-}
-#endif							/* if PG_VERSION_NUM < 150000 */
 #if PG_VERSION_NUM >= 160000
 /*
  * trivial_subqueryscan
@@ -2062,7 +1937,6 @@ set_append_references(PlannerInfo *root,
 		lfirst(l) = set_plan_refs(root, (Plan *) lfirst(l), rtoffset);
 	}
 
-#if PG_VERSION_NUM >= 150000
 	/*
 	 * See if it's safe to get rid of the Append entirely.  For this to be
 	 * safe, there must be only one child plan and that child plan's parallel
@@ -2085,12 +1959,6 @@ set_append_references(PlannerInfo *root,
 		return clean_up_removed_plan_level((Plan *) aplan,
 										   (Plan *) linitial(aplan->appendplans));
 #endif				/* #if PG_VERSION_NUM >= 160000 */
-#else
-	/* Now, if there's just one, forget the Append and return that child */
-	if (list_length(aplan->appendplans) == 1)
-		return clean_up_removed_plan_level((Plan *) aplan,
-										   (Plan *) linitial(aplan->appendplans));
-#endif
 
 	/*
 	 * Otherwise, clean up the Append as needed.  It's okay to do this after
@@ -2151,7 +2019,6 @@ set_mergeappend_references(PlannerInfo *root,
 		lfirst(l) = set_plan_refs(root, (Plan *) lfirst(l), rtoffset);
 	}
 
-#if PG_VERSION_NUM >= 150000
 	/*
 	 * See if it's safe to get rid of the MergeAppend entirely.  For this to
 	 * be safe, there must be only one child plan and that child plan's
@@ -2175,12 +2042,6 @@ set_mergeappend_references(PlannerInfo *root,
 		return clean_up_removed_plan_level((Plan *) mplan,
 										   (Plan *) linitial(mplan->mergeplans));
 #endif				/* #if PG_VERSION_NUM >= 160000 */
-#else
-	/* Now, if there's just one, forget the MergeAppend and return that child */
-	if (list_length(mplan->mergeplans) == 1)
-		return clean_up_removed_plan_level((Plan *) mplan,
-										   (Plan *) linitial(mplan->mergeplans));
-#endif
 
 	/*
 	 * Otherwise, clean up the MergeAppend as needed.  It's okay to do this
@@ -2444,7 +2305,6 @@ fix_alternative_subplan(PlannerInfo *root, AlternativeSubPlan *asplan,
 	 */
 	Assert(asplan->subplans != NIL);
 
-#if PG_VERSION_NUM >= 150000
 	foreach(lc, asplan->subplans)
 	{
 		SubPlan    *curplan = (SubPlan *) lfirst(lc);
@@ -2463,39 +2323,6 @@ fix_alternative_subplan(PlannerInfo *root, AlternativeSubPlan *asplan,
 
 	/* Mark the subplan we selected */
 	root->isUsedSubplan[bestplan->plan_id - 1] = true;
-#else
-	foreach(lc, asplan->subplans)
-	{
-		SubPlan    *curplan = (SubPlan *) lfirst(lc);
-		Cost		curcost;
-
-		curcost = curplan->startup_cost + num_exec * curplan->per_call_cost;
-
-		if (bestplan == NULL)
-		{
-			bestplan = curplan;
-			bestcost = curcost;
-		}
-		else if (curcost <= bestcost)
-		{
-			/* drop old bestplan */
-			ListCell   *lc2 = list_nth_cell(root->glob->subplans,
-											bestplan->plan_id - 1);
-
-			lfirst(lc2) = NULL;
-			bestplan = curplan;
-			bestcost = curcost;
-		}
-		else
-		{
-			/* drop curplan */
-			ListCell   *lc2 = list_nth_cell(root->glob->subplans,
-											curplan->plan_id - 1);
-
-			lfirst(lc2) = NULL;
-		}
-	}
-#endif
 
 	return (Node *) bestplan;
 }
@@ -2617,15 +2444,8 @@ fix_scan_expr_mutator(Node *node, fix_scan_expr_context *context)
 	{
 		CurrentOfExpr *cexpr = (CurrentOfExpr *) copyObject(node);
 
-#if PG_VERSION_NUM >= 150000
 		Assert(!IS_SPECIAL_VARNO(cexpr->cvarno));
 		cexpr->cvarno += context->rtoffset;
-#else
-		Assert(cexpr->cvarno != INNER_VAR);
-		Assert(cexpr->cvarno != OUTER_VAR);
-		if (!IS_SPECIAL_VARNO(cexpr->cvarno))
-			cexpr->cvarno += context->rtoffset;
-#endif
 		return (Node *) cexpr;
 	}
 	if (IsA(node, PlaceHolderVar))
@@ -3175,11 +2995,7 @@ build_tlist_index(List *tlist)
  * (so nothing other than Vars and PlaceHolderVars can be matched).
  */
 static indexed_tlist *
-#if PG_VERSION_NUM >= 150000
 build_tlist_index_other_vars(List *tlist, int ignore_rel)
-#else
-build_tlist_index_other_vars(List *tlist, Index ignore_rel)
-#endif
 {
 	indexed_tlist *itlist;
 	tlist_vinfo *vinfo;
@@ -3240,22 +3056,14 @@ build_tlist_index_other_vars(List *tlist, Index ignore_rel)
  */
 static Var *
 search_indexed_tlist_for_var(Var *var, indexed_tlist *itlist,
-#if PG_VERSION_NUM >= 150000
 #if PG_VERSION_NUM >= 160000
 							 int newvarno, int rtoffset,
 							 NullingRelsMatch nrm_match)
 #else
 										 int newvarno, int rtoffset)
 #endif /* #if PG_VERSION_NUM >= 160000 */
-#else
-										 Index newvarno, int rtoffset)
-#endif
 {
-#if PG_VERSION_NUM >= 150000
 	int			varno = var->varno;
-#else
-	Index		varno = var->varno;
-#endif
 	AttrNumber	varattno = var->varattno;
 	tlist_vinfo *vinfo;
 	int			i;
@@ -3373,13 +3181,8 @@ search_indexed_tlist_for_phv(PlaceHolderVar *phv,
  * NOTE: it is a waste of time to call this unless itlist->has_non_vars.
  */
 static Var *
-#if PG_VERSION_NUM >= 150000
 search_indexed_tlist_for_non_var(Expr *node,
 								 indexed_tlist *itlist, int newvarno)
-#else
-search_indexed_tlist_for_non_var(Expr *node,
-								 indexed_tlist *itlist, Index newvarno)
-#endif
 {
 	TargetEntry *tle;
 
@@ -3427,11 +3230,7 @@ search_indexed_tlist_for_sortgroupref(Expr *node,
 static Var *search_indexed_tlist_for_sortgroupref(Expr *node,
 												  Index sortgroupref,
 												  indexed_tlist *itlist,
-#if PG_VERSION_NUM >= 150000
 												  int newvarno)
-#else
-												  Index newvarno)
-#endif
 #endif
 {
 	ListCell   *lc;
@@ -3695,11 +3494,7 @@ static Node *
 fix_upper_expr(PlannerInfo *root,
 			   Node *node,
 			   indexed_tlist *subplan_itlist,
-#if PG_VERSION_NUM >= 150000
 			   int newvarno,
-#else
-			   Index newvarno,
-#endif
 			   int rtoffset,
 #if PG_VERSION_NUM >= 160000
 			   NullingRelsMatch nrm_match,
@@ -3893,7 +3688,6 @@ set_returning_clause_references(PlannerInfo *root,
 	return rlist;
 }
 
-#if PG_VERSION_NUM >= 150000
 /*
  * fix_windowagg_condition_expr_mutator
  *		Mutator function for replacing WindowFuncs with the corresponding Var
@@ -3966,7 +3760,6 @@ set_windowagg_runcondition_references(PlannerInfo *root,
 
 	return newlist;
 }
-#endif
 
 #ifndef __PG_QUERY_PLAN__
 #if PG_VERSION_NUM >= 160000
@@ -4025,11 +3818,7 @@ record_plan_function_dependency(PlannerInfo *root, Oid funcid)
 	 * Note that the OID generator guarantees never to generate such an OID
 	 * after startup, even at OID wraparound.
 	 */
-#if PG_VERSION_NUM >= 150000
 	if (funcid >= (Oid) FirstUnpinnedObjectId)
-#else
-	if (funcid >= (Oid) FirstBootstrapObjectId)
-#endif
 	{
 		PlanInvalItem *inval_item = makeNode(PlanInvalItem);
 
@@ -4065,11 +3854,7 @@ record_plan_type_dependency(PlannerInfo *root, Oid typid)
 	 * As in record_plan_function_dependency, ignore the possibility that
 	 * someone would change a built-in domain.
 	 */
-#if PG_VERSION_NUM >= 150000
 	if (typid >= (Oid) FirstUnpinnedObjectId)
-#else
-	if (typid >= (Oid) FirstBootstrapObjectId)
-#endif
 	{
 		PlanInvalItem *inval_item = makeNode(PlanInvalItem);
 

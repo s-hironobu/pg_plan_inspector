@@ -456,7 +456,6 @@ have_unsafe_outer_join_ref(PlannerInfo *root,
 #endif							/* USE_ASSERT_CHECKING */
 #endif
 
-#if PG_VERSION_NUM >= 150000
 /*
  * paraminfo_get_equal_hashops
  *		Determine if the clauses in param_info and innerrel's lateral_vars
@@ -615,120 +614,6 @@ paraminfo_get_equal_hashops(PlannerInfo *root, ParamPathInfo *param_info,
 	/* We're okay to use memoize */
 	return true;
 }
-#else
-/*
- * paraminfo_get_equal_hashops
- *		Determine if param_info and innerrel's lateral_vars can be hashed.
- *		Returns true the hashing is possible, otherwise return false.
- *
- * Additionally we also collect the outer exprs and the hash operators for
- * each parameter to innerrel.  These set in 'param_exprs' and 'operators'
- * when we return true.
- */
-static bool
-			paraminfo_get_equal_hashops(PlannerInfo *root, ParamPathInfo *param_info,
-										RelOptInfo *outerrel, RelOptInfo *innerrel,
-										List **param_exprs, List **operators,
-										bool *binary_mode)
-{
-	ListCell   *lc;
-
-	*param_exprs = NIL;
-	*operators = NIL;
-	*binary_mode = false;
-
-	if (param_info != NULL)
-	{
-		List	   *clauses = param_info->ppi_clauses;
-
-		foreach(lc, clauses)
-		{
-			RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
-			OpExpr	   *opexpr;
-			Node	   *expr;
-
-			/* can't use a memoize node without a valid hash equals operator */
-			if (!OidIsValid(rinfo->hasheqoperator) ||
-				!clause_sides_match_join(rinfo, outerrel, innerrel))
-			{
-				list_free(*operators);
-				list_free(*param_exprs);
-				return false;
-			}
-
-			/*
-			 * We already checked that this is an OpExpr with 2 args when
-			 * setting hasheqoperator.
-			 */
-			opexpr = (OpExpr *) rinfo->clause;
-			if (rinfo->outer_is_left)
-				expr = (Node *) linitial(opexpr->args);
-			else
-				expr = (Node *) lsecond(opexpr->args);
-
-			*operators = lappend_oid(*operators, rinfo->hasheqoperator);
-			*param_exprs = lappend(*param_exprs, expr);
-
-			/*
-			 * When the join operator is not hashable then it's possible that
-			 * the operator will be able to distinguish something that the
-			 * hash equality operator could not. For example with floating
-			 * point types -0.0 and +0.0 are classed as equal by the hash
-			 * function and equality function, but some other operator may be
-			 * able to tell those values apart.  This means that we must put
-			 * memoize into binary comparison mode so that it does bit-by-bit
-			 * comparisons rather than a "logical" comparison as it would
-			 * using the hash equality operator.
-			 */
-			if (!OidIsValid(rinfo->hashjoinoperator))
-				*binary_mode = true;
-		}
-	}
-
-	/* Now add any lateral vars to the cache key too */
-	foreach(lc, innerrel->lateral_vars)
-	{
-		Node	   *expr = (Node *) lfirst(lc);
-		TypeCacheEntry *typentry;
-
-		/* Reject if there are any volatile functions */
-		if (contain_volatile_functions(expr))
-		{
-			list_free(*operators);
-			list_free(*param_exprs);
-			return false;
-		}
-
-		typentry = lookup_type_cache(exprType(expr),
-									 TYPECACHE_HASH_PROC | TYPECACHE_EQ_OPR);
-
-		/* can't use a memoize node without a valid hash equals operator */
-		if (!OidIsValid(typentry->hash_proc) || !OidIsValid(typentry->eq_opr))
-		{
-			list_free(*operators);
-			list_free(*param_exprs);
-			return false;
-		}
-
-		*operators = lappend_oid(*operators, typentry->eq_opr);
-		*param_exprs = lappend(*param_exprs, expr);
-
-		/*
-		 * We must go into binary mode as we don't have too much of an idea of
-		 * how these lateral Vars are being used.  See comment above when we
-		 * set *binary_mode for the non-lateral Var case. This could be
-		 * relaxed a bit if we had the RestrictInfos and knew the operators
-		 * being used, however for cases like Vars that are arguments to
-		 * functions we must operate in binary mode as we don't have
-		 * visibility into what the function is doing with the Vars.
-		 */
-		*binary_mode = true;
-	}
-
-	/* We're okay to use memoize */
-	return true;
-}
-#endif							/* if PG_VERSION_NUM >= 150000 */
 
 /*
  * get_memoize_path
@@ -1727,11 +1612,7 @@ sort_inner_and_outer(PlannerInfo *root,
 
 	foreach(l, all_pathkeys)
 	{
-#if PG_VERSION_NUM >= 150000
 		PathKey    *front_pathkey = (PathKey *) lfirst(l);
-#else
-		List	   *front_pathkey = (List *) lfirst(l);
-#endif
 		List	   *cur_mergeclauses;
 		List	   *outerkeys;
 		List	   *innerkeys;

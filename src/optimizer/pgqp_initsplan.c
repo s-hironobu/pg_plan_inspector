@@ -4606,7 +4606,6 @@ check_hashjoinable(RestrictInfo *restrictinfo)
 static void
 check_memoizable(RestrictInfo *restrictinfo)
 {
-#if PG_VERSION_NUM >= 150000
 	TypeCacheEntry *typentry;
 	Expr	   *clause = restrictinfo->clause;
 	Oid			lefttype;
@@ -4639,27 +4638,5 @@ check_memoizable(RestrictInfo *restrictinfo)
 
 	if (OidIsValid(typentry->hash_proc) && OidIsValid(typentry->eq_opr))
 		restrictinfo->right_hasheqoperator = typentry->eq_opr;
-#else
-	TypeCacheEntry *typentry;
-	Expr	   *clause = restrictinfo->clause;
-	Node	   *leftarg;
-
-	if (restrictinfo->pseudoconstant)
-		return;
-	if (!is_opclause(clause))
-		return;
-	if (list_length(((OpExpr *) clause)->args) != 2)
-		return;
-
-	leftarg = linitial(((OpExpr *) clause)->args);
-
-	typentry = lookup_type_cache(exprType(leftarg), TYPECACHE_HASH_PROC |
-								 TYPECACHE_EQ_OPR);
-
-	if (!OidIsValid(typentry->hash_proc) || !OidIsValid(typentry->eq_opr))
-		return;
-
-	restrictinfo->hasheqoperator = typentry->eq_opr;
-#endif
 }
 #endif							/* #ifndef __PG_QUERY_PLAN__ */

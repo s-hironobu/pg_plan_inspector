@@ -365,9 +365,7 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptInfo *parent)
 	rel->partbounds_merged = false;
 	rel->partition_qual = NIL;
 	rel->part_rels = NULL;
-#if PG_VERSION_NUM >= 150000
 	rel->live_parts = NULL;
-#endif
 	rel->all_partrels = NULL;
 	rel->partexprs = NULL;
 	rel->nullable_partexprs = NULL;
@@ -950,9 +948,7 @@ build_join_rel(PlannerInfo *root,
 	joinrel->partbounds_merged = false;
 	joinrel->partition_qual = NIL;
 	joinrel->part_rels = NULL;
-#if PG_VERSION_NUM >= 150000
 	joinrel->live_parts = NULL;
-#endif
 	joinrel->all_partrels = NULL;
 	joinrel->partexprs = NULL;
 	joinrel->nullable_partexprs = NULL;
@@ -1221,9 +1217,7 @@ build_child_join_rel(PlannerInfo *root, RelOptInfo *outer_rel,
 	joinrel->partbounds_merged = false;
 	joinrel->partition_qual = NIL;
 	joinrel->part_rels = NULL;
-#if PG_VERSION_NUM >= 150000
 	joinrel->live_parts = NULL;
-#endif
 	joinrel->all_partrels = NULL;
 	joinrel->partexprs = NULL;
 	joinrel->nullable_partexprs = NULL;

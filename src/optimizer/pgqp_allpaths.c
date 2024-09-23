@@ -24,9 +24,7 @@
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
-#if PG_VERSION_NUM >= 150000
 #include "nodes/supportnodes.h"
-#endif
 #ifdef OPTIMIZER_DEBUG
 #include "nodes/print.h"
 #endif
@@ -192,12 +190,8 @@ static void subquery_push_qual(Query *subquery,
 							   RangeTblEntry *rte, Index rti, Node *qual);
 static void recurse_push_qual(Node *setOp, Query *topquery,
 							  RangeTblEntry *rte, Index rti, Node *qual);
-#if PG_VERSION_NUM >= 150000
 static void remove_unused_subquery_outputs(Query *subquery, RelOptInfo *rel,
 										   Bitmapset *extra_used_attrs);
-#else
-static void remove_unused_subquery_outputs(Query *subquery, RelOptInfo *rel);
-#endif
 
 /*
  * make_one_rel
@@ -626,13 +620,8 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	if (rel->reloptkind == RELOPT_BASEREL &&
 		!bms_equal(rel->relids, root->all_query_rels))
 #else
-#if PG_VERSION_NUM >= 150000
 	if (rel->reloptkind == RELOPT_BASEREL &&
 		!bms_equal(rel->relids, root->all_baserels))
-#else
-	if (rel->reloptkind == RELOPT_BASEREL &&
-		bms_membership(root->all_baserels) != BMS_SINGLETON)
-#endif
 #endif
 #ifdef __PG_QUERY_PLAN__
 		pgqp_generate_useful_gather_paths(root, rel, false);
@@ -1939,13 +1928,8 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 	 * this is relevant, build pathkey descriptions of the partition ordering,
 	 * for both forward and reverse scans.
 	 */
-#if PG_VERSION_NUM >= 150000
 	if (rel->part_scheme != NULL && IS_SIMPLE_REL(rel) &&
 		partitions_are_ordered(rel->boundinfo, rel->live_parts))
-#else
-	if (rel->part_scheme != NULL && IS_SIMPLE_REL(rel) &&
-		partitions_are_ordered(rel->boundinfo, rel->nparts))
-#endif
 	{
 		partition_pathkeys = build_partition_pathkeys(root, rel,
 													  ForwardScanDirection,
@@ -1972,9 +1956,7 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 		List	   *pathkeys = (List *) lfirst(lcp);
 		List	   *startup_subpaths = NIL;
 		List	   *total_subpaths = NIL;
-#if PG_VERSION_NUM >= 150000
 		List	   *fractional_subpaths = NIL;
-#endif
 		bool		startup_neq_total = false;
 #if PG_VERSION_NUM < 160000
 		ListCell   *lcr;
@@ -2048,14 +2030,9 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 #else
 			RelOptInfo *childrel = (RelOptInfo *) lfirst(lcr);
 #endif
-#if PG_VERSION_NUM >= 150000
 			Path	   *cheapest_startup,
 					   *cheapest_total,
 					   *cheapest_fractional = NULL;
-#else
-			Path	   *cheapest_startup,
-					   *cheapest_total;
-#endif
 
 			/* Locate the right paths, if they are available. */
 			cheapest_startup =
@@ -2082,8 +2059,6 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 				/* Assert we do have an unparameterized path for this child */
 				Assert(cheapest_total->param_info == NULL);
 			}
-
-#if PG_VERSION_NUM >= 150000
 
 			/*
 			 * When building a fractional path, determine a cheapest
@@ -2116,7 +2091,6 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 				if (!cheapest_fractional)
 					cheapest_fractional = cheapest_total;
 			}
-#endif
 
 			/*
 			 * Notice whether we actually have different paths for the
@@ -2145,13 +2119,11 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 				startup_subpaths = lappend(startup_subpaths, cheapest_startup);
 				total_subpaths = lappend(total_subpaths, cheapest_total);
 
-#if PG_VERSION_NUM >= 150000
 				if (cheapest_fractional)
 				{
 					cheapest_fractional = get_singleton_append_subpath(cheapest_fractional);
 					fractional_subpaths = lappend(fractional_subpaths, cheapest_fractional);
 				}
-#endif
 			}
 #if PG_VERSION_NUM < 160000
 			else if (match_partition_order_desc)
@@ -2167,13 +2139,11 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 				startup_subpaths = lcons(cheapest_startup, startup_subpaths);
 				total_subpaths = lcons(cheapest_total, total_subpaths);
 
-#if PG_VERSION_NUM >= 150000
 				if (cheapest_fractional)
 				{
 					cheapest_fractional = get_singleton_append_subpath(cheapest_fractional);
 					fractional_subpaths = lcons(cheapest_fractional, fractional_subpaths);
 				}
-#endif
 			}
 #endif /* PG_VERSION_NUM < 160000 */
 			else
@@ -2186,11 +2156,10 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 										  &startup_subpaths, NULL);
 				accumulate_append_subpath(cheapest_total,
 										  &total_subpaths, NULL);
-#if PG_VERSION_NUM >= 150000
+
 				if (cheapest_fractional)
 					accumulate_append_subpath(cheapest_fractional,
 											  &fractional_subpaths, NULL);
-#endif
 			}
 		}
 
@@ -2246,7 +2215,6 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 														  -1));
 #endif
 
-#if PG_VERSION_NUM >= 150000
 			if (fractional_subpaths)
 #ifdef __PG_QUERY_PLAN__
 				add_path(rel, (Path *) pgqp_create_append_path(root,
@@ -2269,7 +2237,6 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 														  false,
 														  -1));
 #endif
-#endif
 
 		}
 		else
@@ -2287,14 +2254,12 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 																pathkeys,
 																NULL));
 
-#if PG_VERSION_NUM >= 150000
 			if (fractional_subpaths)
 				add_path(rel, (Path *) create_merge_append_path(root,
 																rel,
 																fractional_subpaths,
 																pathkeys,
 																NULL));
-#endif
 		}
 	}
 }
@@ -2539,7 +2504,6 @@ has_multiple_baserels(PlannerInfo *root)
 }
 #endif
 
-#if PG_VERSION_NUM >= 150000
 /*
  * find_window_run_conditions
  *		Determine if 'wfunc' is really a WindowFunc and call its prosupport
@@ -2846,7 +2810,7 @@ check_and_push_window_quals(Query *subquery, RangeTblEntry *rte, Index rti,
 
 	return true;
 }
-#endif
+
 
 /*
  * set_subquery_pathlist
@@ -2873,9 +2837,7 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	pushdown_safety_info safetyInfo;
 	double		tuple_fraction;
 	RelOptInfo *sub_final_rel;
-#if PG_VERSION_NUM >= 150000
 	Bitmapset  *run_cond_attrs = NULL;
-#endif
 	ListCell   *lc;
 
 	/*
@@ -2948,9 +2910,7 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 		foreach(l, rel->baserestrictinfo)
 		{
 			RestrictInfo *rinfo = (RestrictInfo *) lfirst(l);
-#if PG_VERSION_NUM >= 150000
 			Node	   *clause = (Node *) rinfo->clause;
-#endif
 
 #if PG_VERSION_NUM >= 160000
 			if (rinfo->pseudoconstant)
@@ -3002,7 +2962,6 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 			}
 			else
 			{
-#if PG_VERSION_NUM >= 150000
 				/*
 				 * Since we can't push the qual down into the subquery, check
 				 * if it happens to reference a window function.  If so then
@@ -3019,10 +2978,6 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 					 */
 					upperrestrictlist = lappend(upperrestrictlist, rinfo);
 				}
-#else
-				/* Keep it in the upper query */
-				upperrestrictlist = lappend(upperrestrictlist, rinfo);
-#endif
 			}
 #endif /* #if PG_VERSION_NUM >= 160000 */
 		}
@@ -3036,8 +2991,6 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	pfree(safetyInfo.unsafeColumns);
 #endif
 
-#if PG_VERSION_NUM >= 150000
-
 	/*
 	 * The upper query might not use all the subquery's output columns; if
 	 * not, we can simplify.  Pass the attributes that were pushed down into
@@ -3045,14 +2998,6 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	 * are unused.
 	 */
 	remove_unused_subquery_outputs(subquery, rel, run_cond_attrs);
-#else
-
-	/*
-	 * The upper query might not use all the subquery's output columns; if
-	 * not, we can simplify.
-	 */
-	remove_unused_subquery_outputs(subquery, rel);
-#endif
 
 	/*
 	 * We can safely pass the outer tuple_fraction down to the subquery if the
@@ -3406,12 +3351,9 @@ set_cte_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 	if (ndx >= list_length(cteroot->cte_plan_ids))
 		elog(ERROR, "could not find plan for CTE \"%s\"", rte->ctename);
 	plan_id = list_nth_int(cteroot->cte_plan_ids, ndx);
-#if PG_VERSION_NUM >= 150000
 	if (plan_id <= 0)
 		elog(ERROR, "no plan was made for CTE \"%s\"", rte->ctename);
-#else
-	Assert(plan_id > 0);
-#endif
+
 #if PG_VERSION_NUM >= 170000
 	Assert(list_length(root->glob->subpaths) == list_length(root->glob->subplans));
 	ctepath = (Path *) list_nth(root->glob->subpaths, plan_id - 1);
@@ -4155,11 +4097,7 @@ standard_join_search(PlannerInfo *root, int levels_needed, List *initial_rels)
 #if PG_VERSION_NUM >= 160000
 			if (!bms_equal(rel->relids, root->all_query_rels))
 #else
-#if PG_VERSION_NUM >= 150000
 			if (!bms_equal(rel->relids, root->all_baserels))
-#else
-			if (lev < levels_needed)
-#endif
 #endif
 #ifdef __PG_QUERY_PLAN__
 				pgqp_generate_useful_gather_paths(root, rel, false);
@@ -4184,11 +4122,8 @@ standard_join_search(PlannerInfo *root, int levels_needed, List *initial_rels)
 	 * We should have a single rel at the final level.
 	 */
 	if (root->join_rel_level[levels_needed] == NIL)
-#if PG_VERSION_NUM >= 150000
 		elog(ERROR, "failed to build any %d-way joins", levels_needed);
-#else
-		elog(ERROR, "%s failed to build any %d-way joins", __func__, levels_needed);
-#endif
+
 	Assert(list_length(root->join_rel_level[levels_needed]) == 1);
 
 	rel = (RelOptInfo *) linitial(root->join_rel_level[levels_needed]);
@@ -4841,28 +4776,17 @@ recurse_push_qual(Node *setOp, Query *topquery,
  * constants.  This is implemented by modifying subquery->targetList.
  */
 static void
-#if PG_VERSION_NUM >= 150000
 remove_unused_subquery_outputs(Query *subquery, RelOptInfo *rel,
 							   Bitmapset *extra_used_attrs)
-#else
-remove_unused_subquery_outputs(Query *subquery, RelOptInfo *rel)
-#endif
 {
-#if PG_VERSION_NUM >= 150000
 	Bitmapset  *attrs_used;
-#else
-	Bitmapset  *attrs_used = NULL;
-#endif
 	ListCell   *lc;
-
-#if PG_VERSION_NUM >= 150000
 
 	/*
 	 * Just point directly to extra_used_attrs. No need to bms_copy as none of
 	 * the current callers use the Bitmapset after calling this function.
 	 */
 	attrs_used = extra_used_attrs;
-#endif
 
 	/*
 	 * Do nothing if subquery has UNION/INTERSECT/EXCEPT: in principle we
