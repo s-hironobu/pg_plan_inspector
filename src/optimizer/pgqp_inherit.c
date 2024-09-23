@@ -447,8 +447,22 @@ expand_partitioned_rtentry(PlannerInfo *root, RelOptInfo *relinfo,
 		Index		childRTindex;
 		RelOptInfo *childrelinfo;
 
+#if PG_VERSION_NUM >= 170000
+		/*
+		 * Open rel, acquiring required locks.  If a partition was recently
+		 * detached and subsequently dropped, then opening it will fail.  In
+		 * this case, behave as though the partition had been pruned.
+		 */
+		childrel = try_table_open(childOID, lockmode);
+		if (childrel == NULL)
+		{
+			relinfo->live_parts = bms_del_member(relinfo->live_parts, i);
+			continue;
+		}
+#else
 		/* Open rel, acquiring required locks */
 		childrel = table_open(childOID, lockmode);
+#endif
 
 		/*
 		 * Temporary partitions belonging to other sessions should have been
@@ -960,11 +974,13 @@ expand_appendrel_subquery(PlannerInfo *root, RelOptInfo *rel,
 /*
  * apply_child_basequals
  *		Populate childrel's base restriction quals from parent rel's quals,
- *		translating them using appinfo.
+ *		translating Vars using appinfo and re-checking for quals which are
+ *		constant-TRUE or constant-FALSE when applied to this child relation.
  *
  * If any of the resulting clauses evaluate to constant false or NULL, we
  * return false and don't apply any quals.  Caller should mark the relation as
- * a dummy rel in this case, since it doesn't need to be scanned.
+ * a dummy rel in this case, since it doesn't need to be scanned.  Constant
+ * true quals are ignored.
  */
 bool
 apply_child_basequals(PlannerInfo *root, RelOptInfo *parentrel,
@@ -1013,7 +1029,9 @@ apply_child_basequals(PlannerInfo *root, RelOptInfo *parentrel,
 		{
 			Node	   *onecq = (Node *) lfirst(lc2);
 			bool		pseudoconstant;
-
+#if PG_VERSION_NUM >= 170000
+			RestrictInfo *childrinfo;
+#endif
 			/* check for pseudoconstant (no Vars or volatile functions) */
 			pseudoconstant =
 				!contain_vars_of_level(onecq, 0) &&
@@ -1024,6 +1042,25 @@ apply_child_basequals(PlannerInfo *root, RelOptInfo *parentrel,
 				root->hasPseudoConstantQuals = true;
 			}
 			/* reconstitute RestrictInfo with appropriate properties */
+#if PG_VERSION_NUM >= 170000
+			childrinfo = make_restrictinfo(root,
+										   (Expr *) onecq,
+										   rinfo->is_pushed_down,
+										   rinfo->has_clone,
+										   rinfo->is_clone,
+										   pseudoconstant,
+										   rinfo->security_level,
+										   NULL, NULL, NULL);
+
+			/* Restriction is proven always false */
+			if (restriction_is_always_false(root, childrinfo))
+				return false;
+			/* Restriction is proven always true, so drop it */
+			if (restriction_is_always_true(root, childrinfo))
+				continue;
+
+			childquals = lappend(childquals, childrinfo);
+#else
 #if PG_VERSION_NUM >= 160000
 			childquals = lappend(childquals,
 								 make_restrictinfo(root,
@@ -1043,6 +1080,7 @@ apply_child_basequals(PlannerInfo *root, RelOptInfo *parentrel,
 												   pseudoconstant,
 												   rinfo->security_level,
 												   NULL, NULL, NULL));
+#endif
 #endif
 			/* track minimum security level among child quals */
 			cq_min_security = Min(cq_min_security, rinfo->security_level);

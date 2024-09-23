@@ -256,15 +256,29 @@ recurse_set_operations(Node *setOp, PlannerInfo *root,
 
 		/* Generate a subroot and Paths for the subquery */
 #ifdef __PG_QUERY_PLAN__
+#if PG_VERSION_NUM >= 170000
+		subroot = rel->subroot = pgqp_subquery_planner(root->glob, subquery,
+													   root,
+													   false,
+													   root->tuple_fraction, NULL);
+#else
 		subroot = rel->subroot = pgqp_subquery_planner(root->glob, subquery,
 													   root,
 													   false,
 													   root->tuple_fraction);
+#endif
+#else
+#if PG_VERSION_NUM >= 170000
+		subroot = rel->subroot = subquery_planner(root->glob, subquery,
+												  root,
+												  false,
+												  root->tuple_fraction, NULL);
 #else
 		subroot = rel->subroot = subquery_planner(root->glob, subquery,
 												  root,
 												  false,
 												  root->tuple_fraction);
+#endif
 #endif
 
 		/*

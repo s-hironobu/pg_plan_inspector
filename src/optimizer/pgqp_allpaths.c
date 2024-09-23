@@ -34,18 +34,24 @@
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
 #include "optimizer/geqo.h"
+#if PG_VERSION_NUM < 170000
 #include "optimizer/inherit.h"
+#endif
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/plancat.h"
 #include "optimizer/planner.h"
+#if PG_VERSION_NUM < 170000
 #include "optimizer/restrictinfo.h"
+#endif
 #include "optimizer/tlist.h"
 #include "parser/parse_clause.h"
 #include "parser/parsetree.h"
 #include "partitioning/partbounds.h"
+#if PG_VERSION_NUM < 170000
 #include "partitioning/partprune.h"
+#endif
 #if PG_VERSION_NUM >= 160000
 #include "port/pg_bitutils.h"
 #endif
@@ -638,7 +644,11 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	set_cheapest(rel);
 
 #ifdef OPTIMIZER_DEBUG
+#if PG_VERSION_NUM >= 170000
+	pprint(rel);
+#else
 	debug_print_rel(root, rel);
+#endif
 #endif
 }
 
@@ -1455,6 +1465,10 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 {
 	List	   *subpaths = NIL;
 	bool		subpaths_valid = true;
+#if PG_VERSION_NUM >= 170000
+	List       *startup_subpaths = NIL;
+	bool        startup_subpaths_valid = true;
+#endif
 	List	   *partial_subpaths = NIL;
 	List	   *pa_partial_subpaths = NIL;
 	List	   *pa_nonpartial_subpaths = NIL;
@@ -1493,6 +1507,24 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 									  &subpaths, NULL);
 		else
 			subpaths_valid = false;
+
+#if PG_VERSION_NUM >= 170000
+		/*
+		 * When the planner is considering cheap startup plans, we'll also
+		 * collect all the cheapest_startup_paths (if set) and build an
+		 * AppendPath containing those as subpaths.
+		 */
+		if (rel->consider_startup && childrel->cheapest_startup_path != NULL)
+		{
+			/* cheapest_startup_path must not be a parameterized path. */
+			Assert(childrel->cheapest_startup_path->param_info == NULL);
+			accumulate_append_subpath(childrel->cheapest_startup_path,
+									  &startup_subpaths,
+									  NULL);
+		}
+		else
+			startup_subpaths_valid = false;
+#endif
 
 		/* Same idea, but for a partial plan. */
 		if (childrel->partial_pathlist != NIL)
@@ -1630,6 +1662,12 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 		add_path(rel, (Path *) create_append_path(root, rel, subpaths, NIL,
 												  NIL, NULL, 0, false,
 												  -1));
+#endif
+#if PG_VERSION_NUM >= 170000
+	/* build an AppendPath for the cheap startup paths, if valid */
+	if (startup_subpaths_valid)
+		add_path(rel, (Path *) create_append_path(root, rel, startup_subpaths,
+												  NIL, NIL, NULL, 0, false, -1));
 #endif
 
 	/*
@@ -2470,13 +2508,14 @@ set_dummy_rel_pathlist(RelOptInfo *rel)
 
 	/*
 	 * We set the cheapest-path fields immediately, just in case they were
-	 * pointing at some discarded path.  This is redundant when we're called
-	 * from set_rel_size(), but not when called from elsewhere, and doing it
-	 * twice is harmless anyway.
+	 * pointing at some discarded path.  This is redundant in current usage
+	 * because set_rel_pathlist will do it later, but it's cheap so we keep it
+	 * for safety and consistency with mark_dummy_rel.
 	 */
 	set_cheapest(rel);
 }
 
+#if PG_VERSION_NUM < 170000
 /* quick-and-dirty test to see if any joining is needed */
 static bool
 has_multiple_baserels(PlannerInfo *root)
@@ -2498,6 +2537,7 @@ has_multiple_baserels(PlannerInfo *root)
 	}
 	return false;
 }
+#endif
 
 #if PG_VERSION_NUM >= 150000
 /*
@@ -2518,7 +2558,7 @@ has_multiple_baserels(PlannerInfo *root)
  * the run condition will handle all of the required filtering.
  *
  * Returns true if 'opexpr' was found to be useful and was added to the
- * WindowClauses runCondition.  We also set *keep_original accordingly and add
+ * WindowFunc's runCondition.  We also set *keep_original accordingly and add
  * 'attno' to *run_cond_attrs offset by FirstLowInvalidHeapAttributeNumber.
  * If the 'opexpr' cannot be used then we set *keep_original to true and
  * return false.
@@ -2673,7 +2713,7 @@ find_window_run_conditions(Query *subquery, RangeTblEntry *rte, Index rti,
 			*keep_original = true;
 			runopexpr = opexpr;
 
-			/* determine the operator to use for the runCondition qual */
+			/* determine the operator to use for the WindowFuncRunCondition */
 			runoperator = get_opfamily_member(opinfo->opfamily_id,
 											  opinfo->oplefttype,
 											  opinfo->oprighttype,
@@ -2684,6 +2724,17 @@ find_window_run_conditions(Query *subquery, RangeTblEntry *rte, Index rti,
 
 	if (runopexpr != NULL)
 	{
+#if PG_VERSION_NUM >= 170000
+		WindowFuncRunCondition *wfuncrc;
+
+		wfuncrc = makeNode(WindowFuncRunCondition);
+		wfuncrc->opno = runoperator;
+		wfuncrc->inputcollid = runopexpr->inputcollid;
+		wfuncrc->wfunc_left = wfunc_left;
+		wfuncrc->arg = copyObject(otherexpr);
+
+		wfunc->runCondition = lappend(wfunc->runCondition, wfuncrc);
+#else
 		Expr	   *newexpr;
 
 		/*
@@ -2705,6 +2756,7 @@ find_window_run_conditions(Query *subquery, RangeTblEntry *rte, Index rti,
 									runopexpr->inputcollid);
 
 		wclause->runCondition = lappend(wclause->runCondition, newexpr);
+#endif
 
 		/* record that this attno was used in a run condition */
 		*run_cond_attrs = bms_add_member(*run_cond_attrs,
@@ -2718,9 +2770,9 @@ find_window_run_conditions(Query *subquery, RangeTblEntry *rte, Index rti,
 
 /*
  * check_and_push_window_quals
- *		Check if 'clause' is a qual that can be pushed into a WindowFunc's
- *		WindowClause as a 'runCondition' qual.  These, when present, allow
- *		some unnecessary work to be skipped during execution.
+ *		Check if 'clause' is a qual that can be pushed into a WindowFunc
+ *		as a 'runCondition' qual.  These, when present, allow some unnecessary
+ *		work to be skipped during execution.
  *
  * 'run_cond_attrs' will be populated with all targetlist resnos of subquery
  * targets (offset by FirstLowInvalidHeapAttributeNumber) that we pushed
@@ -3018,7 +3070,11 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 #endif
 		parse->distinctClause ||
 		parse->sortClause ||
+#if PG_VERSION_NUM >= 170000
+		bms_membership(root->all_baserels) == BMS_MULTIPLE)
+#else
 		has_multiple_baserels(root))
+#endif
 		tuple_fraction = 0.0;	/* default case */
 	else
 		tuple_fraction = root->tuple_fraction;
@@ -3028,13 +3084,24 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 
 	/* Generate a subroot and Paths for the subquery */
 #ifdef __PG_QUERY_PLAN__
+#if PG_VERSION_NUM >= 170000
+	rel->subroot = pgqp_subquery_planner(root->glob, subquery,
+										 root,
+										 false, tuple_fraction, NULL);
+#else
 	rel->subroot = pgqp_subquery_planner(root->glob, subquery,
 										 root,
 										 false, tuple_fraction);
+#endif
+#else
+#if PG_VERSION_NUM >= 170000
+	rel->subroot = subquery_planner(root->glob, subquery, root, false,
+									tuple_fraction, NULL);
 #else
 	rel->subroot = subquery_planner(root->glob, subquery,
 									root,
 									false, tuple_fraction);
+#endif
 #endif
 
 	/* Isolate the params needed by this specific subplan */
@@ -3293,16 +3360,23 @@ set_tablefunc_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 static void
 set_cte_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 {
+#if PG_VERSION_NUM >= 170000
+	Path	   *ctepath;
+#endif
 	Plan	   *cteplan;
 	PlannerInfo *cteroot;
 	Index		levelsup;
+#if PG_VERSION_NUM >= 170000
+	List	   *pathkeys;
+#endif
 	int			ndx;
 	ListCell   *lc;
 	int			plan_id;
 	Relids		required_outer;
 
 	/*
-	 * Find the referenced CTE, and locate the plan previously made for it.
+	 * Find the referenced CTE, and locate the path and plan previously made
+	 * for it.
 	 */
 	levelsup = rte->ctelevelsup;
 	cteroot = root;
@@ -3338,10 +3412,22 @@ set_cte_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 #else
 	Assert(plan_id > 0);
 #endif
+#if PG_VERSION_NUM >= 170000
+	Assert(list_length(root->glob->subpaths) == list_length(root->glob->subplans));
+	ctepath = (Path *) list_nth(root->glob->subpaths, plan_id - 1);
+#endif
 	cteplan = (Plan *) list_nth(root->glob->subplans, plan_id - 1);
 
 	/* Mark rel with estimated output rows, width, etc */
 	set_cte_size_estimates(root, rel, cteplan->plan_rows);
+
+#if PG_VERSION_NUM >= 170000
+	/* Convert the ctepath's pathkeys to outer query's representation */
+	pathkeys = convert_subquery_pathkeys(root,
+										 rel,
+										 ctepath->pathkeys,
+										 cteplan->targetlist);
+#endif
 
 	/*
 	 * We don't support pushing join clauses into the quals of a CTE scan, but
@@ -3352,9 +3438,17 @@ set_cte_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 
 	/* Generate appropriate path */
 #ifdef __PG_QUERY_PLAN__
+#if PG_VERSION_NUM >= 170000
+	add_path(rel, pgqp_create_ctescan_path(root, rel, pathkeys, required_outer));
+#else
 	add_path(rel, pgqp_create_ctescan_path(root, rel, required_outer));
+#endif
+#else
+#if PG_VERSION_NUM >= 170000
+	add_path(rel, create_ctescan_path(root, rel, pathkeys, required_outer));
 #else
 	add_path(rel, create_ctescan_path(root, rel, required_outer));
+#endif
 #endif
 }
 
@@ -3388,8 +3482,10 @@ set_namedtuplestore_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	add_path(rel, create_namedtuplestorescan_path(root, rel, required_outer));
 #endif
 
+#if PG_VERSION_NUM < 170000
 	/* Select cheapest path (pretty easy in this case...) */
 	set_cheapest(rel);
+#endif
 }
 
 /*
@@ -3421,9 +3517,10 @@ set_result_pathlist(PlannerInfo *root, RelOptInfo *rel,
 
 	/* Generate appropriate path */
 	add_path(rel, create_resultscan_path(root, rel, required_outer));
-
+#if PG_VERSION_NUM < 170000
 	/* Select cheapest path (pretty easy in this case...) */
 	set_cheapest(rel);
+#endif
 }
 
 /*
@@ -3487,10 +3584,10 @@ set_worktable_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
  *
  * If we're generating paths for a scan or join relation, override_rows will
  * be false, and we'll just use the relation's size estimate.  When we're
- * being called for a partially-grouped path, though, we need to override
- * the rowcount estimate.  (It's not clear that the particular value we're
- * using here is actually best, but the underlying rel has no estimate so
- * we must do something.)
+ * being called for a partially-grouped or partially-distinct path, though, we
+ * need to override the rowcount estimate.  (It's not clear that the
+ * particular value we're using here is actually best, but the underlying rel
+ * has no estimate so we must do something.)
  */
 void
 #ifdef __PG_QUERY_PLAN__
@@ -4052,7 +4149,8 @@ standard_join_search(PlannerInfo *root, int levels_needed, List *initial_rels)
 			/*
 			 * Except for the topmost scan/join rel, consider gathering
 			 * partial paths.  We'll do the same for the topmost scan/join rel
-			 * once we know the final targetlist (see grouping_planner).
+			 * once we know the final targetlist (see grouping_planner's and
+			 * its call to apply_scanjoin_target_to_paths).
 			 */
 #if PG_VERSION_NUM >= 160000
 			if (!bms_equal(rel->relids, root->all_query_rels))
@@ -4073,7 +4171,11 @@ standard_join_search(PlannerInfo *root, int levels_needed, List *initial_rels)
 			set_cheapest(rel);
 
 #ifdef OPTIMIZER_DEBUG
+#if PG_VERSION_NUM >= 170000
+			pprint(rel);
+#else
 			debug_print_rel(root, rel);
+#endif
 #endif
 		}
 	}
@@ -5068,7 +5170,11 @@ generate_partitionwise_join_paths(PlannerInfo *root, RelOptInfo *rel)
 			continue;
 
 #ifdef OPTIMIZER_DEBUG
+#if PG_VERSION_NUM >= 170000
+			pprint(rel);
+#else
 		debug_print_rel(root, child_rel);
+#endif
 #endif
 
 		live_children = lappend(live_children, child_rel);
@@ -5090,6 +5196,7 @@ generate_partitionwise_join_paths(PlannerInfo *root, RelOptInfo *rel)
 	list_free(live_children);
 }
 
+#if PG_VERSION_NUM < 170000
 
 /*****************************************************************************
  *			DEBUG SUPPORT
@@ -5410,3 +5517,5 @@ debug_print_rel(PlannerInfo *root, RelOptInfo *rel)
 #endif							/* #ifndef __PG_QUERY_PLAN__ */
 
 #endif							/* OPTIMIZER_DEBUG */
+
+#endif							/* #if PG_VERSION_NUM < 170000 */

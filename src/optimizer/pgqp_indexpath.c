@@ -116,8 +116,12 @@ static List *build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 							   IndexOptInfo *index, IndexClauseSet *clauses,
 							   bool useful_predicate,
 							   ScanTypeControl scantype,
+#if PG_VERSION_NUM >= 170000
+							   bool *skip_nonnative_saop);
+#else
 							   bool *skip_nonnative_saop,
 							   bool *skip_lower_saop);
+#endif
 static List *build_paths_for_OR(PlannerInfo *root, RelOptInfo *rel,
 								List *clauses, List *other_clauses);
 static List *generate_bitmap_or_paths(PlannerInfo *root, RelOptInfo *rel,
@@ -774,8 +778,6 @@ bms_equal_any(Relids relids, List *relids_list)
  * index AM supports them natively, we should just include them in simple
  * index paths.  If not, we should exclude them while building simple index
  * paths, and then make a separate attempt to include them in bitmap paths.
- * Furthermore, we should consider excluding lower-order ScalarArrayOpExpr
- * quals so as to create ordered paths.
  */
 static void
 get_index_paths(PlannerInfo *root, RelOptInfo *rel,
@@ -784,15 +786,22 @@ get_index_paths(PlannerInfo *root, RelOptInfo *rel,
 {
 	List	   *indexpaths;
 	bool		skip_nonnative_saop = false;
+#if PG_VERSION_NUM < 170000
 	bool		skip_lower_saop = false;
+#endif
 	ListCell   *lc;
 
 	/*
 	 * Build simple index paths using the clauses.  Allow ScalarArrayOpExpr
-	 * clauses only if the index AM supports them natively, and skip any such
-	 * clauses for index columns after the first (so that we produce ordered
-	 * paths if possible).
+	 * clauses only if the index AM supports them natively.
 	 */
+#if PG_VERSION_NUM >= 170000
+	indexpaths = build_index_paths(root, rel,
+								   index, clauses,
+								   index->predOK,
+								   ST_ANYSCAN,
+								   &skip_nonnative_saop);
+#else
 	indexpaths = build_index_paths(root, rel,
 								   index, clauses,
 								   index->predOK,
@@ -815,6 +824,7 @@ get_index_paths(PlannerInfo *root, RelOptInfo *rel,
 												   &skip_nonnative_saop,
 												   NULL));
 	}
+#endif
 
 	/*
 	 * Submit all the ones that can form plain IndexScan plans to add_path. (A
@@ -852,7 +862,9 @@ get_index_paths(PlannerInfo *root, RelOptInfo *rel,
 									   index, clauses,
 									   false,
 									   ST_BITMAPSCAN,
+#if PG_VERSION_NUM < 170000
 									   NULL,
+#endif
 									   NULL);
 		*bitindexpaths = list_concat(*bitindexpaths, indexpaths);
 	}
@@ -885,27 +897,24 @@ get_index_paths(PlannerInfo *root, RelOptInfo *rel,
  * to true if we found any such clauses (caller must initialize the variable
  * to false).  If it's NULL, we do not ignore ScalarArrayOpExpr clauses.
  *
- * If skip_lower_saop is non-NULL, we ignore ScalarArrayOpExpr clauses for
- * non-first index columns, and we set *skip_lower_saop to true if we found
- * any such clauses (caller must initialize the variable to false).  If it's
- * NULL, we do not ignore non-first ScalarArrayOpExpr clauses, but they will
- * result in considering the scan's output to be unordered.
- *
  * 'rel' is the index's heap relation
  * 'index' is the index for which we want to generate paths
  * 'clauses' is the collection of indexable clauses (IndexClause nodes)
  * 'useful_predicate' indicates whether the index has a useful predicate
  * 'scantype' indicates whether we need plain or bitmap scan support
  * 'skip_nonnative_saop' indicates whether to accept SAOP if index AM doesn't
- * 'skip_lower_saop' indicates whether to accept non-first-column SAOP
  */
 static List *
 build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 				  IndexOptInfo *index, IndexClauseSet *clauses,
 				  bool useful_predicate,
 				  ScanTypeControl scantype,
+#if PG_VERSION_NUM >= 170000
+				  bool *skip_nonnative_saop)
+#else
 				  bool *skip_nonnative_saop,
 				  bool *skip_lower_saop)
+#endif
 {
 	List	   *result = NIL;
 	IndexPath  *ipath;
@@ -916,11 +925,17 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 	List	   *orderbyclausecols;
 	List	   *index_pathkeys;
 	List	   *useful_pathkeys;
+#if PG_VERSION_NUM < 170000
 	bool		found_lower_saop_clause;
+#endif
 	bool		pathkeys_possibly_useful;
 	bool		index_is_ordered;
 	bool		index_only_scan;
 	int			indexcol;
+
+#if PG_VERSION_NUM >= 170000
+	Assert(skip_nonnative_saop != NULL || scantype == ST_BITMAPSCAN);
+#endif
 
 	/*
 	 * Check that index supports the desired scan type(s)
@@ -948,19 +963,14 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 	 * on by btree and possibly other places.)  The list can be empty, if the
 	 * index AM allows that.
 	 *
-	 * found_lower_saop_clause is set true if we accept a ScalarArrayOpExpr
-	 * index clause for a non-first index column.  This prevents us from
-	 * assuming that the scan result is ordered.  (Actually, the result is
-	 * still ordered if there are equality constraints for all earlier
-	 * columns, but it seems too expensive and non-modular for this code to be
-	 * aware of that refinement.)
-	 *
 	 * We also build a Relids set showing which outer rels are required by the
 	 * selected clauses.  Any lateral_relids are included in that, but not
 	 * otherwise accounted for.
 	 */
 	index_clauses = NIL;
+#if PG_VERSION_NUM < 170000
 	found_lower_saop_clause = false;
+#endif
 	outer_relids = bms_copy(rel->lateral_relids);
 	for (indexcol = 0; indexcol < index->nkeycolumns; indexcol++)
 	{
@@ -971,6 +981,21 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 			IndexClause *iclause = (IndexClause *) lfirst(lc);
 			RestrictInfo *rinfo = iclause->rinfo;
 
+#if PG_VERSION_NUM >= 170000
+			if (skip_nonnative_saop && !index->amsearcharray &&
+				IsA(rinfo->clause, ScalarArrayOpExpr))
+			{
+				/*
+				 * Caller asked us to generate IndexPaths that omit any
+				 * ScalarArrayOpExpr clauses when the underlying index AM
+				 * lacks native support.
+				 *
+				 * We must omit this clause (and tell caller about it).
+				 */
+				*skip_nonnative_saop = true;
+				continue;
+			}
+#else
 			/* We might need to omit ScalarArrayOpExpr clauses */
 			if (IsA(rinfo->clause, ScalarArrayOpExpr))
 			{
@@ -996,6 +1021,7 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 					found_lower_saop_clause = true;
 				}
 			}
+#endif
 
 			/* OK to include this clause */
 			index_clauses = lappend(index_clauses, iclause);
@@ -1029,11 +1055,12 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 	/*
 	 * 2. Compute pathkeys describing index's ordering, if any, then see how
 	 * many of them are actually useful for this query.  This is not relevant
-	 * if we are only trying to build bitmap indexscans, nor if we have to
-	 * assume the scan is unordered.
+	 * if we are only trying to build bitmap indexscans.
 	 */
 	pathkeys_possibly_useful = (scantype != ST_BITMAPSCAN &&
+#if PG_VERSION_NUM < 170000
 								!found_lower_saop_clause &&
+#endif
 								has_useful_pathkeys(root, rel));
 	index_is_ordered = (index->sortopfamily != NULL);
 	if (index_is_ordered && pathkeys_possibly_useful)
@@ -1372,7 +1399,9 @@ build_paths_for_OR(PlannerInfo *root, RelOptInfo *rel,
 									   index, &clauseset,
 									   useful_predicate,
 									   ST_BITMAPSCAN,
+#if PG_VERSION_NUM < 170000
 									   NULL,
+#endif
 									   NULL);
 		result = list_concat(result, indexpaths);
 	}
@@ -3304,7 +3333,6 @@ expand_indexqual_rowcompare(PlannerInfo *root,
 
 #if PG_VERSION_NUM >= 160000
 /*
- * match_pathkeys_to_index
  *		For the given 'index' and 'pathkeys', output a list of suitable ORDER
  *		BY expressions, each of the form "indexedcol operator pseudoconstant",
  *		along with an integer list of the index column numbers (zero based)

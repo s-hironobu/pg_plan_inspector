@@ -72,8 +72,14 @@ extern double pgqp_get_parameterized_joinrel_size(PlannerInfo *root, RelOptInfo 
 												  SpecialJoinInfo *sjinfo,
 												  List *restrict_clauses);
 extern void pgqp_set_result_size_estimates(PlannerInfo *root, RelOptInfo *rel);
+#if PG_VERSION_NUM >= 170000
+extern double pgqp_compute_bitmap_pages(PlannerInfo *root, RelOptInfo *baserel,
+										Path *bitmapqual, double loop_count,
+										Cost *cost_p, double *tuples_p);
+#else
 extern double pgqp_compute_bitmap_pages(PlannerInfo *root, RelOptInfo *baserel, Path *bitmapqual,
 										int loop_count, Cost *cost, double *tuple);
+#endif
 extern void pgqp_cost_bitmap_heap_scan(Path *path, PlannerInfo *root, RelOptInfo *baserel,
 									   ParamPathInfo *param_info,
 									   Path *bitmapqual, double loop_count);

@@ -228,7 +228,7 @@ Datum		get_planid(PG_FUNCTION_ARGS);
 PG_FUNCTION_INFO_V1(pg_query_plan);
 PG_FUNCTION_INFO_V1(get_planid);
 
-
+#include <unistd.h>
 /*
  * Module callback
  */
@@ -345,13 +345,15 @@ _PG_init(void)
 							 NULL);
 #endif
 
-#if PG_VERSION_NUM >= 150000
-	MarkGUCPrefixReserved("pg_query_plan");
-#else
 	EmitWarningsOnPlaceholders("pg_query_plan");
 
+#if PG_VERSION_NUM < 160000
 	RequestAddinShmemSpace(pgqp_memsize());
+#if PG_VERSION_NUM >= 90600
 	RequestNamedLWLockTranche("pg_query_plan", 1);
+#else
+	RequestAddinLWLocks(1);
+#endif
 #endif
 
 	/* Install hooks. */
@@ -359,8 +361,18 @@ _PG_init(void)
 	prev_shmem_request_hook = shmem_request_hook;
 	shmem_request_hook = pgqp_shmem_request;
 #endif
+
 	prev_shmem_startup_hook = shmem_startup_hook;
 	shmem_startup_hook = pgqp_shmem_startup;
+
+	if (!IsParallelWorker())
+	{
+		prev_ClientAuthentication = ClientAuthentication_hook;
+		ClientAuthentication_hook = pgqp_ClientAuthentication;
+
+		prev_ProcessUtility = ProcessUtility_hook;
+		ProcessUtility_hook = pgqp_ProcessUtility;
+	}
 
 #if PG_VERSION_NUM < 140000
 	prev_post_parse_analyze_hook = post_parse_analyze_hook;
@@ -393,14 +405,19 @@ _PG_init(void)
 	set_join_pathlist_hook = pgqp_set_join_pathlist;
 #endif							/* __ADJUST_ROWS__ */
 
-	if (!IsParallelWorker())
-	{
-		prev_ClientAuthentication = ClientAuthentication_hook;
-		ClientAuthentication_hook = pgqp_ClientAuthentication;
+	/* initialize variable */
+	is_explain = false;
+	pgqp_received_signal = false;
+#ifdef __ADJUST_ROWS__
+	pgqp_adjust_rows = false;
 
-		prev_ProcessUtility = ProcessUtility_hook;
-		ProcessUtility_hook = pgqp_ProcessUtility;
-	}
+	init_param_parse_env();
+#endif
+
+#if PG_VERSION_NUM >= 140000
+	/* Enables query identifier computation. */
+	EnableQueryId();
+#endif
 
 	/* Initialize bgworker. */
 	memset(&worker, 0, sizeof(worker));
@@ -421,19 +438,6 @@ _PG_init(void)
 	worker.bgw_main_arg = Int32GetDatum(2);
 	RegisterBackgroundWorker(&worker);
 
-	/* initialize variable */
-	is_explain = false;
-	pgqp_received_signal = false;
-#ifdef __ADJUST_ROWS__
-	pgqp_adjust_rows = false;
-
-	init_param_parse_env();
-#endif
-
-#if PG_VERSION_NUM >= 140000
-	/* Enables query identifier computation. */
-	EnableQueryId();
-#endif
 }
 
 #if PG_VERSION_NUM >= 150000
@@ -1157,7 +1161,6 @@ pgqp_join_search(PlannerInfo *root, int levels_needed,
 				 List *initial_rels)
 {
 	RelOptInfo *rel = NULL;
-
 	if (enable_geqo && levels_needed >= geqo_threshold)
 		return geqo(root, levels_needed, initial_rels);
 
@@ -1326,10 +1329,14 @@ pg_query_plan(PG_FUNCTION_ARGS)
 		PgBackendStatus *beentry = NULL;
 		bool		parallel_worker;
 #undef PG_QUERY_PLAN_COLS
+#if PG_VERSION_NUM >= 170000
+		beentry = pgstat_get_beentry_by_proc_number(curr_backend);
+#else
 #if PG_VERSION_NUM >= 160000
 		beentry = pgstat_get_beentry_by_backend_id(curr_backend);
 #else
 		beentry = pgstat_fetch_stat_beentry(curr_backend);
+#endif
 #endif
 
 		if (beentry == NULL)
@@ -1491,7 +1498,6 @@ pg_query_plan(PG_FUNCTION_ARGS)
 
 	if (!has_data)
 		elog(INFO, "The process (pid=%d) is in idle state.", pid);
-	tuplestore_donestoring(tupstore);
 
 	return (Datum) 0;
 }

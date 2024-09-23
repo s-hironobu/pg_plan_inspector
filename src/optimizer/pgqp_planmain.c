@@ -24,7 +24,9 @@
 
 #include "optimizer/appendinfo.h"
 #include "optimizer/clauses.h"
+#if PG_VERSION_NUM < 170000
 #include "optimizer/inherit.h"
+#endif
 #include "optimizer/optimizer.h"
 #include "optimizer/orclauses.h"
 #include "optimizer/pathnode.h"

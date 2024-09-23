@@ -509,6 +509,10 @@ class Repository(Common):
 
     def check_formatted_regression_params(self, serverId, queryid):
         _dir = self.get_formatted_regression_params_subdir_path(serverId)
+        if os.path.exists(_dir) == False:
+            # Formatted regression params has not been created yet.
+            # These params are created when push command is issued.
+            return False
         for _file in os.listdir(_dir):
             if str(_file) == str(queryid):
                 return True

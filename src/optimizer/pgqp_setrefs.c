@@ -32,7 +32,9 @@
 #include "parser/parse_relation.h"
 #endif
 #include "tcop/utility.h"
+#if PG_VERSION_NUM < 170000
 #include "utils/lsyscache.h"
+#endif
 #include "utils/syscache.h"
 #ifdef __PG_QUERY_PLAN__
 #include "pgqp_setrefs.h"
@@ -1322,8 +1324,15 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 				 */
 				if (splan->mergeActionLists != NIL)
 				{
+#if PG_VERSION_NUM >= 170000
+					List	   *newMJC = NIL;
+					ListCell   *lca,
+							   *lcj,
+							   *lcr;
+#else
 					ListCell   *lca,
 							   *lcr;
+#endif
 
 					/*
 					 * Fix the targetList of individual action nodes so that
@@ -1343,10 +1352,19 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 
 					itlist = build_tlist_index(subplan->targetlist);
 
+#if PG_VERSION_NUM >= 170000
+					forthree(lca, splan->mergeActionLists,
+							 lcj, splan->mergeJoinConditions,
+							 lcr, splan->resultRelations)
+#else
 					forboth(lca, splan->mergeActionLists,
 							lcr, splan->resultRelations)
+#endif
 					{
 						List	   *mergeActionList = lfirst(lca);
+#if PG_VERSION_NUM >= 170000
+						Node	   *mergeJoinCondition = lfirst(lcj);
+#endif
 						Index		resultrel = lfirst_int(lcr);
 
 						foreach(l, mergeActionList)
@@ -1375,7 +1393,23 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 #endif
 																  NUM_EXEC_QUAL(plan));
 						}
+
+#if PG_VERSION_NUM >= 170000
+						/* Fix join condition too. */
+						mergeJoinCondition = (Node *)
+							fix_join_expr(root,
+										  (List *) mergeJoinCondition,
+										  NULL, itlist,
+										  resultrel,
+										  rtoffset,
+										  NRM_EQUAL,
+										  NUM_EXEC_QUAL(plan));
+						newMJC = lappend(newMJC, mergeJoinCondition);
+#endif
 					}
+#if PG_VERSION_NUM >= 170000
+					splan->mergeJoinConditions = newMJC;
+#endif
 				}
 
 #endif
@@ -3198,11 +3232,11 @@ build_tlist_index_other_vars(List *tlist, Index ignore_rel)
  * Also ensure that varnosyn is incremented by rtoffset.
  * If no match, return NULL.
  *
- * In debugging builds, we cross-check the varnullingrels of the subplan
- * output Var based on nrm_match.  Most call sites should pass NRM_EQUAL
- * indicating we expect an exact match.  However, there are places where
- * we haven't cleaned things up completely, and we have to settle for
- * allowing subset or superset matches.
+ * We cross-check the varnullingrels of the subplan output Var based on
+ * nrm_match.  Most call sites should pass NRM_EQUAL indicating we expect
+ * an exact match.  However, there are places where we haven't cleaned
+ * things up completely, and we have to settle for allowing subset or
+ * superset matches.
  */
 static Var *
 search_indexed_tlist_for_var(Var *var, indexed_tlist *itlist,
@@ -3406,7 +3440,14 @@ static Var *search_indexed_tlist_for_sortgroupref(Expr *node,
 	{
 		TargetEntry *tle = (TargetEntry *) lfirst(lc);
 
-		/* The equal() check should be redundant, but let's be paranoid */
+		/*
+		 * Usually the equal() check is redundant, but in setop plans it may
+		 * not be, since prepunion.c assigns ressortgroupref equal to the
+		 * column resno without regard to whether that matches the topmost
+		 * level's sortgrouprefs and without regard to whether any implicit
+		 * coercions are added in the setop tree.  We might have to clean that
+		 * up someday; but for now, just ignore any false matches.
+		 */
 		if (tle->ressortgroupref == sortgroupref &&
 			equal(node, tle->expr))
 		{

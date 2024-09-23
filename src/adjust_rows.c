@@ -49,7 +49,7 @@
 #include "param.h"
 #include "param_parser.h"
 #include "miscadmin.h"
-
+#include <math.h>
 
 /*
  * Declare variables
@@ -1133,7 +1133,7 @@ pgqp_set_join_pathlist(PlannerInfo *root, RelOptInfo *joinrel,
 					parallel_divisor = get_parallel_divisor(&jpath.path);
 					re_adjusted_rows = clamp_row_est(jpath.path.rows * parallel_divisor);
 
-					if (abs(jpath.path.rows - joinrel_rows) > joinrel_rows * 0.1)
+					if (fabs(jpath.path.rows - joinrel_rows) > joinrel_rows * 0.1)
 					{
 						jpath.path.rows = re_adjusted_rows;
 						((MergePath *) obj)->jpath = jpath;
@@ -1166,7 +1166,7 @@ pgqp_set_join_pathlist(PlannerInfo *root, RelOptInfo *joinrel,
 					parallel_divisor = get_parallel_divisor(&jpath.path);
 					re_adjusted_rows = clamp_row_est(jpath.path.rows * parallel_divisor);
 
-					if (abs(jpath.path.rows - joinrel_rows) > joinrel_rows * 0.1)
+					if (fabs(jpath.path.rows - joinrel_rows) > joinrel_rows * 0.1)
 					{
 						jpath.path.rows = re_adjusted_rows;
 						((MergePath *) obj)->jpath = jpath;

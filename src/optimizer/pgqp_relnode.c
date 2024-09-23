@@ -24,6 +24,9 @@
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
 #include "optimizer/inherit.h"
+#if PG_VERSION_NUM >= 170000
+#include "optimizer/optimizer.h"
+#endif
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/placeholder.h"
@@ -296,6 +299,9 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptInfo *parent)
 	rel->relid = relid;
 	rel->rtekind = rte->rtekind;
 	/* min_attr, max_attr, attr_needed, attr_widths are set below */
+#if PG_VERSION_NUM >= 170000
+	rel->notnullattnums = NULL;
+#endif
 	rel->lateral_vars = NIL;
 	rel->indexlist = NIL;
 	rel->statlist = NIL;
@@ -484,12 +490,31 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptInfo *parent)
 			break;
 	}
 
+#if PG_VERSION_NUM >= 170000
+	/*
+	 * We must apply the partially filled in RelOptInfo before calling
+	 * apply_child_basequals due to some transformations within that function
+	 * which require the RelOptInfo to be available in the simple_rel_array.
+	 */
+	root->simple_rel_array[relid] = rel;
+
+	/*
+	 * Apply the parent's quals to the child, with appropriate substitution of
+	 * variables.  If the resulting clause is constant-FALSE or NULL after
+	 * applying transformations, apply_child_basequals returns false to
+	 * indicate that scanning this relation won't yield any rows.  In this
+	 * case, we mark the child as dummy right away.  (We must do this
+	 * immediately so that pruning works correctly when recursing in
+	 * expand_partitioned_rtentry.)
+	 */
+#else
 	/*
 	 * Copy the parent's quals to the child, with appropriate substitution of
 	 * variables.  If any constant false or NULL clauses turn up, we can mark
 	 * the child as dummy right away.  (We must do this immediately so that
 	 * pruning works correctly when recursing in expand_partitioned_rtentry.)
 	 */
+#endif
 	if (parent)
 	{
 		AppendRelInfo *appinfo = root->append_rel_array[relid];
@@ -498,15 +523,17 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptInfo *parent)
 		if (!apply_child_basequals(root, parent, rel, rte, appinfo))
 		{
 			/*
-			 * Some restriction clause reduced to constant FALSE or NULL after
-			 * substitution, so this child need not be scanned.
+			 * Restriction clause reduced to constant FALSE or NULL.  Mark as
+			 * dummy so we won't scan this relation.
 			 */
 			mark_dummy_rel(rel);
 		}
 	}
 
+#if PG_VERSION_NUM < 170000
 	/* Save the finished struct in the query's simple_rel_array */
 	root->simple_rel_array[relid] = rel;
+#endif
 
 	return rel;
 }
@@ -523,9 +550,14 @@ find_base_rel(PlannerInfo *root, int relid)
 {
 	RelOptInfo *rel;
 
+#if PG_VERSION_NUM >= 170000
+	/* use an unsigned comparison to prevent negative array element access */
+	if ((uint32) relid < (uint32) root->simple_rel_array_size)
+#else
 	Assert(relid > 0);
 
 	if (relid < root->simple_rel_array_size)
+#endif
 	{
 		rel = root->simple_rel_array[relid];
 		if (rel)
@@ -536,6 +568,23 @@ find_base_rel(PlannerInfo *root, int relid)
 
 	return NULL;				/* keep compiler quiet */
 }
+#endif							/* ifndef __PG_QUERY_PLAN__ */
+
+#ifndef __PG_QUERY_PLAN__
+#if PG_VERSION_NUM >= 170000
+/*
+ * find_base_rel_noerr
+ *	  Find a base or otherrel relation entry, returning NULL if there's none
+ */
+RelOptInfo *
+find_base_rel_noerr(PlannerInfo *root, int relid)
+{
+	/* use an unsigned comparison to prevent negative array element access */
+	if ((uint32) relid < (uint32) root->simple_rel_array_size)
+		return root->simple_rel_array[relid];
+	return NULL;
+}
+#endif
 #endif							/* ifndef __PG_QUERY_PLAN__ */
 
 #ifndef __PG_QUERY_PLAN__
@@ -551,9 +600,14 @@ find_base_rel(PlannerInfo *root, int relid)
 RelOptInfo *
 find_base_rel_ignore_join(PlannerInfo *root, int relid)
 {
+#if PG_VERSION_NUM >= 170000
+	/* use an unsigned comparison to prevent negative array element access */
+	if ((uint32) relid < (uint32) root->simple_rel_array_size)
+#else
 	Assert(relid > 0);
 
 	if (relid < root->simple_rel_array_size)
+#endif
 	{
 		RelOptInfo *rel;
 		RangeTblEntry *rte;
@@ -853,6 +907,9 @@ build_join_rel(PlannerInfo *root,
 	joinrel->max_attr = 0;
 	joinrel->attr_needed = NULL;
 	joinrel->attr_widths = NULL;
+#if PG_VERSION_NUM >= 170000
+	joinrel->notnullattnums = NULL;
+#endif
 #if PG_VERSION_NUM >= 160000
 	joinrel->nulling_relids = NULL;
 #endif
@@ -1124,6 +1181,9 @@ build_child_join_rel(PlannerInfo *root, RelOptInfo *outer_rel,
 	joinrel->max_attr = 0;
 	joinrel->attr_needed = NULL;
 	joinrel->attr_widths = NULL;
+#if PG_VERSION_NUM >= 170000
+	joinrel->notnullattnums = NULL;
+#endif
 #if PG_VERSION_NUM >= 160000
 	joinrel->nulling_relids = NULL;
 #endif
@@ -1351,6 +1411,9 @@ build_joinrel_tlist(PlannerInfo *root, RelOptInfo *joinrel,
 #endif
 {
 	Relids		relids = joinrel->relids;
+#if PG_VERSION_NUM >= 170000
+	int64		tuple_width = joinrel->reltarget->width;
+#endif
 	ListCell   *vars;
 #if PG_VERSION_NUM >= 160000
 	ListCell   *lc;
@@ -1405,7 +1468,11 @@ build_joinrel_tlist(PlannerInfo *root, RelOptInfo *joinrel,
 				joinrel->reltarget->exprs = lappend(joinrel->reltarget->exprs,
 													phv);
 				/* Bubbling up the precomputed result has cost zero */
+#if PG_VERSION_NUM >= 170000
+				tuple_width += phinfo->ph_width;
+#else
 				joinrel->reltarget->width += phinfo->ph_width;
+#endif
 			}
 			continue;
 		}
@@ -1426,7 +1493,11 @@ build_joinrel_tlist(PlannerInfo *root, RelOptInfo *joinrel,
 				list_nth(root->row_identity_vars, var->varattno - 1);
 
 			/* Update reltarget width estimate from RowIdentityVarInfo */
+#if PG_VERSION_NUM >= 170000
+			tuple_width += ridinfo->rowidwidth;
+#else
 			joinrel->reltarget->width += ridinfo->rowidwidth;
+#endif
 		}
 		else
 		{
@@ -1442,7 +1513,11 @@ build_joinrel_tlist(PlannerInfo *root, RelOptInfo *joinrel,
 				continue;		/* nope, skip it */
 
 			/* Update reltarget width estimate from baserel's attr_widths */
+#if PG_VERSION_NUM >= 170000
+			tuple_width += baserel->attr_widths[ndx];
+#else
 			joinrel->reltarget->width += baserel->attr_widths[ndx];
+#endif
 		}
 
 		/*
@@ -1482,6 +1557,10 @@ build_joinrel_tlist(PlannerInfo *root, RelOptInfo *joinrel,
 
 		/* Vars have cost zero, so no need to adjust reltarget->cost */
 	}
+
+#if PG_VERSION_NUM >= 170000
+	joinrel->reltarget->width = clamp_width_est(tuple_width);
+#endif
 #else
 
 	foreach(vars, input_rel->reltarget->exprs)

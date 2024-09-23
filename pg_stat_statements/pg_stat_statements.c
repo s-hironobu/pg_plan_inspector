@@ -28,6 +28,9 @@
 #else
 #include "utils/hashutils.h"
 #endif
+#if PG_VERSION_NUM >= 170000
+#include "common/int.h"
+#endif
 
 #include "pg_stat_statements/pg_stat_statements.h"
 

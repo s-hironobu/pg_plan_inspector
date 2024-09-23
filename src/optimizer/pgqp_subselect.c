@@ -70,12 +70,19 @@ typedef struct inline_cte_walker_context
 	Query	   *ctequery;		/* query to substitute */
 } inline_cte_walker_context;
 
-
+#if PG_VERSION_NUM >= 170000
+static Node *build_subplan(PlannerInfo *root, Plan *plan, Path *path,
+						   PlannerInfo *subroot, List *plan_params,
+						   SubLinkType subLinkType, int subLinkId,
+						   Node *testexpr, List *testexpr_paramids,
+						   bool unknownEqFalse);
+#else
 static Node *build_subplan(PlannerInfo *root, Plan *plan, PlannerInfo *subroot,
 						   List *plan_params,
 						   SubLinkType subLinkType, int subLinkId,
 						   Node *testexpr, List *testexpr_paramids,
 						   bool unknownEqFalse);
+#endif
 static List *generate_subquery_params(PlannerInfo *root, List *tlist,
 									  List **paramIds);
 static List *generate_subquery_vars(PlannerInfo *root, List *tlist,
@@ -225,13 +232,23 @@ make_subplan(PlannerInfo *root, Query *orig_subquery,
 
 	/* Generate Paths for the subquery */
 #ifdef __PG_QUERY_PLAN__
+#if PG_VERSION_NUM >= 170000
+	subroot = pgqp_subquery_planner(root->glob, subquery, root, false,
+									tuple_fraction, NULL);
+#else
 	subroot = pgqp_subquery_planner(root->glob, subquery,
 									root,
 									false, tuple_fraction);
+#endif
+#else
+#if PG_VERSION_NUM >= 170000
+	subroot = subquery_planner(root->glob, subquery, root, false,
+							   tuple_fraction, NULL);
 #else
 	subroot = subquery_planner(root->glob, subquery,
 							   root,
 							   false, tuple_fraction);
+#endif
 #endif
 
 	/* Isolate the params needed by this specific subplan */
@@ -252,9 +269,16 @@ make_subplan(PlannerInfo *root, Query *orig_subquery,
 	plan = create_plan(subroot, best_path);
 
 	/* And convert to SubPlan or InitPlan format. */
+#if PG_VERSION_NUM >= 170000
+	result = build_subplan(root, plan, best_path,
+						   subroot, plan_params,
+						   subLinkType, subLinkId,
+						   testexpr, NIL, isTopQual);
+#else
 	result = build_subplan(root, plan, subroot, plan_params,
 						   subLinkType, subLinkId,
 						   testexpr, NIL, isTopQual);
+#endif
 
 	/*
 	 * If it's a correlated EXISTS with an unimportant targetlist, we might be
@@ -282,13 +306,23 @@ make_subplan(PlannerInfo *root, Query *orig_subquery,
 		{
 			/* Generate Paths for the ANY subquery; we'll need all rows */
 #ifdef __PG_QUERY_PLAN__
+#if PG_VERSION_NUM >= 170000
+			subroot = pgqp_subquery_planner(root->glob, subquery, root, false, 0.0,
+											NULL);
+#else
 			subroot = pgqp_subquery_planner(root->glob, subquery,
 											root,
 											false, 0.0);
+#endif
+#else
+#if PG_VERSION_NUM >= 170000
+			subroot = subquery_planner(root->glob, subquery, root, false, 0.0,
+									   NULL);
 #else
 			subroot = subquery_planner(root->glob, subquery,
 									   root,
 									   false, 0.0);
+#endif
 #endif
 
 			/* Isolate the params needed by this specific subplan */
@@ -309,6 +343,15 @@ make_subplan(PlannerInfo *root, Query *orig_subquery,
 				plan = create_plan(subroot, best_path);
 
 				/* ... and convert to SubPlan format */
+#if PG_VERSION_NUM >= 170000
+				hashplan = castNode(SubPlan,
+									build_subplan(root, plan, best_path,
+												  subroot, plan_params,
+												  ANY_SUBLINK, 0,
+												  newtestexpr,
+												  paramIds,
+												  true));
+#else
 				hashplan = castNode(SubPlan,
 									build_subplan(root, plan, subroot,
 												  plan_params,
@@ -316,6 +359,7 @@ make_subplan(PlannerInfo *root, Query *orig_subquery,
 												  newtestexpr,
 												  paramIds,
 												  true));
+#endif
 				/* Check we got what we expected */
 				Assert(hashplan->parParam == NIL);
 				Assert(hashplan->useHashTable);
@@ -339,8 +383,13 @@ make_subplan(PlannerInfo *root, Query *orig_subquery,
  * make it an InitPlan, as explained in the comments for make_subplan.
  */
 static Node *
+#if PG_VERSION_NUM >= 170000
+build_subplan(PlannerInfo *root, Plan *plan, Path *path,
+			  PlannerInfo *subroot, List *plan_params,
+#else
 build_subplan(PlannerInfo *root, Plan *plan, PlannerInfo *subroot,
 			  List *plan_params,
+#endif
 			  SubLinkType subLinkType, int subLinkId,
 			  Node *testexpr, List *testexpr_paramids,
 			  bool unknownEqFalse)
@@ -570,9 +619,12 @@ build_subplan(PlannerInfo *root, Plan *plan, PlannerInfo *subroot,
 	}
 
 	/*
-	 * Add the subplan and its PlannerInfo to the global lists.
+	 * Add the subplan, its path, and its PlannerInfo to the global lists.
 	 */
 	root->glob->subplans = lappend(root->glob->subplans, plan);
+#if PG_VERSION_NUM >= 170000
+	root->glob->subpaths = lappend(root->glob->subpaths, path);
+#endif
 	root->glob->subroots = lappend(root->glob->subroots, subroot);
 	splan->plan_id = list_length(root->glob->subplans);
 
@@ -591,6 +643,11 @@ build_subplan(PlannerInfo *root, Plan *plan, PlannerInfo *subroot,
 												   splan->plan_id);
 
 	/* Label the subplan for EXPLAIN purposes */
+#if PG_VERSION_NUM >= 170000
+	splan->plan_name = psprintf("%s %d",
+								isInitPlan ? "InitPlan" : "SubPlan",
+								splan->plan_id);
+#else
 	splan->plan_name = palloc(32 + 12 * list_length(splan->setParam));
 	sprintf(splan->plan_name, "%s %d",
 			isInitPlan ? "InitPlan" : "SubPlan",
@@ -607,6 +664,7 @@ build_subplan(PlannerInfo *root, Plan *plan, PlannerInfo *subroot,
 						   lnext(splan->setParam, lc) ? "," : ")");
 		}
 	}
+#endif
 
 	/* Lastly, fill in the cost estimates for use later */
 	cost_subplan(root, splan, plan);
@@ -1018,13 +1076,23 @@ SS_process_ctes(PlannerInfo *root)
 		 * --- we don't have enough info to predict otherwise.
 		 */
 #ifdef __PG_QUERY_PLAN__
+#if PG_VERSION_NUM >= 170000
+		subroot = pgqp_subquery_planner(root->glob, subquery, root,
+										cte->cterecursive, 0.0, NULL);
+#else
 		subroot = pgqp_subquery_planner(root->glob, subquery,
 										root,
 										cte->cterecursive, 0.0);
+#endif
+#else
+#if PG_VERSION_NUM >= 170000
+		subroot = subquery_planner(root->glob, subquery, root,
+								   cte->cterecursive, 0.0, NULL);
 #else
 		subroot = subquery_planner(root->glob, subquery,
 								   root,
 								   cte->cterecursive, 0.0);
+#endif
 #endif
 
 		/*
@@ -1087,10 +1155,14 @@ SS_process_ctes(PlannerInfo *root)
 		splan->setParam = list_make1_int(paramid);
 
 		/*
-		 * Add the subplan and its PlannerInfo to the global lists.
+		 * Add the subplan, its path, and its PlannerInfo to the global lists.
 		 */
 		root->glob->subplans = lappend(root->glob->subplans, plan);
+#if PG_VERSION_NUM >= 170000
+		root->glob->subpaths = lappend(root->glob->subpaths, best_path);
+#endif
 		root->glob->subroots = lappend(root->glob->subroots, subroot);
+
 		splan->plan_id = list_length(root->glob->subplans);
 
 		root->init_plans = lappend(root->init_plans, splan);
@@ -1336,15 +1408,35 @@ convert_ANY_sublink_to_join(PlannerInfo *root, SubLink *sublink,
 	List	   *subquery_vars;
 	Node	   *quals;
 	ParseState *pstate;
+#if PG_VERSION_NUM >= 170000
+	Relids		sub_ref_outer_relids;
+	bool		use_lateral;
+#endif
 
 	Assert(sublink->subLinkType == ANY_SUBLINK);
 
+#if PG_VERSION_NUM >= 170000
+	/*
+	 * If the sub-select contains any Vars of the parent query, we treat it as
+	 * LATERAL.  (Vars from higher levels don't matter here.)
+	 */
+	sub_ref_outer_relids = pull_varnos_of_level(NULL, (Node *) subselect, 1);
+	use_lateral = !bms_is_empty(sub_ref_outer_relids);
+
+	/*
+	 * Can't convert if the sub-select contains parent-level Vars of relations
+	 * not in available_rels.
+	 */
+	if (!bms_is_subset(sub_ref_outer_relids, available_rels))
+		return NULL;
+#else
 	/*
 	 * The sub-select must not refer to any Vars of the parent query. (Vars of
 	 * higher levels should be okay, though.)
 	 */
 	if (contain_vars_of_level((Node *) subselect, 1))
 		return NULL;
+#endif
 
 	/*
 	 * The test expression must contain some Vars of the parent query, else
@@ -1378,11 +1470,19 @@ convert_ANY_sublink_to_join(PlannerInfo *root, SubLink *sublink,
 	 * below). Therefore this is a lot easier than what pull_up_subqueries has
 	 * to go through.
 	 */
+#if PG_VERSION_NUM >= 170000
+	nsitem = addRangeTableEntryForSubquery(pstate,
+										   subselect,
+										   makeAlias("ANY_subquery", NIL),
+										   use_lateral,
+										   false);
+#else
 	nsitem = addRangeTableEntryForSubquery(pstate,
 										   subselect,
 										   makeAlias("ANY_subquery", NIL),
 										   false,
 										   false);
+#endif
 	rte = nsitem->p_rte;
 	parse->rtable = lappend(parse->rtable, rte);
 	rtindex = list_length(parse->rtable);
@@ -1913,7 +2013,8 @@ convert_EXISTS_to_ANY(PlannerInfo *root, Query *subselect,
 /*
  * Replace correlation vars (uplevel vars) with Params.
  *
- * Uplevel PlaceHolderVars and aggregates are replaced, too.
+ * Uplevel PlaceHolderVars, aggregates, GROUPING() expressions, and
+ * MergeSupportFuncs are replaced, too.
  *
  * Note: it is critical that this runs immediately after SS_process_sublinks.
  * Since we do not recurse into the arguments of uplevel PHVs and aggregates,
@@ -1967,6 +2068,14 @@ replace_correlation_vars_mutator(Node *node, PlannerInfo *root)
 		if (((GroupingFunc *) node)->agglevelsup > 0)
 			return (Node *) replace_outer_grouping(root, (GroupingFunc *) node);
 	}
+#if PG_VERSION_NUM >= 170000
+	if (IsA(node, MergeSupportFunc))
+	{
+		if (root->parse->commandType != CMD_MERGE)
+			return (Node *) replace_outer_merge_support(root,
+														(MergeSupportFunc *) node);
+	}
+#endif
 	return expression_tree_mutator(node,
 								   replace_correlation_vars_mutator,
 								   (void *) root);
@@ -3192,9 +3301,16 @@ SS_make_initplan_from_plan(PlannerInfo *root,
 	SubPlan    *node;
 
 	/*
-	 * Add the subplan and its PlannerInfo to the global lists.
+	 * Add the subplan and its PlannerInfo, as well as a dummy path entry, to
+	 * the global lists.  Ideally we'd save a real path, but right now our
+	 * sole caller doesn't build a path that exactly matches the plan.  Since
+	 * we're not currently going to need the path for an initplan, it's not
+	 * worth requiring construction of such a path.
 	 */
 	root->glob->subplans = lappend(root->glob->subplans, plan);
+#if PG_VERSION_NUM >= 170000
+	root->glob->subpaths = lappend(root->glob->subpaths, NULL);
+#endif
 	root->glob->subroots = lappend(root->glob->subroots, subroot);
 
 	/*
@@ -3205,8 +3321,12 @@ SS_make_initplan_from_plan(PlannerInfo *root,
 	node = makeNode(SubPlan);
 	node->subLinkType = EXPR_SUBLINK;
 	node->plan_id = list_length(root->glob->subplans);
+#if PG_VERSION_NUM >= 170000
+	node->plan_name = psprintf("InitPlan %d", node->plan_id);
+#else
 	node->plan_name = psprintf("InitPlan %d (returns $%d)",
 							   node->plan_id, prm->paramid);
+#endif
 	get_first_col_type(plan, &node->firstColType, &node->firstColTypmod,
 					   &node->firstColCollation);
 #if PG_VERSION_NUM >= 160000

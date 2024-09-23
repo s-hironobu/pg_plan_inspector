@@ -15,7 +15,9 @@
 #define __PG_QUERY_PLAN__
 #include "postgres.h"
 
+#if PG_VERSION_NUM < 170000
 #include "catalog/pg_class.h"
+#endif
 #include "catalog/pg_type.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
@@ -29,11 +31,16 @@
 #include "optimizer/placeholder.h"
 #include "optimizer/planmain.h"
 #include "optimizer/planner.h"
+#if PG_VERSION_NUM < 170000
 #include "optimizer/prep.h"
+#endif
 #include "optimizer/restrictinfo.h"
 #include "parser/analyze.h"
 #include "rewrite/rewriteManip.h"
 #include "utils/lsyscache.h"
+#if PG_VERSION_NUM >= 170000
+#include "utils/rel.h"
+#endif
 #include "utils/typcache.h"
 #ifdef __PG_QUERY_PLAN__
 #include "pgqp_initsplan.h"
@@ -115,6 +122,7 @@ static List *deconstruct_recurse(PlannerInfo *root, Node *jtnode,
 								 List **postponed_qual_list);
 #endif							/* #if else PG_VERSION_NUM >= 160000 */
 #if PG_VERSION_NUM >= 160000
+#ifndef __PG_QUERY_PLAN__
 static void process_security_barrier_quals(PlannerInfo *root,
 										   int rti, JoinTreeItem *jtitem);
 static void mark_rels_nulled_by_join(PlannerInfo *root, Index ojrelid,
@@ -124,6 +132,7 @@ static SpecialJoinInfo *make_outerjoininfo(PlannerInfo *root,
 										   Relids inner_join_rels,
 										   JoinType jointype, Index ojrelid,
 										   List *clause);
+#endif							/* #ifndef __PG_QUERY_PLAN__ */
 #else							/* #if PG_VERSION_NUM >= 160000 */
 static void process_security_barrier_quals(PlannerInfo *root,
 										   int rti, Relids qualscope,
@@ -133,6 +142,7 @@ static SpecialJoinInfo *make_outerjoininfo(PlannerInfo *root,
 										   Relids inner_join_rels,
 										   JoinType jointype, List *clause);
 #endif							/* #if else PG_VERSION_NUM >= 160000 */
+#ifndef __PG_QUERY_PLAN__
 static void compute_semijoin_info(PlannerInfo *root, SpecialJoinInfo *sjinfo,
 								  List *clause);
 #if PG_VERSION_NUM >= 160000
@@ -140,7 +150,10 @@ static void deconstruct_distribute_oj_quals(PlannerInfo *root,
 											List *jtitems,
 											JoinTreeItem *jtitem);
 #endif							/* #if PG_VERSION_NUM >= 160000 */
+#endif							/* #ifndef __PG_QUERY_PLAN__ */
+
 #if PG_VERSION_NUM >= 160000
+#ifndef __PG_QUERY_PLAN__
 static void distribute_quals_to_rels(PlannerInfo *root, List *clauses,
 									 JoinTreeItem *jtitem,
 									 SpecialJoinInfo *sjinfo,
@@ -165,6 +178,7 @@ static void distribute_qual_to_rels(PlannerInfo *root, Node *clause,
 									bool has_clone,
 									bool is_clone,
 									List **postponed_oj_qual_list);
+#endif							/* #ifndef __PG_QUERY_PLAN__ */
 #else							/* #if PG_VERSION_NUM >= 160000 */
 static void distribute_qual_to_rels(PlannerInfo *root, Node *clause,
 									bool below_outer_join,
@@ -181,12 +195,14 @@ static bool check_outerjoin_delay(PlannerInfo *root, Relids *relids_p,
 static bool check_equivalence_delay(PlannerInfo *root,
 									RestrictInfo *restrictinfo);
 #endif							/* #if PG_VERSION_NUM >= 160000 */
+#ifndef __PG_QUERY_PLAN__
 static bool check_redundant_nullability_qual(PlannerInfo *root, Node *clause);
 #if PG_VERSION_NUM >= 160000
 static Relids get_join_domain_min_rels(PlannerInfo *root, Relids domain_relids);
 #endif							/* #if PG_VERSION_NUM >= 160000 */
-static void check_mergejoinable(RestrictInfo *restrictinfo);
+#endif							/* #ifndef __PG_QUERY_PLAN__ */
 #ifndef __PG_QUERY_PLAN__
+static void check_mergejoinable(RestrictInfo *restrictinfo);
 static void check_hashjoinable(RestrictInfo *restrictinfo);
 static void check_memoizable(RestrictInfo *restrictinfo);
 #endif
@@ -1647,6 +1663,7 @@ deconstruct_recurse(PlannerInfo *root, Node *jtnode, bool below_outer_join,
 #endif							/* #if else PG_VERSION_NUM >= 160000 */
 #endif							/* #ifndef __PG_QUERY_PLAN__ */
 
+#ifndef __PG_QUERY_PLAN__
 #if PG_VERSION_NUM >= 160000
 /*
  * deconstruct_distribute
@@ -1794,7 +1811,9 @@ deconstruct_distribute(PlannerInfo *root, JoinTreeItem *jtitem)
 	}
 }
 #endif
+#endif							/* #ifndef __PG_QUERY_PLAN__ */
 
+#ifndef __PG_QUERY_PLAN__
 /*
  * process_security_barrier_quals
  *	  Transfer security-barrier quals into relation's baserestrictinfo list.
@@ -1881,8 +1900,10 @@ process_security_barrier_quals(PlannerInfo *root,
 	/* Assert that qual_security_level is higher than anything we just used */
 	Assert(security_level <= root->qual_security_level);
 }
+#endif							/* #ifndef __PG_QUERY_PLAN__ */
 
 
+#ifndef __PG_QUERY_PLAN__
 #if PG_VERSION_NUM >= 160000
 /*
  * mark_rels_nulled_by_join
@@ -1911,8 +1932,9 @@ mark_rels_nulled_by_join(PlannerInfo *root, Index ojrelid,
 	}
 }
 #endif
+#endif							/* #ifndef __PG_QUERY_PLAN__ */
 
-
+#ifndef __PG_QUERY_PLAN__
 /*
  * make_outerjoininfo
  *	  Build a SpecialJoinInfo for the current outer join
@@ -2320,7 +2342,9 @@ make_outerjoininfo(PlannerInfo *root,
 
 	return sjinfo;
 }
+#endif							/* #ifndef __PG_QUERY_PLAN__ */
 
+#ifndef __PG_QUERY_PLAN__
 /*
  * compute_semijoin_info
  *	  Fill semijoin-related fields of a new SpecialJoinInfo
@@ -2496,8 +2520,9 @@ compute_semijoin_info(PlannerInfo *root, SpecialJoinInfo *sjinfo, List *clause)
 	sjinfo->semi_operators = semi_operators;
 	sjinfo->semi_rhs_exprs = semi_rhs_exprs;
 }
+#endif							/* #ifndef __PG_QUERY_PLAN__ */
 
-
+#ifndef __PG_QUERY_PLAN__
 #if PG_VERSION_NUM >= 160000
 /*
  * deconstruct_distribute_oj_quals
@@ -2561,8 +2586,8 @@ deconstruct_distribute_oj_quals(PlannerInfo *root,
 		 * jtitems list to be ordered that way.
 		 *
 		 * We first strip out all the nullingrels bits corresponding to
-		 * commutating joins below this one, and then successively put them
-		 * back as we crawl up the join stack.
+		 * commuting joins below this one, and then successively put them back
+		 * as we crawl up the join stack.
 		 */
 		quals = jtitem->oj_joinclauses;
 		if (!bms_is_empty(joins_below))
@@ -2737,7 +2762,9 @@ deconstruct_distribute_oj_quals(PlannerInfo *root,
 	}
 }
 #endif								 /* #if PG_VERSION_NUM >= 160000 */
+#endif							/* #ifndef __PG_QUERY_PLAN__ */
 
+#ifndef __PG_QUERY_PLAN__
 /*****************************************************************************
  *
  *	  QUALIFICATIONS
@@ -2784,6 +2811,7 @@ distribute_quals_to_rels(PlannerInfo *root, List *clauses,
 	}
 }
 #endif								 /* #if PG_VERSION_NUM >= 160000 */
+#endif							/* #ifndef __PG_QUERY_PLAN__ */
 
 
 #if PG_VERSION_NUM >= 160000
@@ -2866,6 +2894,7 @@ distribute_quals_to_rels(PlannerInfo *root, List *clauses,
  * all and only those special joins that are syntactically below this qual.
  */
 #endif								 /* #if else PG_VERSION_NUM >= 160000 */
+#ifndef __PG_QUERY_PLAN__
 static void
 #if PG_VERSION_NUM >= 160000
 distribute_qual_to_rels(PlannerInfo *root, Node *clause,
@@ -3409,6 +3438,7 @@ distribute_qual_to_rels(PlannerInfo *root, Node *clause,
 	/* No EC special case applies, so push it into the clause lists */
 	distribute_restrictinfo_to_rels(root, restrictinfo);
 }
+#endif							/* #ifndef __PG_QUERY_PLAN__ */
 
 
 #ifndef __PG_QUERY_PLAN__
@@ -3578,6 +3608,7 @@ check_equivalence_delay(PlannerInfo *root,
 #endif							/* #if PG_VERSION_NUM < 160000 */
 #endif							/* #ifndef __PG_QUERY_PLAN_ */
 
+#ifndef __PG_QUERY_PLAN__
 /*
  * check_redundant_nullability_qual
  *	  Check to see if the qual is an IS NULL qual that is redundant with
@@ -3648,6 +3679,217 @@ check_redundant_nullability_qual(PlannerInfo *root, Node *clause)
 
 	return false;
 }
+#endif							/* #ifndef __PG_QUERY_PLAN__ */
+
+#ifndef __PG_QUERY_PLAN__
+#if PG_VERSION_NUM >= 170000
+/*
+ * add_base_clause_to_rel
+ *		Add 'restrictinfo' as a baserestrictinfo to the base relation denoted
+ *		by 'relid'.  We offer some simple prechecks to try to determine if the
+ *		qual is always true, in which case we ignore it rather than add it.
+ *		If we detect the qual is always false, we replace it with
+ *		constant-FALSE.
+ */
+static void
+add_base_clause_to_rel(PlannerInfo *root, Index relid,
+					   RestrictInfo *restrictinfo)
+{
+	RelOptInfo *rel = find_base_rel(root, relid);
+	RangeTblEntry *rte = root->simple_rte_array[relid];
+
+	Assert(bms_membership(restrictinfo->required_relids) == BMS_SINGLETON);
+
+	/*
+	 * For inheritance parent tables, we must always record the RestrictInfo
+	 * in baserestrictinfo as is.  If we were to transform or skip adding it,
+	 * then the original wouldn't be available in apply_child_basequals. Since
+	 * there are two RangeTblEntries for inheritance parents, one with
+	 * inh==true and the other with inh==false, we're still able to apply this
+	 * optimization to the inh==false one.  The inh==true one is what
+	 * apply_child_basequals() sees, whereas the inh==false one is what's used
+	 * for the scan node in the final plan.
+	 *
+	 * We make an exception to this for partitioned tables.  For these, we
+	 * always apply the constant-TRUE and constant-FALSE transformations.  A
+	 * qual which is either of these for a partitioned table must also be that
+	 * for all of its child partitions.
+	 */
+	if (!rte->inh || rte->relkind == RELKIND_PARTITIONED_TABLE)
+	{
+		/* Don't add the clause if it is always true */
+		if (restriction_is_always_true(root, restrictinfo))
+			return;
+
+		/*
+		 * Substitute the origin qual with constant-FALSE if it is provably
+		 * always false.  Note that we keep the same rinfo_serial.
+		 */
+		if (restriction_is_always_false(root, restrictinfo))
+		{
+			int			save_rinfo_serial = restrictinfo->rinfo_serial;
+
+			restrictinfo = make_restrictinfo(root,
+											 (Expr *) makeBoolConst(false, false),
+											 restrictinfo->is_pushed_down,
+											 restrictinfo->has_clone,
+											 restrictinfo->is_clone,
+											 restrictinfo->pseudoconstant,
+											 0, /* security_level */
+											 restrictinfo->required_relids,
+											 restrictinfo->incompatible_relids,
+											 restrictinfo->outer_relids);
+			restrictinfo->rinfo_serial = save_rinfo_serial;
+		}
+	}
+
+	/* Add clause to rel's restriction list */
+	rel->baserestrictinfo = lappend(rel->baserestrictinfo, restrictinfo);
+
+	/* Update security level info */
+	rel->baserestrict_min_security = Min(rel->baserestrict_min_security,
+										 restrictinfo->security_level);
+}
+
+/*
+ * expr_is_nonnullable
+ *	  Check to see if the Expr cannot be NULL
+ *
+ * If the Expr is a simple Var that is defined NOT NULL and meanwhile is not
+ * nulled by any outer joins, then we can know that it cannot be NULL.
+ */
+static bool
+expr_is_nonnullable(PlannerInfo *root, Expr *expr)
+{
+	RelOptInfo *rel;
+	Var		   *var;
+
+	/* For now only check simple Vars */
+	if (!IsA(expr, Var))
+		return false;
+
+	var = (Var *) expr;
+
+	/* could the Var be nulled by any outer joins? */
+	if (!bms_is_empty(var->varnullingrels))
+		return false;
+
+	/* system columns cannot be NULL */
+	if (var->varattno < 0)
+		return true;
+
+	/* is the column defined NOT NULL? */
+	rel = find_base_rel(root, var->varno);
+	if (var->varattno > 0 &&
+		bms_is_member(var->varattno, rel->notnullattnums))
+		return true;
+
+	return false;
+}
+
+/*
+ * restriction_is_always_true
+ *	  Check to see if the RestrictInfo is always true.
+ *
+ * Currently we only check for NullTest quals and OR clauses that include
+ * NullTest quals.  We may extend it in the future.
+ */
+bool
+restriction_is_always_true(PlannerInfo *root,
+						   RestrictInfo *restrictinfo)
+{
+	/* Check for NullTest qual */
+	if (IsA(restrictinfo->clause, NullTest))
+	{
+		NullTest   *nulltest = (NullTest *) restrictinfo->clause;
+
+		/* is this NullTest an IS_NOT_NULL qual? */
+		if (nulltest->nulltesttype != IS_NOT_NULL)
+			return false;
+
+		return expr_is_nonnullable(root, nulltest->arg);
+	}
+
+	/* If it's an OR, check its sub-clauses */
+	if (restriction_is_or_clause(restrictinfo))
+	{
+		ListCell   *lc;
+
+		Assert(is_orclause(restrictinfo->orclause));
+
+		/*
+		 * if any of the given OR branches is provably always true then the
+		 * entire condition is true.
+		 */
+		foreach(lc, ((BoolExpr *) restrictinfo->orclause)->args)
+		{
+			Node	   *orarg = (Node *) lfirst(lc);
+
+			if (!IsA(orarg, RestrictInfo))
+				continue;
+
+			if (restriction_is_always_true(root, (RestrictInfo *) orarg))
+				return true;
+		}
+	}
+
+	return false;
+}
+
+/*
+ * restriction_is_always_false
+ *	  Check to see if the RestrictInfo is always false.
+ *
+ * Currently we only check for NullTest quals and OR clauses that include
+ * NullTest quals.  We may extend it in the future.
+ */
+bool
+restriction_is_always_false(PlannerInfo *root,
+							RestrictInfo *restrictinfo)
+{
+	/* Check for NullTest qual */
+	if (IsA(restrictinfo->clause, NullTest))
+	{
+		NullTest   *nulltest = (NullTest *) restrictinfo->clause;
+
+		/* is this NullTest an IS_NULL qual? */
+		if (nulltest->nulltesttype != IS_NULL)
+			return false;
+
+		return expr_is_nonnullable(root, nulltest->arg);
+	}
+
+	/* If it's an OR, check its sub-clauses */
+	if (restriction_is_or_clause(restrictinfo))
+	{
+		ListCell   *lc;
+
+		Assert(is_orclause(restrictinfo->orclause));
+
+		/*
+		 * Currently, when processing OR expressions, we only return true when
+		 * all of the OR branches are always false.  This could perhaps be
+		 * expanded to remove OR branches that are provably false.  This may
+		 * be a useful thing to do as it could result in the OR being left
+		 * with a single arg.  That's useful as it would allow the OR
+		 * condition to be replaced with its single argument which may allow
+		 * use of an index for faster filtering on the remaining condition.
+		 */
+		foreach(lc, ((BoolExpr *) restrictinfo->orclause)->args)
+		{
+			Node	   *orarg = (Node *) lfirst(lc);
+
+			if (!IsA(orarg, RestrictInfo) ||
+				!restriction_is_always_false(root, (RestrictInfo *) orarg))
+				return false;
+		}
+		return true;
+	}
+
+	return false;
+}
+#endif							/* #if PG_VERSION_NUM >= 170000 */
+#endif							/* #ifndef __PG_QUERY_PLAN_ */
 
 
 #ifndef __PG_QUERY_PLAN__
@@ -3664,6 +3906,57 @@ void
 distribute_restrictinfo_to_rels(PlannerInfo *root,
 								RestrictInfo *restrictinfo)
 {
+#if PG_VERSION_NUM >= 170000
+
+	Relids		relids = restrictinfo->required_relids;
+
+	if (!bms_is_empty(relids))
+	{
+		int			relid;
+
+		if (bms_get_singleton_member(relids, &relid))
+		{
+			/*
+			 * There is only one relation participating in the clause, so it
+			 * is a restriction clause for that relation.
+			 */
+			add_base_clause_to_rel(root, relid, restrictinfo);
+		}
+		else
+		{
+			/*
+			 * The clause is a join clause, since there is more than one rel
+			 * in its relid set.
+			 */
+
+			/*
+			 * Check for hashjoinable operators.  (We don't bother setting the
+			 * hashjoin info except in true join clauses.)
+			 */
+			check_hashjoinable(restrictinfo);
+
+			/*
+			 * Likewise, check if the clause is suitable to be used with a
+			 * Memoize node to cache inner tuples during a parameterized
+			 * nested loop.
+			 */
+			check_memoizable(restrictinfo);
+
+			/*
+			 * Add clause to the join lists of all the relevant relations.
+			 */
+			add_join_clause_to_rels(root, restrictinfo, relids);
+		}
+	}
+	else
+	{
+		/*
+		 * clause references no rels, and therefore we have no place to attach
+		 * it.  Shouldn't get here if callers are working properly.
+		 */
+		elog(ERROR, "cannot cope with variable-free clause");
+	}
+#else
 	Relids		relids = restrictinfo->required_relids;
 	RelOptInfo *rel;
 
@@ -3718,6 +4011,7 @@ distribute_restrictinfo_to_rels(PlannerInfo *root,
 			elog(ERROR, "cannot cope with variable-free clause");
 			break;
 	}
+#endif
 }
 #endif							/* #ifndef __PG_QUERY_PLAN__ */
 
@@ -4000,6 +4294,7 @@ build_implied_join_equality(PlannerInfo *root,
 }
 #endif							/* #ifndef __PG_QUERY_PLAN__ */
 
+#ifndef __PG_QUERY_PLAN__
 #if PG_VERSION_NUM >= 160000
 /*
  * get_join_domain_min_rels
@@ -4049,6 +4344,8 @@ get_join_domain_min_rels(PlannerInfo *root, Relids domain_relids)
 	return result;
 }
 #endif
+#endif							/* #ifndef __PG_QUERY_PLAN__ */
+
 
 #ifndef __PG_QUERY_PLAN__
 /*
@@ -4227,6 +4524,7 @@ match_foreign_keys_to_quals(PlannerInfo *root)
  *
  *****************************************************************************/
 
+#ifndef __PG_QUERY_PLAN__
 /*
  * check_mergejoinable
  *	  If the restrictinfo's clause is mergejoinable, set the mergejoin
@@ -4263,6 +4561,7 @@ check_mergejoinable(RestrictInfo *restrictinfo)
 	 * is not treated as mergejoinable.
 	 */
 }
+#endif							/* #ifndef __PG_QUERY_PLAN__ */
 
 #ifndef __PG_QUERY_PLAN__
 /*

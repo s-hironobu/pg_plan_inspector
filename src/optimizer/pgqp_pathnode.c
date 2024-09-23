@@ -2403,9 +2403,19 @@ create_valuesscan_path(PlannerInfo *root, RelOptInfo *rel,
  */
 Path *
 #ifdef __PG_QUERY_PLAN__
+#if PG_VERSION_NUM >= 170000
+pgqp_create_ctescan_path(PlannerInfo *root, RelOptInfo *rel,
+						 List *pathkeys, Relids required_outer)
+#else
 pgqp_create_ctescan_path(PlannerInfo *root, RelOptInfo *rel, Relids required_outer)
+#endif
+#else
+#if PG_VERSION_NUM >= 170000
+create_ctescan_path(PlannerInfo *root, RelOptInfo *rel,
+					List *pathkeys, Relids required_outer)
 #else
 create_ctescan_path(PlannerInfo *root, RelOptInfo *rel, Relids required_outer)
+#endif
 #endif
 {
 	Path	   *pathnode = makeNode(Path);

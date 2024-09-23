@@ -12,6 +12,7 @@ OBJS = 	src/pgqp_explain.o \
 	src/qpam.o \
 	src/adjust_rows.o \
 	src/pg_query_plan.o \
+	pg_stat_statements/pg_stat_statements.o \
 	src/optimizer/pgqp_costsize.o \
 	src/optimizer/pgqp_indexpath.o \
 	src/optimizer/pgqp_inherit.o \
@@ -23,11 +24,10 @@ OBJS = 	src/pgqp_explain.o \
 	src/optimizer/pgqp_preunion.o \
 	src/optimizer/pgqp_relnode.o \
 	src/optimizer/pgqp_setrefs.o \
-	src/optimizer/pgqp_allpaths.o \
 	src/optimizer/pgqp_joinrels.o \
+	src/optimizer/pgqp_allpaths.o \
 	src/optimizer/pgqp_planner.o \
-	src/optimizer/pgqp_subselect.o \
-	pg_stat_statements/pg_stat_statements.o
+	src/optimizer/pgqp_subselect.o
 
 src/planid_scanner.c: FLEXFLAGS = -CF -p
 

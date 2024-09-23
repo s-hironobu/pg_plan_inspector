@@ -37,7 +37,7 @@ If you want to confirm the performance of the query progress feature, use [V_0_1
 + psycopg2
 + numpy
 + sklearn
-
++ six
 
 ## 2. Tutorial
 
@@ -52,11 +52,11 @@ If you have not installed python yet, install python3.6 or later in your environ
 Then, install the following packages using the pip command.
 
 ```
-$ pip3 install psycopg2 numpy sklearn
+$ pip3 install psycopg2 numpy scikit-learn six
 
 or
 
-$ pip3 install --user psycopg2 numpy sklearn
+$ pip3 install --user psycopg2 numpy scikit-learn six
 ```
 
 ##### Info: [psycopg2 Document: Installation](https://www.psycopg.org/docs/install.html)

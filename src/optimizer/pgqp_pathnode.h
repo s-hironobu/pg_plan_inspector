@@ -53,7 +53,13 @@ extern SubqueryScanPath *pgqp_create_subqueryscan_path(PlannerInfo *root, RelOpt
 													   bool trivial_pathtarget,
 #endif
 													   List *pathkeys, Relids required_outer);
+
+#if PG_VERSION_NUM >= 170000
+extern Path *pgqp_create_ctescan_path(PlannerInfo *root, RelOptInfo *rel,
+								 List *pathkeys, Relids required_outer);
+#else
 extern Path *pgqp_create_ctescan_path(PlannerInfo *root, RelOptInfo *rel, Relids required_outer);
+#endif
 extern Path *pgqp_create_namedtuplestorescan_path(PlannerInfo *root, RelOptInfo *rel,
 												  Relids required_outer);
 
