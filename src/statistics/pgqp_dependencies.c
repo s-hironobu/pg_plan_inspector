@@ -14,8 +14,10 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#if PG_VERSION_NUM < 170000
 #include "access/sysattr.h"
 #include "catalog/pg_operator.h"
+#endif
 #include "catalog/pg_statistic_ext.h"
 #include "catalog/pg_statistic_ext_data.h"
 #include "lib/stringinfo.h"
@@ -29,7 +31,9 @@
 #endif
 #include "statistics/extended_stats_internal.h"
 #include "statistics/statistics.h"
+#if PG_VERSION_NUM < 170000
 #include "utils/bytea.h"
+#endif
 #include "utils/fmgroids.h"
 #include "utils/fmgrprotos.h"
 #include "utils/lsyscache.h"
@@ -39,6 +43,9 @@
 #include "utils/selfuncs.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
+#if PG_VERSION_NUM >= 170000
+#include "varatt.h"
+#endif
 
 /* size of the struct header fields (magic, type, ndeps) */
 #define SizeOfHeader		(3 * sizeof(uint32))
@@ -529,8 +536,13 @@ statext_dependencies_deserialize(bytea *data)
 		return NULL;
 
 	if (VARSIZE_ANY_EXHDR(data) < SizeOfHeader)
+#if PG_VERSION_NUM >= 160000
+		elog(ERROR, "invalid MVDependencies size %zu (expected at least %zu)",
+			 VARSIZE_ANY_EXHDR(data), SizeOfHeader);
+#else
 		elog(ERROR, "invalid MVDependencies size %zd (expected at least %zd)",
 			 VARSIZE_ANY_EXHDR(data), SizeOfHeader);
+#endif
 
 	/* read the MVDependencies header */
 	dependencies = (MVDependencies *) palloc0(sizeof(MVDependencies));
@@ -561,8 +573,13 @@ statext_dependencies_deserialize(bytea *data)
 	min_expected_size = SizeOfItem(dependencies->ndeps);
 
 	if (VARSIZE_ANY_EXHDR(data) < min_expected_size)
+#if PG_VERSION_NUM >= 160000
+		elog(ERROR, "invalid dependencies size %zu (expected at least %zu)",
+			 VARSIZE_ANY_EXHDR(data), min_expected_size);
+#else
 		elog(ERROR, "invalid dependencies size %zd (expected at least %zd)",
 			 VARSIZE_ANY_EXHDR(data), min_expected_size);
+#endif
 
 	/* allocate space for the MCV items */
 	dependencies = repalloc(dependencies, offsetof(MVDependencies, deps)
@@ -824,7 +841,7 @@ dependency_is_compatible_clause(Node *clause, Index relid, AttrNumber *attnum)
 	}
 	else if (IsA(clause, ScalarArrayOpExpr))
 	{
-		/* If it's an scalar array operator, check for Var IN Const. */
+		/* If it's a scalar array operator, check for Var IN Const. */
 		ScalarArrayOpExpr *expr = (ScalarArrayOpExpr *) clause;
 
 		/*
@@ -1253,7 +1270,7 @@ dependency_is_compatible_expression(Node *clause, Index relid, List *statlist, N
 	}
 	else if (IsA(clause, ScalarArrayOpExpr))
 	{
-		/* If it's an scalar array operator, check for Var IN Const. */
+		/* If it's a scalar array operator, check for Var IN Const. */
 		ScalarArrayOpExpr *expr = (ScalarArrayOpExpr *) clause;
 
 		/*
@@ -1296,7 +1313,9 @@ dependency_is_compatible_expression(Node *clause, Index relid, List *statlist, N
 		ListCell   *lc;
 
 		/* start with no expression (we'll use the first match) */
+#if PG_VERSION_NUM < 160000
 		*expr = NULL;
+#endif
 
 		foreach(lc, bool_expr->args)
 		{
@@ -1728,7 +1747,9 @@ dependencies_clauselist_selectivity(PlannerInfo *root,
 				{
 					int			idx;
 					Node	   *expr;
+#if PG_VERSION_NUM < 160000
 					int			k;
+#endif
 					AttrNumber	unique_attnum = InvalidAttrNumber;
 					AttrNumber	attnum;
 
@@ -1776,17 +1797,29 @@ dependencies_clauselist_selectivity(PlannerInfo *root,
 					expr = (Node *) list_nth(stat->exprs, idx);
 
 					/* try to find the expression in the unique list */
+#if PG_VERSION_NUM >= 160000
+					for (int m = 0; m < unique_exprs_cnt; m++)
+#else
 					for (k = 0; k < unique_exprs_cnt; k++)
+#endif
 					{
 						/*
 						 * found a matching unique expression, use the attnum
 						 * (derived from index of the unique expression)
 						 */
+#if PG_VERSION_NUM >= 160000
+						if (equal(unique_exprs[m], expr))
+						{
+							unique_attnum = -(m + 1) + attnum_offset;
+							break;
+						}
+#else
 						if (equal(unique_exprs[k], expr))
 						{
 							unique_attnum = -(k + 1) + attnum_offset;
 							break;
 						}
+#endif
 					}
 
 					/*

@@ -21,17 +21,21 @@
 #include "access/htup_details.h"
 #include "access/table.h"
 #include "catalog/indexing.h"
+#if PG_VERSION_NUM < 170000
 #include "catalog/pg_collation.h"
+#endif
 #include "catalog/pg_statistic_ext.h"
 #include "catalog/pg_statistic_ext_data.h"
-#include "executor/executor.h"
 #if PG_VERSION_NUM >= 150000
 #include "commands/defrem.h"
 #endif
 #include "commands/progress.h"
+#include "executor/executor.h"
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
+#if PG_VERSION_NUM < 170000
 #include "optimizer/clauses.h"
+#endif
 #include "optimizer/optimizer.h"
 #if PG_VERSION_NUM >= 150000
 #include "parser/parsetree.h"
@@ -51,7 +55,9 @@
 #include "utils/rel.h"
 #include "utils/selfuncs.h"
 #include "utils/syscache.h"
+#if PG_VERSION_NUM < 170000
 #include "utils/typcache.h"
+#endif
 
 /*
  * To avoid consuming too much memory during analysis and/or too much space
@@ -92,8 +98,13 @@ static void statext_store(Oid statOid,
 						  MVNDistinct *ndistinct, MVDependencies *dependencies,
 						  MCVList *mcv, Datum exprs, VacAttrStats **stats);
 #endif
+#if PG_VERSION_NUM >= 160000
+static int	statext_compute_stattarget(int stattarget,
+									   int nattrs, VacAttrStats **stats);
+#else
 static int	statext_compute_stattarget(int stattarget,
 									   int natts, VacAttrStats **stats);
+#endif
 
 /* Information needed to analyze a single simple expression. */
 typedef struct AnlExprData
@@ -109,7 +120,11 @@ static Datum serialize_expr_stats(AnlExprData *exprdata, int nexprs);
 static Datum expr_fetch_func(VacAttrStatsP stats, int rownum, bool *isNull);
 static AnlExprData *build_expr_data(List *exprs, int stattarget);
 
+#if PG_VERSION_NUM >= 160000
+static StatsBuildData *make_build_data(Relation rel, StatExtEntry *stat,
+#else
 static StatsBuildData *make_build_data(Relation onerel, StatExtEntry *stat,
+#endif
 									   int numrows, HeapTuple *rows,
 									   VacAttrStats **stats, int stattarget);
 
@@ -196,7 +211,11 @@ BuildRelationExtStatistics(Relation onerel, double totalrows,
 									  natts, vacattrstats);
 		if (!stats)
 		{
+#if PG_VERSION_NUM >= 170000
+			if (!AmAutoVacuumWorkerProcess())
+#else
 			if (!IsAutoVacuumWorkerProcess())
+#endif
 				ereport(WARNING,
 						(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
 						 errmsg("statistics object \"%s.%s\" could not be computed for relation \"%s.%s\"",
@@ -404,8 +423,13 @@ statext_compute_stattarget(int stattarget, int nattrs, VacAttrStats **stats)
 	for (i = 0; i < nattrs; i++)
 	{
 		/* keep the maximum statistics target */
+#if PG_VERSION_NUM >= 170000
+		if (stats[i]->attstattarget > stattarget)
+			stattarget = stats[i]->attstattarget;
+#else
 		if (stats[i]->attr->attstattarget > stattarget)
 			stattarget = stats[i]->attr->attstattarget;
+#endif
 	}
 
 	/*
@@ -417,7 +441,11 @@ statext_compute_stattarget(int stattarget, int nattrs, VacAttrStats **stats)
 		stattarget = default_statistics_target;
 
 	/* As this point we should have a valid statistics target. */
+#if PG_VERSION_NUM >= 170000
+	Assert((stattarget >= 0) && (stattarget <= MAX_STATISTICS_TARGET));
+#else
 	Assert((stattarget >= 0) && (stattarget <= 10000));
+#endif
 
 	return stattarget;
 }
@@ -495,17 +523,29 @@ fetch_statentries_for_relation(Relation pg_statext, Oid relid)
 		entry->statOid = staForm->oid;
 		entry->schema = get_namespace_name(staForm->stxnamespace);
 		entry->name = pstrdup(NameStr(staForm->stxname));
+#if PG_VERSION_NUM < 170000
 		entry->stattarget = staForm->stxstattarget;
+#endif
 		for (i = 0; i < staForm->stxkeys.dim1; i++)
 		{
 			entry->columns = bms_add_member(entry->columns,
 											staForm->stxkeys.values[i]);
 		}
 
+#if PG_VERSION_NUM >= 170000
+		datum = SysCacheGetAttr(STATEXTOID, htup, Anum_pg_statistic_ext_stxstattarget, &isnull);
+		entry->stattarget = isnull ? -1 : DatumGetInt16(datum);
+#endif
+
 		/* decode the stxkind char array into a list of chars */
+#if PG_VERSION_NUM >= 160000
+		datum = SysCacheGetAttrNotNull(STATEXTOID, htup,
+									   Anum_pg_statistic_ext_stxkind);
+#else
 		datum = SysCacheGetAttr(STATEXTOID, htup,
 								Anum_pg_statistic_ext_stxkind, &isnull);
 		Assert(!isnull);
+#endif
 		arr = DatumGetArrayTypeP(datum);
 		if (ARR_NDIM(arr) != 1 ||
 			ARR_HASNULL(arr) ||
@@ -573,14 +613,16 @@ examine_attribute(Node *expr)
 	bool		ok;
 
 	/*
-	 * Create the VacAttrStats struct.  Note that we only have a copy of the
-	 * fixed fields of the pg_attribute tuple.
+	 * Create the VacAttrStats struct.
 	 */
 	stats = (VacAttrStats *) palloc0(sizeof(VacAttrStats));
-
+#if PG_VERSION_NUM >= 170000
+	stats->attstattarget = -1;
+#else
 	/* fake the attribute */
 	stats->attr = (Form_pg_attribute) palloc0(ATTRIBUTE_FIXED_PART_SIZE);
 	stats->attr->attstattarget = -1;
+#endif
 
 	/*
 	 * When analyzing an expression, believe the expression tree's type not
@@ -634,7 +676,9 @@ examine_attribute(Node *expr)
 	if (!ok || stats->compute_stats == NULL || stats->minrows <= 0)
 	{
 		heap_freetuple(typtuple);
+#if PG_VERSION_NUM < 170000
 		pfree(stats->attr);
+#endif
 		pfree(stats);
 		return NULL;
 	}
@@ -663,6 +707,15 @@ examine_expression(Node *expr, int stattarget)
 	 */
 	stats = (VacAttrStats *) palloc0(sizeof(VacAttrStats));
 
+#if PG_VERSION_NUM >= 170000
+	/*
+	 * We can't have statistics target specified for the expression, so we
+	 * could use either the default_statistics_target, or the target computed
+	 * for the extended statistics. The second option seems more reasonable.
+	 */
+	stats->attstattarget = stattarget;
+#endif
+
 	/*
 	 * When analyzing an expression, believe the expression tree's type.
 	 */
@@ -677,6 +730,7 @@ examine_expression(Node *expr, int stattarget)
 	 */
 	stats->attrcollid = exprCollation(expr);
 
+#if PG_VERSION_NUM < 170000
 	/*
 	 * We don't have any pg_attribute for expressions, so let's fake something
 	 * reasonable into attstattarget, which is the only thing std_typanalyze
@@ -695,6 +749,7 @@ examine_expression(Node *expr, int stattarget)
 	stats->attr->attrelid = InvalidOid;
 	stats->attr->attnum = InvalidAttrNumber;
 	stats->attr->atttypid = stats->attrtypid;
+#endif
 
 	typtuple = SearchSysCacheCopy1(TYPEOID,
 								   ObjectIdGetDatum(stats->attrtypid));
@@ -786,11 +841,13 @@ lookup_var_attr_stats(Relation rel, Bitmapset *attrs, List *exprs,
 			return NULL;
 		}
 
+#if PG_VERSION_NUM < 170000
 		/*
 		 * Sanity check that the column is not dropped - stats should have
 		 * been removed in this case.
 		 */
 		Assert(!stats[i]->attr->attisdropped);
+#endif
 
 		i++;
 	}
@@ -1210,8 +1267,13 @@ build_sorted_items(StatsBuildData *data, int *nitems,
 
 	/* do the sort, using the multi-sort */
 #if PG_VERSION_NUM >= 150000
+#if PG_VERSION_NUM >= 160000
+	qsort_interruptible(items, nrows, sizeof(SortItem),
+						multi_sort_compare, mss);
+#else
 	qsort_interruptible((void *) items, nrows, sizeof(SortItem),
 						multi_sort_compare, mss);
+#endif
 #else
 	qsort_arg((void *) items, nrows, sizeof(SortItem),
 			  multi_sort_compare, mss);
@@ -1714,6 +1776,9 @@ statext_is_compatible_clause(PlannerInfo *root, Node *clause, Index relid,
 							 Bitmapset **attnums, List **exprs)
 {
 	RangeTblEntry *rte = root->simple_rte_array[relid];
+#if PG_VERSION_NUM >= 160000
+	RelOptInfo *rel = root->simple_rel_array[relid];
+#endif
 #if PG_VERSION_NUM >= 150000
 	RestrictInfo *rinfo;
 #else
@@ -1771,10 +1836,13 @@ statext_is_compatible_clause(PlannerInfo *root, Node *clause, Index relid,
 		return false;
 
 	/*
-	 * Check that the user has permission to read all required attributes. Use
-	 * checkAsUser if it's set, in case we're accessing the table via a view.
+	 * Check that the user has permission to read all required attributes.
 	 */
+#if PG_VERSION_NUM >= 160000
+	userid = OidIsValid(rel->userid) ? rel->userid : GetUserId();
+#else
 	userid = rte->checkAsUser ? rte->checkAsUser : GetUserId();
+#endif
 
 	/* Table-level SELECT privilege is sufficient for all columns */
 	if (pg_class_aclcheck(rte->relid, userid, ACL_SELECT) != ACLCHECK_OK)
@@ -2406,8 +2474,12 @@ compute_expr_stats(Relation onerel, double totalrows,
 		if (tcnt > 0)
 		{
 			AttributeOpts *aopt =
-			get_attribute_options(stats->attr->attrelid,
-								  stats->attr->attnum);
+#if PG_VERSION_NUM >= 170000
+				get_attribute_options(onerel->rd_id, stats->tupattnum);
+#else
+				get_attribute_options(stats->attr->attrelid,
+									  stats->attr->attnum);
+#endif
 
 			stats->exprvals = exprvals;
 			stats->exprnulls = exprnulls;
@@ -2430,7 +2502,11 @@ compute_expr_stats(Relation onerel, double totalrows,
 
 		ExecDropSingleTupleTableSlot(slot);
 		FreeExecutorState(estate);
+#if PG_VERSION_NUM >= 170000
+		MemoryContextReset(expr_context);
+#else
 		MemoryContextResetAndDeleteChildren(expr_context);
+#endif
 	}
 
 	MemoryContextSwitchTo(old_context);
@@ -2566,10 +2642,14 @@ serialize_expr_stats(AnlExprData *exprdata, int nexprs)
 
 				for (n = 0; n < nnum; n++)
 					numdatums[n] = Float4GetDatum(stats->stanumbers[k][n]);
+#if PG_VERSION_NUM >= 160000
+				arry = construct_array_builtin(numdatums, nnum, FLOAT4OID);
+#else
 				/* XXX knows more than it should about type float4: */
 				arry = construct_array(numdatums, nnum,
 									   FLOAT4OID,
 									   sizeof(float4), true, TYPALIGN_INT);
+#endif
 				values[i++] = PointerGetDatum(arry);	/* stanumbersN */
 			}
 			else

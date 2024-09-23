@@ -17,19 +17,25 @@
 #include <math.h>
 
 #include "access/htup_details.h"
+#if PG_VERSION_NUM < 170000
 #include "catalog/pg_collation.h"
+#endif
 #include "catalog/pg_statistic_ext.h"
 #include "catalog/pg_statistic_ext_data.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "nodes/nodeFuncs.h"
+#if PG_VERSION_NUM < 170000
 #include "optimizer/clauses.h"
+#endif
 #include "statistics/extended_stats_internal.h"
 #include "statistics/statistics.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#if PG_VERSION_NUM < 170000
 #include "utils/bytea.h"
 #include "utils/fmgroids.h"
+#endif
 #include "utils/fmgrprotos.h"
 #include "utils/lsyscache.h"
 #include "utils/selfuncs.h"
@@ -462,8 +468,13 @@ build_distinct_groups(int numrows, SortItem *items, MultiSortSupport mss,
 
 	/* Sort the distinct groups by frequency (in descending order). */
 #if PG_VERSION_NUM >= 150000
+#if PG_VERSION_NUM >= 160000
+	qsort_interruptible(groups, ngroups, sizeof(SortItem),
+						compare_sort_item_count, NULL);
+#else
 	qsort_interruptible((void *) groups, ngroups, sizeof(SortItem),
 						compare_sort_item_count, NULL);
+#endif
 #else
 	pg_qsort((void *) groups, ngroups, sizeof(SortItem),
 			 compare_sort_item_count);
@@ -538,8 +549,13 @@ build_column_frequencies(SortItem *groups, int ngroups,
 
 		/* sort the values, deduplicate */
 #if PG_VERSION_NUM >= 150000
+#if PG_VERSION_NUM >= 160000
+		qsort_interruptible(result[dim], ngroups, sizeof(SortItem),
+							sort_item_compare, ssup);
+#else
 		qsort_interruptible((void *) result[dim], ngroups, sizeof(SortItem),
 							sort_item_compare, ssup);
+#endif
 #else
 		qsort_arg((void *) result[dim], ngroups, sizeof(SortItem),
 				  sort_item_compare, ssup);
@@ -1059,8 +1075,13 @@ statext_mcv_deserialize(bytea *data)
 	 * header fields one by one, so we need to ignore struct alignment.
 	 */
 	if (VARSIZE_ANY(data) < MinSizeOfMCVList)
+#if PG_VERSION_NUM >= 160000
+		elog(ERROR, "invalid MCV size %zu (expected at least %zu)",
+			 VARSIZE_ANY(data), MinSizeOfMCVList);
+#else
 		elog(ERROR, "invalid MCV size %zd (expected at least %zu)",
 			 VARSIZE_ANY(data), MinSizeOfMCVList);
+#endif
 
 	/* read the MCV list header */
 	mcvlist = (MCVList *) palloc0(offsetof(MCVList, items));
@@ -1120,8 +1141,13 @@ statext_mcv_deserialize(bytea *data)
 	 * to do this check first, before accessing the dimension info.
 	 */
 	if (VARSIZE_ANY(data) < expected_size)
+#if PG_VERSION_NUM >= 160000
+		elog(ERROR, "invalid MCV size %zu (expected %zu)",
+			 VARSIZE_ANY(data), expected_size);
+#else
 		elog(ERROR, "invalid MCV size %zd (expected %zu)",
 			 VARSIZE_ANY(data), expected_size);
+#endif
 
 	/* Now copy the array of type Oids. */
 	memcpy(mcvlist->types, ptr, sizeof(Oid) * ndims);
@@ -1152,8 +1178,13 @@ statext_mcv_deserialize(bytea *data)
 	 * check on size.
 	 */
 	if (VARSIZE_ANY(data) != expected_size)
+#if PG_VERSION_NUM >= 160000
+		elog(ERROR, "invalid MCV size %zu (expected %zu)",
+			 VARSIZE_ANY(data), expected_size);
+#else
 		elog(ERROR, "invalid MCV size %zd (expected %zu)",
 			 VARSIZE_ANY(data), expected_size);
+#endif
 
 	/*
 	 * We need an array of Datum values for each dimension, so that we can
@@ -1471,8 +1502,13 @@ pg_stats_ext_mcvlist_items(PG_FUNCTION_ARGS)
 		}
 
 		values[0] = Int32GetDatum(funcctx->call_cntr);
+#if PG_VERSION_NUM >= 160000
+		values[1] = makeArrayResult(astate_values, CurrentMemoryContext);
+		values[2] = makeArrayResult(astate_nulls, CurrentMemoryContext);
+#else
 		values[1] = PointerGetDatum(makeArrayResult(astate_values, CurrentMemoryContext));
 		values[2] = PointerGetDatum(makeArrayResult(astate_nulls, CurrentMemoryContext));
+#endif
 		values[3] = Float8GetDatum(item->frequency);
 		values[4] = Float8GetDatum(item->base_frequency);
 
@@ -1666,13 +1702,17 @@ mcv_get_match_bitmap(PlannerInfo *root, List *clauses,
 					 Bitmapset *keys, List *exprs,
 					 MCVList *mcvlist, bool is_or)
 {
+#if PG_VERSION_NUM < 160000
 	int			i;
+#endif
 	ListCell   *l;
 	bool	   *matches;
 
 	/* The bitmap may be partially built. */
 	Assert(clauses != NIL);
+#if PG_VERSION_NUM < 160000
 	Assert(list_length(clauses) >= 1);
+#endif
 	Assert(mcvlist != NULL);
 	Assert(mcvlist->nitems > 0);
 	Assert(mcvlist->nitems <= STATS_MCVLIST_MAX_ITEMS);
@@ -1731,7 +1771,11 @@ mcv_get_match_bitmap(PlannerInfo *root, List *clauses,
 			 * can skip items that were already ruled out, and terminate if
 			 * there are no remaining MCV items that might possibly match.
 			 */
+#if PG_VERSION_NUM >= 160000
+			for (int i = 0; i < mcvlist->nitems; i++)
+#else
 			for (i = 0; i < mcvlist->nitems; i++)
+#endif
 			{
 				bool		match = true;
 				MCVItem    *item = &mcvlist->items[i];
@@ -1848,7 +1892,11 @@ mcv_get_match_bitmap(PlannerInfo *root, List *clauses,
 			 * can skip items that were already ruled out, and terminate if
 			 * there are no remaining MCV items that might possibly match.
 			 */
+#if PG_VERSION_NUM >= 160000
+			for (int i = 0; i < mcvlist->nitems; i++)
+#else
 			for (i = 0; i < mcvlist->nitems; i++)
+#endif
 			{
 				int			j;
 #if PG_VERSION_NUM >= 150000
@@ -1923,7 +1971,11 @@ mcv_get_match_bitmap(PlannerInfo *root, List *clauses,
 			 * can skip items that were already ruled out, and terminate if
 			 * there are no remaining MCV items that might possibly match.
 			 */
+#if PG_VERSION_NUM >= 160000
+			for (int i = 0; i < mcvlist->nitems; i++)
+#else
 			for (i = 0; i < mcvlist->nitems; i++)
+#endif
 			{
 				bool		match = false;	/* assume mismatch */
 				MCVItem    *item = &mcvlist->items[i];
@@ -2016,7 +2068,11 @@ mcv_get_match_bitmap(PlannerInfo *root, List *clauses,
 			 * can skip items that were already ruled out, and terminate if
 			 * there are no remaining MCV items that might possibly match.
 			 */
+#if PG_VERSION_NUM >= 160000
+			for (int i = 0; i < mcvlist->nitems; i++)
+#else
 			for (i = 0; i < mcvlist->nitems; i++)
+#endif
 			{
 				MCVItem    *item = &mcvlist->items[i];
 				bool		match = false;
@@ -2043,7 +2099,11 @@ mcv_get_match_bitmap(PlannerInfo *root, List *clauses,
 			 * can skip items that were already ruled out, and terminate if
 			 * there are no remaining MCV items that might possibly match.
 			 */
+#if PG_VERSION_NUM >= 160000
+			for (int i = 0; i < mcvlist->nitems; i++)
+#else
 			for (i = 0; i < mcvlist->nitems; i++)
+#endif
 			{
 				bool		match;
 				MCVItem    *item = &mcvlist->items[i];
