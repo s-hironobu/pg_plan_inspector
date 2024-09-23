@@ -136,10 +136,8 @@ static void show_sort_info(SortState *sortstate, ExplainState *es);
 static void show_incremental_sort_info(IncrementalSortState *incrsortstate,
 									   ExplainState *es);
 static void show_hash_info(HashState *hashstate, ExplainState *es);
-#if PG_VERSION_NUM >= 140000
 static void show_memoize_info(MemoizeState *mstate, List *ancestors,
 							  ExplainState *es);
-#endif
 static void show_hashagg_info(AggState *hashstate, ExplainState *es);
 static void show_tidbitmap_info(BitmapHeapScanState *planstate,
 								ExplainState *es);
@@ -189,9 +187,6 @@ static void ExplainIndentText(ExplainState *es);
 static void ExplainJSONLineEnding(ExplainState *es);
 static void ExplainYAMLLineStarting(ExplainState *es);
 static void escape_yaml(StringInfo buf, const char *str);
-#if PG_VERSION_NUM < 140000
-static void ExplainPrintSettings(ExplainState *es);
-#endif
 #else
 static void ExplainAddState(Instrumentation *instrument, ExplainState *es);
 #endif							/* __PG_QUERY_PLAN__ */
@@ -298,19 +293,7 @@ ExplainQuery(ParseState *pstate, ExplainStmt *stmt,
 	 * came straight from the parser, or suitable locks were acquired by
 	 * plancache.c.
 	 */
-#ifdef PG_VERSION_NUM >= 140000
 	rewritten = QueryRewrite(castNode(Query, stmt->query));
-#else
-
-	/*
-	 * Because the rewriter and planner tend to scribble on the input, we make
-	 * a preliminary copy of the source querytree.  This prevents problems in
-	 * the case that the EXPLAIN is in a portal or plpgsql function and is
-	 * executed repeatedly.  (See also the same hack in DECLARE CURSOR and
-	 * PREPARE.)  XXX FIXME someday.
-	 */
-	rewritten = QueryRewrite(castNode(Query, copyObject(stmt->query)));
-#endif
 
 	/* emit opening boilerplate */
 	ExplainBeginOutput(es);
@@ -503,8 +486,6 @@ ExplainOneUtility(Node *utilityStmt, IntoClause *into, ExplainState *es,
 		CreateTableAsStmt *ctas = (CreateTableAsStmt *) utilityStmt;
 		List	   *rewritten;
 
-#if PG_VERSION_NUM >= 140000
-
 		/*
 		 * Check if the relation exists or not.  This is done at this stage to
 		 * avoid query planning or execution.
@@ -520,7 +501,6 @@ ExplainOneUtility(Node *utilityStmt, IntoClause *into, ExplainState *es,
 					 (int) ctas->objtype);
 			return;
 		}
-#endif
 
 		rewritten = QueryRewrite(castNode(Query, copyObject(ctas->query)));
 		Assert(list_length(rewritten) == 1);
@@ -804,218 +784,6 @@ ExplainPrintSettings(ExplainState *es)
 		ExplainPropertyText("Settings", str.data, es);
 	}
 }
-#endif							/* __PG_QUERY_PLAN__ */
-
-
-#ifndef __PG_QUERY_PLAN__
-#if PG_VERSION_NUM < 140000
-
-typedef struct BufferUsage
-{
-	long		shared_blks_hit;	/* # of shared buffer hits */
-	long		shared_blks_read;	/* # of shared disk blocks read */
-	long		shared_blks_dirtied;	/* # of shared blocks dirtied */
-	long		shared_blks_written;	/* # of shared disk blocks written */
-	long		local_blks_hit; /* # of local buffer hits */
-	long		local_blks_read;	/* # of local disk blocks read */
-	long		local_blks_dirtied; /* # of local blocks dirtied */
-	long		local_blks_written; /* # of local disk blocks written */
-	long		temp_blks_read; /* # of temp blocks read */
-	long		temp_blks_written;	/* # of temp blocks written */
-	instr_time	blk_read_time;	/* time spent reading */
-	instr_time	blk_write_time; /* time spent writing */
-} BufferUsage;
-
-typedef struct WalUsage
-{
-	long		wal_records;	/* # of WAL records produced */
-	long		wal_fpi;		/* # of WAL full page images produced */
-	uint64		wal_bytes;		/* size of WAL records produced */
-} WalUsage;
-
-/* Flag bits included in InstrAlloc's instrument_options bitmask */
-typedef enum InstrumentOption
-{
-	INSTRUMENT_TIMER = 1 << 0,	/* needs timer (and row counts) */
-	INSTRUMENT_BUFFERS = 1 << 1,	/* needs buffer usage */
-	INSTRUMENT_ROWS = 1 << 2,	/* needs row count */
-	INSTRUMENT_WAL = 1 << 3,	/* needs WAL usage */
-	INSTRUMENT_ALL = PG_INT32_MAX
-} InstrumentOption;
-
-typedef struct Instrumentation
-{
-	/* Parameters set at node creation: */
-	bool		need_timer;		/* true if we need timer data */
-	bool		need_bufusage;	/* true if we need buffer usage data */
-	bool		need_walusage;	/* true if we need WAL usage data */
-	/* Info about current plan cycle: */
-	bool		running;		/* true if we've completed first tuple */
-	Stop		End
-	instr_time	starttime;		/* start time of current iteration of node */
-	Stop		End
-	instr_time	counter;		/* accumulated runtime for this node */
-	Stop		End
-	double		firsttuple;		/* time for first tuple of this cycle */
-	Stop		End
-	double		tuplecount;		/* # of tuples emitted so far this cycle */
-	Stop		End
-	BufferUsage bufusage_start; /* buffer usage at start */
-	Start		Stop
-	WalUsage	walusage_start; /* WAL usage at start */
-	/* Accumulated statistics across all completed cycles: */
-	double		startup;		/* total startup time (in seconds) */
-				End
-	double		total;			/* total time (in seconds) */
-				End
-	double		ntuples;		/* total tuples produced */
-				End
-	double		ntuples2;		/* secondary node-specific tuple counter */
-				End
-	double		nloops;			/* # of run cycles for this node */
-				End
-	double		nfiltered1;		/* # of tuples removed by scanqual or joinqual */
-	double		nfiltered2;		/* # of tuples removed by "other" quals */
-	BufferUsage bufusage;		/* total buffer usage */
-				Stop
-	WalUsage	walusage;		/* total WAL usage */
-} Instrumentation;
-
-
-typedef struct Instrumentation
-{
-	/* Info about current plan cycle: */
-	bool		running;
-				Stop = true End = false
-	instr_time starttime;
-				Stop = ? End = 0
-	instr_time counter;
-				Stop += starttime End = 0
-	double firsttuple;
-				Stop[å ˆ å › žã  ®DOUBLEcounter] End = 0
-	double tuplecount;
-				Stop += nTuples End = 0
-	BufferUsage bufusage_start;
-	Start		Stop
-	/* Accumulated statistics across all completed cycles: */
-	double		startup;
-				End += firsttuple ? ANALYZE 1000 * startup / nloops
-	double		total;
-				End += DOUBLEcounter ANALYZE 1000 * total / nloops
-	double		ntuples;
-				End += tuplecount ANALYZE ntuples / nloops
-	double		ntuples2;
-	double		nloops;
-				End += 1 ANALYZE nloops
-	double		nfiltered1;
-	double		nfiltered2;
-	BufferUsage bufusage;
-				Stop
-} Instrumentation;
-
-
-/* Entry to a plan node */
-void
-InstrStartNode(Instrumentation *instr)
-{
-	/* save buffer usage totals at node entry, if needed */
-	if (instr->need_bufusage)
-		instr->bufusage_start = pgBufferUsage;
-}
-
-/* Exit from a plan node */
-void
-InstrStopNode(Instrumentation *instr, double nTuples)
-{
-	instr_time	endtime;
-
-	/* count the returned tuples */
-	instr->tuplecount += nTuples;
-
-	/* let's update the time only if the timer was requested */
-	if (instr->need_timer)
-	{
-		if (INSTR_TIME_IS_ZERO(instr->starttime))
-			elog(ERROR, "InstrStopNode called without start");
-
-		INSTR_TIME_SET_CURRENT(endtime);
-		INSTR_TIME_ACCUM_DIFF(instr->counter, endtime, instr->starttime);
-		INSTR_TIME_SET_ZERO(instr->starttime);
-	}
-
-	/* Add delta of buffer usage since entry to node's totals */
-	if (instr->need_bufusage)
-		BufferUsageAccumDiff(&instr->bufusage,
-							 &pgBufferUsage, &instr->bufusage_start);
-
-	/* Is this the first tuple of this cycle? */
-	if (!instr->running)
-	{
-		instr->running = true;
-		instr->firsttuple = INSTR_TIME_GET_DOUBLE(instr->counter);
-	}
-}
-
-/* Finish a run cycle for a plan node */
-void
-InstrEndLoop(Instrumentation *instr)
-{
-	double		totaltime;
-
-	/* Skip if nothing has happened, or already shut down */
-	if (!instr->running)
-		return;
-
-	if (!INSTR_TIME_IS_ZERO(instr->starttime))
-		elog(ERROR, "InstrEndLoop called on running node");
-
-	/* Accumulate per-cycle statistics into totals */
-	totaltime = INSTR_TIME_GET_DOUBLE(instr->counter);
-
-	instr->startup += instr->firsttuple;
-	instr->total += totaltime;
-	instr->ntuples += instr->tuplecount;
-	instr->nloops += 1;
-
-	/* Reset for next cycle (if any) */
-	instr->running = false;
-	INSTR_TIME_SET_ZERO(instr->starttime);
-	INSTR_TIME_SET_ZERO(instr->counter);
-	instr->firsttuple = 0;
-	instr->tuplecount = 0;
-}
-
-/* aggregate instrumentation information */
-void
-InstrAggNode(Instrumentation *dst, Instrumentation *add)
-{
-	if (!dst->running && add->running)
-	{
-		dst->running = true;
-		dst->firsttuple = add->firsttuple;
-	}
-	else if (dst->running && add->running && dst->firsttuple > add->firsttuple)
-		dst->firsttuple = add->firsttuple;
-
-	INSTR_TIME_ADD(dst->counter, add->counter);
-
-	dst->tuplecount += add->tuplecount;
-	dst->startup += add->startup;
-	dst->total += add->total;
-	dst->ntuples += add->ntuples;
-	dst->ntuples2 += add->ntuples2;
-	dst->nloops += add->nloops;
-	dst->nfiltered1 += add->nfiltered1;
-	dst->nfiltered2 += add->nfiltered2;
-
-	/* Add delta of buffer usage since entry to node's totals */
-	if (dst->need_bufusage)
-		BufferUsageAdd(&dst->bufusage, &add->bufusage);
-
-	if (dst->need_walusage)
-		WalUsageAdd(&dst->walusage, &add->walusage);
-}
-#endif							/* PG_VERSION_NUM < 140000 */
 #endif							/* __PG_QUERY_PLAN__ */
 
 
@@ -1526,9 +1294,7 @@ ExplainPreScanNode(PlanState *planstate, Bitmapset **rels_used)
 		case T_IndexOnlyScan:
 		case T_BitmapHeapScan:
 		case T_TidScan:
-#if PG_VERSION_NUM >= 140000
 		case T_TidRangeScan:
-#endif
 		case T_SubqueryScan:
 		case T_FunctionScan:
 		case T_TableFuncScan:
@@ -1705,11 +1471,9 @@ ExplainNode(PlanState *planstate, List *ancestors,
 		case T_TidScan:
 			pname = sname = "Tid Scan";
 			break;
-#if PG_VERSION_NUM >= 140000
 		case T_TidRangeScan:
 			pname = sname = "Tid Range Scan";
 			break;
-#endif
 		case T_SubqueryScan:
 			pname = sname = "Subquery Scan";
 			break;
@@ -1767,11 +1531,9 @@ ExplainNode(PlanState *planstate, List *ancestors,
 		case T_Material:
 			pname = sname = "Materialize";
 			break;
-#if PG_VERSION_NUM >= 140000
 		case T_Memoize:
 			pname = sname = "Memoize";
 			break;
-#endif
 		case T_Sort:
 			pname = sname = "Sort";
 			break;
@@ -1882,10 +1644,8 @@ ExplainNode(PlanState *planstate, List *ancestors,
 		}
 		if (plan->parallel_aware)
 			appendStringInfoString(es->str, "Parallel ");
-#if PG_VERSION_NUM >= 140000
 		if (plan->async_capable)
 			appendStringInfoString(es->str, "Async ");
-#endif
 		appendStringInfoString(es->str, pname);
 		es->indent++;
 	}
@@ -1905,9 +1665,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 		if (custom_name)
 			ExplainPropertyText("Custom Plan Provider", custom_name, es);
 		ExplainPropertyBool("Parallel Aware", plan->parallel_aware, es);
-#if PG_VERSION_NUM >= 140000
 		ExplainPropertyBool("Async Capable", plan->async_capable, es);
-#endif
 	}
 
 	switch (nodeTag(plan))
@@ -1916,9 +1674,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 		case T_SampleScan:
 		case T_BitmapHeapScan:
 		case T_TidScan:
-#if PG_VERSION_NUM >= 140000
 		case T_TidRangeScan:
-#endif
 		case T_SubqueryScan:
 		case T_FunctionScan:
 		case T_TableFuncScan:
@@ -2433,7 +2189,6 @@ ExplainNode(PlanState *planstate, List *ancestors,
 											   planstate, es);
 			}
 			break;
-#if PG_VERSION_NUM >= 140000
 		case T_TidRangeScan:
 			{
 				/*
@@ -2451,7 +2206,6 @@ ExplainNode(PlanState *planstate, List *ancestors,
 											   planstate, es);
 			}
 			break;
-#endif
 		case T_ForeignScan:
 			show_scan_qual(plan->qual, "Filter", planstate, ancestors, es);
 			if (plan->qual)
@@ -2552,12 +2306,10 @@ ExplainNode(PlanState *planstate, List *ancestors,
 		case T_Hash:
 			show_hash_info(castNode(HashState, planstate), es);
 			break;
-#if PG_VERSION_NUM >= 140000
 		case T_Memoize:
 			show_memoize_info(castNode(MemoizeState, planstate), ancestors,
 							  es);
 			break;
-#endif
 		default:
 			break;
 	}
@@ -2653,9 +2405,6 @@ ExplainNode(PlanState *planstate, List *ancestors,
 	haschildren = planstate->initPlan ||
 		outerPlanState(planstate) ||
 		innerPlanState(planstate) ||
-#if PG_VERSION_NUM < 140000
-		IsA(plan, ModifyTable) ||
-#endif
 		IsA(plan, Append) ||
 		IsA(plan, MergeAppend) ||
 		IsA(plan, BitmapAnd) ||
@@ -2688,13 +2437,6 @@ ExplainNode(PlanState *planstate, List *ancestors,
 	/* special child plans */
 	switch (nodeTag(plan))
 	{
-#if PG_VERSION_NUM < 140000
-		case T_ModifyTable:
-			ExplainMemberNodes(((ModifyTableState *) planstate)->mt_plans,
-							   ((ModifyTableState *) planstate)->mt_nplans,
-							   ancestors, es);
-			break;
-#endif
 		case T_Append:
 			ExplainMemberNodes(((AppendState *) planstate)->appendplans,
 							   ((AppendState *) planstate)->as_nplans,
@@ -3662,7 +3404,6 @@ show_hash_info(HashState *hashstate, ExplainState *es)
 #endif							/* __PG_QUERY_PLAN__ */
 }
 
-#if PG_VERSION_NUM >= 140000
 /*
  * Show information on memoize hits/misses/evictions and memory usage.
  */
@@ -3807,7 +3548,6 @@ show_memoize_info(MemoizeState *mstate, List *ancestors, ExplainState *es)
 	}
 #endif							/* __PG_QUERY_PLAN__ */
 }
-#endif							/* PG_VERSION_NUM >= 140000 */
 
 /*
  * Show information on hash aggregate memory usage and batches.
@@ -4110,7 +3850,6 @@ show_buffer_usage(ExplainState *es, const BufferUsage *usage, bool planning)
 			if (has_shared)
 			{
 				appendStringInfoString(es->str, " shared");
-#if PG_VERSION_NUM >= 140000
 				if (usage->shared_blks_hit > 0)
 					appendStringInfo(es->str, " hit=%lld",
 									 (long long) usage->shared_blks_hit);
@@ -4123,27 +3862,12 @@ show_buffer_usage(ExplainState *es, const BufferUsage *usage, bool planning)
 				if (usage->shared_blks_written > 0)
 					appendStringInfo(es->str, " written=%lld",
 									 (long long) usage->shared_blks_written);
-#else
-				if (usage->shared_blks_hit > 0)
-					appendStringInfo(es->str, " hit=%ld",
-									 usage->shared_blks_hit);
-				if (usage->shared_blks_read > 0)
-					appendStringInfo(es->str, " read=%ld",
-									 usage->shared_blks_read);
-				if (usage->shared_blks_dirtied > 0)
-					appendStringInfo(es->str, " dirtied=%ld",
-									 usage->shared_blks_dirtied);
-				if (usage->shared_blks_written > 0)
-					appendStringInfo(es->str, " written=%ld",
-									 usage->shared_blks_written);
-#endif
 				if (has_local || has_temp)
 					appendStringInfoChar(es->str, ',');
 			}
 			if (has_local)
 			{
 				appendStringInfoString(es->str, " local");
-#if PG_VERSION_NUM >= 140000
 				if (usage->local_blks_hit > 0)
 					appendStringInfo(es->str, " hit=%lld",
 									 (long long) usage->local_blks_hit);
@@ -4156,41 +3880,18 @@ show_buffer_usage(ExplainState *es, const BufferUsage *usage, bool planning)
 				if (usage->local_blks_written > 0)
 					appendStringInfo(es->str, " written=%lld",
 									 (long long) usage->local_blks_written);
-#else
-				if (usage->local_blks_hit > 0)
-					appendStringInfo(es->str, " hit=%ld",
-									 usage->local_blks_hit);
-				if (usage->local_blks_read > 0)
-					appendStringInfo(es->str, " read=%ld",
-									 usage->local_blks_read);
-				if (usage->local_blks_dirtied > 0)
-					appendStringInfo(es->str, " dirtied=%ld",
-									 usage->local_blks_dirtied);
-				if (usage->local_blks_written > 0)
-					appendStringInfo(es->str, " written=%ld",
-									 usage->local_blks_written);
-#endif
 				if (has_temp)
 					appendStringInfoChar(es->str, ',');
 			}
 			if (has_temp)
 			{
 				appendStringInfoString(es->str, " temp");
-#if PG_VERSION_NUM >= 140000
 				if (usage->temp_blks_read > 0)
 					appendStringInfo(es->str, " read=%lld",
 									 (long long) usage->temp_blks_read);
 				if (usage->temp_blks_written > 0)
 					appendStringInfo(es->str, " written=%lld",
 									 (long long) usage->temp_blks_written);
-#else
-				if (usage->temp_blks_read > 0)
-					appendStringInfo(es->str, " read=%ld",
-									 usage->temp_blks_read);
-				if (usage->temp_blks_written > 0)
-					appendStringInfo(es->str, " written=%ld",
-									 usage->temp_blks_written);
-#endif
 			}
 			appendStringInfoChar(es->str, '\n');
 		}
@@ -4264,21 +3965,12 @@ show_wal_usage(ExplainState *es, const WalUsage *usage)
 			ExplainIndentText(es);
 			appendStringInfoString(es->str, "WAL:");
 
-#if PG_VERSION_NUM >= 140000
 			if (usage->wal_records > 0)
 				appendStringInfo(es->str, " records=%lld",
 								 (long long) usage->wal_records);
 			if (usage->wal_fpi > 0)
 				appendStringInfo(es->str, " fpi=%lld",
 								 (long long) usage->wal_fpi);
-#else
-			if (usage->wal_records > 0)
-				appendStringInfo(es->str, " records=%ld",
-								 usage->wal_records);
-			if (usage->wal_fpi > 0)
-				appendStringInfo(es->str, " fpi=%ld",
-								 usage->wal_fpi);
-#endif
 			if (usage->wal_bytes > 0)
 				appendStringInfo(es->str, " bytes=" UINT64_FORMAT,
 								 usage->wal_bytes);
@@ -4383,9 +4075,7 @@ ExplainTargetRel(Plan *plan, Index rti, ExplainState *es)
 		case T_IndexOnlyScan:
 		case T_BitmapHeapScan:
 		case T_TidScan:
-#if PG_VERSION_NUM >= 140000
 		case T_TidRangeScan:
-#endif
 		case T_ForeignScan:
 		case T_CustomScan:
 		case T_ModifyTable:
@@ -4520,24 +4210,14 @@ show_modifytable_info(ModifyTableState *mtstate, List *ancestors,
 	}
 
 	/* Should we explicitly label target relations? */
-#if PG_VERSION_NUM >= 140000
 	labeltargets = (mtstate->mt_nrels > 1 ||
 					(mtstate->mt_nrels == 1 &&
 					 mtstate->resultRelInfo[0].ri_RangeTableIndex != node->nominalRelation));
-#else
-	labeltargets = (mtstate->mt_nplans > 1 ||
-					(mtstate->mt_nplans == 1 &&
-					 mtstate->resultRelInfo->ri_RangeTableIndex != node->nominalRelation));
-#endif
 
 	if (labeltargets)
 		ExplainOpenGroup("Target Tables", "Target Tables", false, es);
 
-#if PG_VERSION_NUM >= 140000
 	for (j = 0; j < mtstate->mt_nrels; j++)
-#else
-	for (j = 0; j < mtstate->mt_nplans; j++)
-#endif
 	{
 		ResultRelInfo *resultRelInfo = mtstate->resultRelInfo + j;
 		FdwRoutine *fdwroutine = resultRelInfo->ri_FdwRoutine;
@@ -4643,11 +4323,7 @@ show_modifytable_info(ModifyTableState *mtstate, List *ancestors,
 #endif							/* __PG_QUERY_PLAN__ */
 
 			/* count the number of source rows */
-#if PG_VERSION_NUM >= 140000
 			total = outerPlanState(mtstate)->instrument->ntuples;
-#else
-			total = mtstate->mt_plans[0]->instrument->ntuples;
-#endif
 			other_path = mtstate->ps.instrument->ntuples2;
 			insert_path = total - other_path;
 
@@ -4662,7 +4338,6 @@ show_modifytable_info(ModifyTableState *mtstate, List *ancestors,
 		ExplainCloseGroup("Target Tables", "Target Tables", false, es);
 }
 
-#if PG_VERSION_NUM >= 140000
 /*
  * Explain the constituent plans of an Append, MergeAppend,
  * BitmapAnd, or BitmapOr node.
@@ -4670,15 +4345,6 @@ show_modifytable_info(ModifyTableState *mtstate, List *ancestors,
  * The ancestors list should already contain the immediate parent of these
  * plans.
  */
-#else
-/*
- * Explain the constituent plans of a ModifyTable, Append, MergeAppend,
- * BitmapAnd, or BitmapOr node.
- *
- * The ancestors list should already contain the immediate parent of these
- * plans.
- */
-#endif
 static void
 ExplainMemberNodes(PlanState **planstates, int nplans,
 				   List *ancestors, ExplainState *es)

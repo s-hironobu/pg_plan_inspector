@@ -628,21 +628,14 @@ paraminfo_get_equal_hashops(PlannerInfo *root, ParamPathInfo *param_info,
 static bool
 			paraminfo_get_equal_hashops(PlannerInfo *root, ParamPathInfo *param_info,
 										RelOptInfo *outerrel, RelOptInfo *innerrel,
-#if PG_VERSION_NUM >= 140002
 										List **param_exprs, List **operators,
 										bool *binary_mode)
-#else
-										List **param_exprs, List **operators)
-#endif
-
 {
 	ListCell   *lc;
 
 	*param_exprs = NIL;
 	*operators = NIL;
-#if PG_VERSION_NUM >= 140002
 	*binary_mode = false;
-#endif
 
 	if (param_info != NULL)
 	{
@@ -675,7 +668,6 @@ static bool
 
 			*operators = lappend_oid(*operators, rinfo->hasheqoperator);
 			*param_exprs = lappend(*param_exprs, expr);
-#if PG_VERSION_NUM >= 140002
 
 			/*
 			 * When the join operator is not hashable then it's possible that
@@ -690,7 +682,6 @@ static bool
 			 */
 			if (!OidIsValid(rinfo->hashjoinoperator))
 				*binary_mode = true;
-#endif
 		}
 	}
 
@@ -721,7 +712,6 @@ static bool
 
 		*operators = lappend_oid(*operators, typentry->eq_opr);
 		*param_exprs = lappend(*param_exprs, expr);
-#if PG_VERSION_NUM >= 140002
 
 		/*
 		 * We must go into binary mode as we don't have too much of an idea of
@@ -733,7 +723,6 @@ static bool
 		 * visibility into what the function is doing with the Vars.
 		 */
 		*binary_mode = true;
-#endif
 	}
 
 	/* We're okay to use memoize */
@@ -755,9 +744,7 @@ get_memoize_path(PlannerInfo *root, RelOptInfo *innerrel,
 	List	   *param_exprs;
 	List	   *hash_operators;
 	ListCell   *lc;
-#if PG_VERSION_NUM >= 140002
 	bool		binary_mode;
-#endif
 
 	/* Obviously not if it's disabled */
 	if (!enable_memoize)
@@ -863,7 +850,6 @@ get_memoize_path(PlannerInfo *root, RelOptInfo *innerrel,
 #endif
 
 	/* Check if we have hash ops for each parameter to the path */
-#if PG_VERSION_NUM >= 140002
 	if (paraminfo_get_equal_hashops(root,
 									inner_path->param_info,
 #if PG_VERSION_NUM >= 160000
@@ -886,23 +872,6 @@ get_memoize_path(PlannerInfo *root, RelOptInfo *innerrel,
 											binary_mode,
 											outer_path->rows);
 	}
-#else
-	if (paraminfo_get_equal_hashops(root,
-									inner_path->param_info,
-									outerrel,
-									innerrel,
-									&param_exprs,
-									&hash_operators))
-	{
-		return (Path *) create_memoize_path(root,
-											innerrel,
-											inner_path,
-											param_exprs,
-											hash_operators,
-											extra->inner_unique,
-											outer_path->parent->rows);
-	}
-#endif
 
 	return NULL;
 }

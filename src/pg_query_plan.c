@@ -21,30 +21,22 @@
 #include "access/parallel.h"
 #include "access/xact.h"
 #include "access/xlog.h"
-#if PG_VERSION_NUM < 140000
-#include "parser/analyze.h"
-#include "postmaster/autovacuum.h"
-#endif
 #include "common/hashfn.h"
 #include "postmaster/bgworker.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
 #include "storage/lwlock.h"
-#if PG_VERSION_NUM >= 140000
 #include "storage/proc.h"
-#endif
 #include "storage/procarray.h"
 #include "storage/shmem.h"
 #include "tcop/utility.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/timestamp.h"
-#if PG_VERSION_NUM >= 140000
 #if PG_VERSION_NUM >= 160000
 #include "nodes/queryjumble.h"
 #else
 #include "utils/queryjumble.h"
-#endif
 #endif
 
 #ifdef __ADJUST_ROWS__
@@ -66,9 +58,6 @@
 #include "pgqp_explain.h"
 #include "hash.h"
 #include "qpam.h"
-#if PG_VERSION_NUM < 140000
-#include "pg_stat_statements/pg_stat_statements.h"
-#endif
 #include "planid.h"
 #include "param.h"
 
@@ -158,9 +147,6 @@ static volatile sig_atomic_t got_siguser2 = false;
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
 #endif
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
-#if PG_VERSION_NUM < 140000
-static post_parse_analyze_hook_type prev_post_parse_analyze_hook = NULL;
-#endif
 static ExecutorStart_hook_type prev_ExecutorStart = NULL;
 static ExecutorRun_hook_type prev_ExecutorRun = NULL;
 static ExecutorFinish_hook_type prev_ExecutorFinish = NULL;
@@ -181,9 +167,6 @@ set_join_pathlist_hook_type prev_set_join_pathlist = NULL;
 void		_PG_init(void);
 void		_PG_fini(void);
 
-#if PG_VERSION_NUM < 140000
-static void pgqp_post_parse_analyze(ParseState *pstate, Query *query);
-#endif
 static void pgqp_ExecutorStart(QueryDesc *queryDesc, int eflags);
 static void pgqp_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction,
 							 uint64 count, bool execute_once);
@@ -191,9 +174,7 @@ static void pgqp_ExecutorFinish(QueryDesc *queryDesc);
 static void pgqp_ExecutorEnd(QueryDesc *queryDesc);
 static void pgqp_ClientAuthentication(Port *port, int status);
 static void pgqp_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
-#if PG_VERSION_NUM >= 140000
 								bool readOnlyTree,
-#endif
 								ProcessUtilityContext context,
 								ParamListInfo params, QueryEnvironment *queryEnv,
 								DestReceiver *dest, QueryCompletion *qc);
@@ -374,11 +355,6 @@ _PG_init(void)
 		ProcessUtility_hook = pgqp_ProcessUtility;
 	}
 
-#if PG_VERSION_NUM < 140000
-	prev_post_parse_analyze_hook = post_parse_analyze_hook;
-	post_parse_analyze_hook = pgqp_post_parse_analyze;
-#endif
-
 	prev_ExecutorStart = ExecutorStart_hook;
 	ExecutorStart_hook = pgqp_ExecutorStart;
 
@@ -414,10 +390,8 @@ _PG_init(void)
 	init_param_parse_env();
 #endif
 
-#if PG_VERSION_NUM >= 140000
 	/* Enables query identifier computation. */
 	EnableQueryId();
-#endif
 
 	/* Initialize bgworker. */
 	memset(&worker, 0, sizeof(worker));
@@ -456,9 +430,6 @@ void
 _PG_fini(void)
 {
 	/* Uninstall hooks. */
-#if PG_VERSION_NUM < 140000
-	post_parse_analyze_hook = prev_post_parse_analyze_hook;
-#endif
 	ExecutorStart_hook = prev_ExecutorStart;
 	ExecutorRun_hook = prev_ExecutorRun;
 	ExecutorFinish_hook = prev_ExecutorFinish;
@@ -737,37 +708,6 @@ get_leader_pid(void)
 }
 
 
-#if PG_VERSION_NUM < 140000
-/*
- * Post-parse-analysis hook: mark query with a queryId
- */
-static void
-pgqp_post_parse_analyze(ParseState *pstate, Query *query)
-{
-	pgssJumbleState jstate;
-
-	if (prev_post_parse_analyze_hook)
-		prev_post_parse_analyze_hook(pstate, query);
-
-	/* Assert we didn't do this already */
-	Assert(query->queryId == UINT64CONST(0));
-
-	/* Set up workspace for query jumbling */
-	jstate.jumble = (unsigned char *) palloc(JUMBLE_SIZE);
-	jstate.jumble_len = 0;
-	jstate.clocations_buf_size = 32;
-	jstate.clocations = (pgssLocationLen *)
-		palloc(jstate.clocations_buf_size * sizeof(pgssLocationLen));
-	jstate.clocations_count = 0;
-	jstate.highest_extern_param_id = 0;
-
-	/* Compute query ID and mark the Query node with it */
-	JumbleQuery(&jstate, query);
-	query->queryId =
-		DatumGetUInt64(hash_any_extended(jstate.jumble, jstate.jumble_len, 0));
-}
-#endif
-
 #ifdef __ADAPT_WORK_MEM__
 static void
 set_work_mem(const int wm)
@@ -1045,9 +985,7 @@ pgqp_ExecutorEnd(QueryDesc *queryDesc)
  */
 static void
 pgqp_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
-#if PG_VERSION_NUM >= 140000
 					bool readOnlyTree,
-#endif
 					ProcessUtilityContext context, ParamListInfo params,
 					QueryEnvironment *queryEnv, DestReceiver *dest,
 					QueryCompletion *qc)
@@ -1065,16 +1003,12 @@ pgqp_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 
 	if (prev_ProcessUtility)
 		prev_ProcessUtility(pstmt, queryString,
-#if PG_VERSION_NUM >= 140000
 							readOnlyTree,
-#endif
 							context,
 							params, queryEnv, dest, qc);
 	else
 		standard_ProcessUtility(pstmt, queryString,
-#if PG_VERSION_NUM >= 140000
 								readOnlyTree,
-#endif
 								context,
 								params, queryEnv, dest, qc);
 }
