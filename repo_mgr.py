@@ -25,8 +25,7 @@ from pgpi import Common, Repository, GetTables, Grouping, Regression, Log, PushP
 
 if __name__ == "__main__":
 
-    #LOG_LEVEL = Log.info
-    LOG_LEVEL = Log.debug3
+    LOG_LEVEL = Log.info
     REPOSITORY = Common.REPOSITORY_DIR
 
     msg_basedir = "Base directory of repository (Default: '.')"
