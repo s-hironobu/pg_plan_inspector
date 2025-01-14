@@ -26,7 +26,7 @@
  * is issued when the optimizer considers the join plan with tbl1 and tbl2.
  * See populate_joinrel_with_paths()@src/optimizer/pgqp_joinrels.c in detail.
  *
- * Copyright (c) 2021-2024, Hironobu Suzuki @ interdb.jp
+ * Copyright (c) 2021-2025, Hironobu Suzuki @ interdb.jp
  *
  */
 #include "postgres.h"

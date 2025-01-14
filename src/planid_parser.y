@@ -14,7 +14,7 @@
  * the obtained planid. However, the computed planid is always used in pairs
  * with the queryid, so this algorithm is sufficient to identify the given plans.
  *
- * Copyright (c) 2021-2024, Hironobu Suzuki @ interdb.jp
+ * Copyright (c) 2021-2025, Hironobu Suzuki @ interdb.jp
  *
  *-------------------------------------------------------------------------
  */
