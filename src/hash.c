@@ -21,17 +21,12 @@
 #include "storage/lwlock.h"
 #include "storage/shmem.h"
 
-#include "buffer.h"
 #include "common.h"
+#include "pg_query_plan.h"
+#include "buffer.h"
 #include "hash.h"
 
 #undef __DEBUG__
-
-/*
- * Global variable declarations
- */
-extern pgqpSharedState * pgqp;
-extern HTAB *pgqp_hash;
 
 /*
  * Static function declaration

@@ -33,11 +33,7 @@
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/timestamp.h"
-#if PG_VERSION_NUM >= 160000
 #include "nodes/queryjumble.h"
-#else
-#include "utils/queryjumble.h"
-#endif
 
 #ifdef __ADJUST_ROWS__
 #include "nodes/pathnodes.h"
@@ -52,6 +48,7 @@
 #endif
 
 #include "optimizer/paths.h"
+#include "pg_query_plan.h"
 #include "common.h"
 #include "buffer.h"
 #include "bgworker.h"
@@ -75,13 +72,6 @@
 
 PG_MODULE_MAGIC;
 
-#ifdef __ADJUST_ROWS__
-extern CurrentState current_state;
-extern regParams reg_params;
-extern bool pgqp_adjust_rows;
-extern char *pgqp_json_plan;
-#endif
-
 /* Link to shared memory state */
 pgqpSharedState *pgqp = NULL;
 HTAB	   *pgqp_hash = NULL;
@@ -104,12 +94,12 @@ bool		pgqp_enable_adjust_joinrel_rows;
 bool		pgqp_enable_adjust_rel_rows;
 #endif
 #ifdef __ADDITIONAL_OPTIONS__
-static bool pgqp_log_buffers;
-static bool pgqp_log_wal;
+bool pgqp_log_buffers;
+bool pgqp_log_wal;
 #endif
 #ifdef __ADAPT_WORK_MEM__
-static bool pgqp_work_mem;
-static int	tmp_work_mem;
+bool pgqp_work_mem;
+int	tmp_work_mem;
 #endif
 
 bool		pgqp_received_signal;
@@ -120,7 +110,6 @@ static queryInfo qi;
 /* Links to QueryDesc and ExplainState */
 QueryDesc  *qp_qd[MAX_NESTED_LEVEL];
 ExplainState *qp_es[MAX_NESTED_LEVEL];
-
 
 static bool enable_show_plan;	/* Whether showing query plan is enabled */
 static bool enable_store_plan;	/* Whether storing query plan is enabled */
@@ -143,17 +132,17 @@ static int	pgqp_hash_max;
 static volatile sig_atomic_t got_siguser2 = false;
 
 /* Saved hook values in case of unload */
-static shmem_request_hook_type prev_shmem_request_hook = NULL;
-static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
-static ExecutorStart_hook_type prev_ExecutorStart = NULL;
-static ExecutorRun_hook_type prev_ExecutorRun = NULL;
-static ExecutorFinish_hook_type prev_ExecutorFinish = NULL;
-static ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
-static ProcessUtility_hook_type prev_ProcessUtility = NULL;
-static ClientAuthentication_hook_type prev_ClientAuthentication = NULL;
+shmem_request_hook_type prev_shmem_request_hook = NULL;
+shmem_startup_hook_type prev_shmem_startup_hook = NULL;
+ExecutorStart_hook_type prev_ExecutorStart = NULL;
+ExecutorRun_hook_type prev_ExecutorRun = NULL;
+ExecutorFinish_hook_type prev_ExecutorFinish = NULL;
+ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
+ProcessUtility_hook_type prev_ProcessUtility = NULL;
+ClientAuthentication_hook_type prev_ClientAuthentication = NULL;
 #ifdef __ADJUST_ROWS__
-static planner_hook_type prev_planner = NULL;
-static join_search_hook_type prev_join_search = NULL;
+planner_hook_type prev_planner = NULL;
+join_search_hook_type prev_join_search = NULL;
 set_rel_pathlist_hook_type prev_set_rel_pathlist = NULL;
 set_join_pathlist_hook_type prev_set_join_pathlist = NULL;
 #endif
@@ -167,7 +156,7 @@ void		_PG_fini(void);
 
 static void pgqp_ExecutorStart(QueryDesc *queryDesc, int eflags);
 static void pgqp_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction,
-							 uint64 count, bool execute_once);
+							 uint64 count);
 static void pgqp_ExecutorFinish(QueryDesc *queryDesc);
 static void pgqp_ExecutorEnd(QueryDesc *queryDesc);
 static void pgqp_ClientAuthentication(Port *port, int status);
@@ -323,15 +312,6 @@ _PG_init(void)
 #endif
 
 	EmitWarningsOnPlaceholders("pg_query_plan");
-
-#if PG_VERSION_NUM < 160000
-	RequestAddinShmemSpace(pgqp_memsize());
-#if PG_VERSION_NUM >= 90600
-	RequestNamedLWLockTranche("pg_query_plan", 1);
-#else
-	RequestAddinLWLocks(1);
-#endif
-#endif
 
 	/* Install hooks. */
 	prev_shmem_request_hook = shmem_request_hook;
@@ -569,11 +549,7 @@ sig_get_query_plan(SIGNAL_ARGS)
 	MemoryContext oldcxt;
 	QueryDesc  *queryDesc;
 
-#if PG_VERSION_NUM >= 160000
 	sigprocmask(SIG_SETMASK, &BlockSig, NULL);
-#else
-	PG_SETMASK(&BlockSig);
-#endif
 
 	/*
 	 * Check the showing query plan feature is enabled or not
@@ -658,11 +634,7 @@ final:
 	if (pgqp->latch != NULL)
 		SetLatch(pgqp->latch);
 
-#if PG_VERSION_NUM >= 160000
 	sigprocmask(SIG_SETMASK, &UnBlockSig, NULL);
-#else
-	PG_SETMASK(&UnBlockSig);
-#endif
 
 	errno = save_errno;
 }
@@ -724,7 +696,7 @@ get_sort_space_used(const uint64 queryId)
 	HeapTuple	heapTuple = NULL;
 	int			sort_space_used = 0;
 
-	sprintf(queryid, "%lu", queryId);
+	sprintf(queryid, "%llu", queryId);
 
 	relationId = get_relname_relid("reg", LookupExplicitNamespace("query_plan", true));
 	relationPkeyId = get_relname_relid("reg_pkey", LookupExplicitNamespace("query_plan", true));
@@ -891,15 +863,15 @@ pgqp_ExecutorStart(QueryDesc *queryDesc, int eflags)
  */
 static void
 pgqp_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction,
-				 uint64 count, bool execute_once)
+				 uint64 count)
 {
 	nested_level++;
 	PG_TRY();
 	{
 		if (prev_ExecutorRun)
-			prev_ExecutorRun(queryDesc, direction, count, execute_once);
+			prev_ExecutorRun(queryDesc, direction, count);
 		else
-			standard_ExecutorRun(queryDesc, direction, count, execute_once);
+			standard_ExecutorRun(queryDesc, direction, count);
 		nested_level--;
 	}
 	PG_CATCH();
@@ -1116,7 +1088,7 @@ pgqp_planner(Query *parse, const char *query_string, int cursorOptions,
 	char	   *params = NULL;
 
 	pgqp_adjust_rows = false;
-	sprintf(queryid, "%lu", parse->queryId);
+	sprintf(queryid, "%llu", parse->queryId);
 
 	/*
 	 * Check query_plan.reg
@@ -1159,7 +1131,7 @@ get_planid(PG_FUNCTION_ARGS)
 	pre_plan_parse(strlen(json_plan));
 	if (plan_parse() != 0)
 		elog(WARNING, "Warning: Parse error in the json plan.");
-	sprintf(planid, "%lu", get_planId());
+	sprintf(planid, "%llu", get_planId());
 
 	PG_RETURN_TEXT_P(cstring_to_text_with_len(planid, strlen(planid)));
 }
@@ -1255,15 +1227,7 @@ pg_query_plan(PG_FUNCTION_ARGS)
 		PgBackendStatus *beentry = NULL;
 		bool		parallel_worker;
 #undef PG_QUERY_PLAN_COLS
-#if PG_VERSION_NUM >= 170000
 		beentry = pgstat_get_beentry_by_proc_number(curr_backend);
-#else
-#if PG_VERSION_NUM >= 160000
-		beentry = pgstat_get_beentry_by_backend_id(curr_backend);
-#else
-		beentry = pgstat_fetch_stat_beentry(curr_backend);
-#endif
-#endif
 
 		if (beentry == NULL)
 			continue;
@@ -1380,7 +1344,7 @@ pg_query_plan(PG_FUNCTION_ARGS)
 				values[k++] = ObjectIdGetDatum(j);
 
 				/* queryid */
-				sprintf(queryid, "%lu", pgqp->qpd.queryId[j]);
+				sprintf(queryid, "%llu", pgqp->qpd.queryId[j]);
 				values[k++] = CStringGetTextDatum(queryid);
 
 				/* start time */
@@ -1394,7 +1358,7 @@ pg_query_plan(PG_FUNCTION_ARGS)
 				nulls[k++] = is_null;
 
 				/* planid */
-				sprintf(planid, "%lu", pgqp->qpd.planId[j]);
+				sprintf(planid, "%llu", pgqp->qpd.planId[j]);
 				values[k++] = CStringGetTextDatum(planid);
 
 				/* query plan in text */

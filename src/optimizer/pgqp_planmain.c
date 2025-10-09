@@ -24,9 +24,6 @@
 
 #include "optimizer/appendinfo.h"
 #include "optimizer/clauses.h"
-#if PG_VERSION_NUM < 170000
-#include "optimizer/inherit.h"
-#endif
 #include "optimizer/optimizer.h"
 #include "optimizer/orclauses.h"
 #include "optimizer/pathnode.h"
@@ -91,10 +88,8 @@ query_planner(PlannerInfo *root,
 	root->full_join_clauses = NIL;
 	root->join_info_list = NIL;
 	root->placeholder_list = NIL;
-#if PG_VERSION_NUM >= 160000
 	root->placeholder_array = NULL;
 	root->placeholder_array_size = 0;
-#endif
 	root->fkey_list = NIL;
 	root->initial_rels = NIL;
 
@@ -138,14 +133,9 @@ query_planner(PlannerInfo *root,
 				 * debug_parallel_query is on, then we want to execute the
 				 * Result in a parallel worker if possible, so we must check.
 				 */
-#if PG_VERSION_NUM >= 160000
 				if (root->glob->parallelModeOK &&
 					(root->query_level > 1 ||
 					 debug_parallel_query != DEBUG_PARALLEL_OFF))
-#else
-				if (root->glob->parallelModeOK &&
-					force_parallel_mode != FORCE_PARALLEL_OFF)
-#endif
 					final_rel->consider_parallel =
 						is_parallel_safe(root, parse->jointree->quals);
 
@@ -192,6 +182,9 @@ query_planner(PlannerInfo *root,
 	 * want to make RelOptInfos for them.
 	 */
 	add_base_rels_to_query(root, (Node *) parse->jointree);
+
+	/* Remove any redundant GROUP BY columns */
+	remove_useless_groupby_columns(root);
 
 	/*
 	 * Examine the targetlist and join tree, adding entries to baserel
@@ -253,6 +246,11 @@ query_planner(PlannerInfo *root,
 	 * Likewise, this can't be done until now for lack of needed info.
 	 */
 	reduce_unique_semijoins(root);
+
+	/*
+	 * Remove self joins on a unique column.
+	 */
+	joinlist = remove_useless_self_joins(root, joinlist);
 
 	/*
 	 * Now distribute "placeholders" to base rels as needed.  This has to be

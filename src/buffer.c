@@ -28,6 +28,7 @@
 #include "postgres.h"
 
 #include "commands/explain.h"
+#include "commands/explain_state.h"
 #include "executor/spi.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
@@ -38,20 +39,13 @@
 #include "utils/timestamp.h"
 
 #include "common.h"
+#include "pg_query_plan.h"
 #include "bgworker.h"
 #include "buffer.h"
 #include "qpam.h"
 
 #define MAX_REFCOUNT 10			/* The threshold of refcount */
 
-/*
- * Global variable declarations
- */
-extern pgqpSharedState * pgqp;
-
-/* Links to QueryDesc and ExplainState */
-extern QueryDesc *qp_qd[MAX_NESTED_LEVEL];
-extern ExplainState *qp_es[MAX_NESTED_LEVEL];
 
 /*
  * Function declarations
@@ -354,7 +348,7 @@ insertLog(bufferSlot * bslot, const bool recoveryInProgress)
 						 SCHEMA, LOG_TABLE,
 						 timestamptz_to_str(qi.starttime)
 			);
-		appendStringInfo(&buf, "\'%s\', %s, %d, %d, \'%lu\', %s, \'%lu\', %s, %s);",
+		appendStringInfo(&buf, "\'%s\', %s, %d, %d, \'%llu\', %s, \'%llu\', %s, %s);",
 						 timestamptz_to_str(qi.endtime),
 						 quote_literal_cstr(qi.database_name),
 						 bslot->qpd.pid,

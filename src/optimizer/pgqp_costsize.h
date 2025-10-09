@@ -23,6 +23,7 @@ extern void pgqp_cost_tidrangescan(Path *path, PlannerInfo *root,
 extern void pgqp_cost_group(Path *path, PlannerInfo *root,
 							int numGroupCols, double numGroups,
 							List *quals,
+							int input_disabled_nodes,
 							Cost input_startup_cost, Cost input_total_cost,
 							double input_tuples);
 extern void pgqp_initial_cost_nestloop(PlannerInfo *root, JoinCostWorkspace *workspace,
@@ -37,6 +38,7 @@ extern void pgqp_initial_cost_mergejoin(PlannerInfo *root, JoinCostWorkspace *wo
 										List *mergeclauses,
 										Path *outer_path, Path *inner_path,
 										List *outersortkeys, List *innersortkeys,
+										int outer_presorted_keys,
 										JoinPathExtraData *extra);
 extern void pgqp_final_cost_mergejoin(PlannerInfo *root, MergePath *path,
 									  JoinCostWorkspace *workspace,
@@ -72,14 +74,9 @@ extern double pgqp_get_parameterized_joinrel_size(PlannerInfo *root, RelOptInfo 
 												  SpecialJoinInfo *sjinfo,
 												  List *restrict_clauses);
 extern void pgqp_set_result_size_estimates(PlannerInfo *root, RelOptInfo *rel);
-#if PG_VERSION_NUM >= 170000
 extern double pgqp_compute_bitmap_pages(PlannerInfo *root, RelOptInfo *baserel,
 										Path *bitmapqual, double loop_count,
 										Cost *cost_p, double *tuples_p);
-#else
-extern double pgqp_compute_bitmap_pages(PlannerInfo *root, RelOptInfo *baserel, Path *bitmapqual,
-										int loop_count, Cost *cost, double *tuple);
-#endif
 extern void pgqp_cost_bitmap_heap_scan(Path *path, PlannerInfo *root, RelOptInfo *baserel,
 									   ParamPathInfo *param_info,
 									   Path *bitmapqual, double loop_count);

@@ -26,6 +26,7 @@
 
 #include "postgres.h"
 #include "common/hashfn.h"
+#include "qpam.h"
 
 	/*
 	 * Declear functions
@@ -37,6 +38,10 @@
 	static void set_depth(void);
 	static char *get_depth(void);
 	static void add_buf(char *);
+
+	extern int yydebug;
+	extern int yychar;
+	extern int yynerrs;
 
 	/*
 	 * Initialize the InputBufInfo's variables in planid_scanner.l

@@ -19,20 +19,10 @@
 #include "miscadmin.h"
 
 #include "common.h"
+#include "pg_query_plan.h"
 #include "pgqp_explain.h"
 #include "planid.h"
-
-
-char	   *pgqp_json_plan;		/* This is read by
-								 * input_params()@planid_scanner.l. */
-
-/* Link to shared memory state */
-extern pgqpSharedState * pgqp;
-
-/* Links to QueryDesc and ExplainState */
-extern QueryDesc *qp_qd[MAX_NESTED_LEVEL];
-extern ExplainState *qp_es[MAX_NESTED_LEVEL];
-
+#include "qpam.h"
 
 /*
  * Function declarations

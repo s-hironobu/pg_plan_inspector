@@ -10,6 +10,7 @@ void __dummy_input(void);
 static int input_json(char *buf, int max_size);
 
 extern char *pgqp_json_plan;
+char *pgqp_json_plan;
 
 /*
  * Helper structure and variable for input_json() function.

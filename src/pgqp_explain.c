@@ -15,6 +15,10 @@
 #define __PG_QUERY_PLAN__
 
 #include "postgres.h"
+#include "commands/explain.h"
+#include "commands/explain_dr.h"
+#include "commands/explain_format.h"
+#include "commands/explain_state.h"
 #include "foreign/fdwapi.h"
 #include "jit/jit.h"
 #include "nodes/extensible.h"
@@ -46,12 +50,8 @@
 
 #ifdef __PG_QUERY_PLAN__
 #include "common.h"
-
-extern bool pgqp_received_signal;
-#ifdef __ADDITIONAL_OPTIONS__
-extern bool pgqp_log_buffers;
-extern bool pgqp_log_wal;
-#endif
+#include "pg_query_plan.h"
+#include "pgqp_explain.h"
 #endif							/* __PG_QUERY_PLAN__ */
 
 #ifndef __PG_QUERY_PLAN__
@@ -67,13 +67,6 @@ explain_get_index_name_hook_type explain_get_index_name_hook = NULL;
 #define X_CLOSING 1
 #define X_CLOSE_IMMEDIATE 2
 #define X_NOWHITESPACE 4
-
-#ifdef __PG_QUERY_PLAN__
-/* Declare global functions */
-void		pgqpExplainPrintQueryState(ExplainState *es, QueryDesc *queryDesc);
-void		pgqpExplainBeginOutput(ExplainState *es);
-void		pgqpExplainEndOutput(ExplainState *es);
-#endif							/* __PG_QUERY_PLAN__ */
 
 /* Declare static functions */
 #ifndef __PG_QUERY_PLAN__
@@ -173,16 +166,11 @@ static void ExplainFlushWorkersState(ExplainState *es);
 static void ExplainProperty(const char *qlabel, const char *unit,
 							const char *value, bool numeric, ExplainState *es);
 #endif							/* __PG_QUERY_PLAN__ */
-static void ExplainOpenSetAsideGroup(const char *objtype, const char *labelname,
-									 bool labeled, int depth, ExplainState *es);
-static void ExplainSaveGroup(ExplainState *es, int depth, int *state_save);
-static void ExplainRestoreGroup(ExplainState *es, int depth, int *state_save);
 #ifndef __PG_QUERY_PLAN__
 static void ExplainDummyGroup(const char *objtype, const char *labelname,
 							  ExplainState *es);
 static void ExplainXMLTag(const char *tagname, int flags, ExplainState *es);
 #endif							/* __PG_QUERY_PLAN__ */
-static void ExplainIndentText(ExplainState *es);
 #ifndef __PG_QUERY_PLAN__
 static void ExplainJSONLineEnding(ExplainState *es);
 static void ExplainYAMLLineStarting(ExplainState *es);
@@ -3680,24 +3668,63 @@ show_hashagg_info(AggState *aggstate, ExplainState *es)
 static void
 show_tidbitmap_info(BitmapHeapScanState *planstate, ExplainState *es)
 {
+	if (!es->analyze)
+		return;
+
 	if (es->format != EXPLAIN_FORMAT_TEXT)
 	{
-		ExplainPropertyInteger("Exact Heap Blocks", NULL,
-							   planstate->exact_pages, es);
-		ExplainPropertyInteger("Lossy Heap Blocks", NULL,
-							   planstate->lossy_pages, es);
+		ExplainPropertyUInteger("Exact Heap Blocks", NULL,
+								planstate->stats.exact_pages, es);
+		ExplainPropertyUInteger("Lossy Heap Blocks", NULL,
+								planstate->stats.lossy_pages, es);
 	}
 	else
 	{
-		if (planstate->exact_pages > 0 || planstate->lossy_pages > 0)
+		if (planstate->stats.exact_pages > 0 || planstate->stats.lossy_pages > 0)
 		{
 			ExplainIndentText(es);
 			appendStringInfoString(es->str, "Heap Blocks:");
-			if (planstate->exact_pages > 0)
-				appendStringInfo(es->str, " exact=%ld", planstate->exact_pages);
-			if (planstate->lossy_pages > 0)
-				appendStringInfo(es->str, " lossy=%ld", planstate->lossy_pages);
+			if (planstate->stats.exact_pages > 0)
+				appendStringInfo(es->str, " exact=" UINT64_FORMAT, planstate->stats.exact_pages);
+			if (planstate->stats.lossy_pages > 0)
+				appendStringInfo(es->str, " lossy=" UINT64_FORMAT, planstate->stats.lossy_pages);
 			appendStringInfoChar(es->str, '\n');
+		}
+	}
+
+	/* Display stats for each parallel worker */
+	if (planstate->pstate != NULL)
+	{
+		for (int n = 0; n < planstate->sinstrument->num_workers; n++)
+		{
+			BitmapHeapScanInstrumentation *si = &planstate->sinstrument->sinstrument[n];
+
+			if (si->exact_pages == 0 && si->lossy_pages == 0)
+				continue;
+
+			if (es->workers_state)
+				ExplainOpenWorker(n, es);
+
+			if (es->format == EXPLAIN_FORMAT_TEXT)
+			{
+				ExplainIndentText(es);
+				appendStringInfoString(es->str, "Heap Blocks:");
+				if (si->exact_pages > 0)
+					appendStringInfo(es->str, " exact=" UINT64_FORMAT, si->exact_pages);
+				if (si->lossy_pages > 0)
+					appendStringInfo(es->str, " lossy=" UINT64_FORMAT, si->lossy_pages);
+				appendStringInfoChar(es->str, '\n');
+			}
+			else
+			{
+				ExplainPropertyUInteger("Exact Heap Blocks", NULL,
+										si->exact_pages, es);
+				ExplainPropertyUInteger("Lossy Heap Blocks", NULL,
+										si->lossy_pages, es);
+			}
+
+			if (es->workers_state)
+				ExplainCloseWorker(n, es);
 		}
 	}
 }
@@ -4314,11 +4341,7 @@ show_modifytable_info(ModifyTableState *mtstate, List *ancestors,
 
 #ifndef __PG_QUERY_PLAN__
 			/*---
-#if PG_VERSION_NUM >= 140000
 			InstrEndLoop(outerPlanState(mtstate)->instrument);
-#else
-			InstrEndLoop(mtstate->mt_plans[0]->instrument);
-#endif
 			*/
 #endif							/* __PG_QUERY_PLAN__ */
 
@@ -4941,118 +4964,6 @@ ExplainCloseGroup(const char *objtype, const char *labelname,
 }
 #endif							/* __PG_QUERY_PLAN__ */
 
-/*
- * Open a group of related objects, without emitting actual data.
- *
- * Prepare the formatting state as though we were beginning a group with
- * the identified properties, but don't actually emit anything.  Output
- * subsequent to this call can be redirected into a separate output buffer,
- * and then eventually appended to the main output buffer after doing a
- * regular ExplainOpenGroup call (with the same parameters).
- *
- * The extra "depth" parameter is the new group's depth compared to current.
- * It could be more than one, in case the eventual output will be enclosed
- * in additional nesting group levels.  We assume we don't need to track
- * formatting state for those levels while preparing this group's output.
- *
- * There is no ExplainCloseSetAsideGroup --- in current usage, we always
- * pop this state with ExplainSaveGroup.
- */
-static void
-ExplainOpenSetAsideGroup(const char *objtype, const char *labelname,
-						 bool labeled, int depth, ExplainState *es)
-{
-	switch (es->format)
-	{
-		case EXPLAIN_FORMAT_TEXT:
-			/* nothing to do */
-			break;
-
-		case EXPLAIN_FORMAT_XML:
-			es->indent += depth;
-			break;
-
-		case EXPLAIN_FORMAT_JSON:
-			es->grouping_stack = lcons_int(0, es->grouping_stack);
-			es->indent += depth;
-			break;
-
-		case EXPLAIN_FORMAT_YAML:
-			if (labelname)
-				es->grouping_stack = lcons_int(1, es->grouping_stack);
-			else
-				es->grouping_stack = lcons_int(0, es->grouping_stack);
-			es->indent += depth;
-			break;
-	}
-}
-
-
-/*
- * Pop one level of grouping state, allowing for a re-push later.
- *
- * This is typically used after ExplainOpenSetAsideGroup; pass the
- * same "depth" used for that.
- *
- * This should not emit any output.  If state needs to be saved,
- * save it at *state_save.  Currently, an integer save area is sufficient
- * for all formats, but we might need to revisit that someday.
- */
-static void
-ExplainSaveGroup(ExplainState *es, int depth, int *state_save)
-{
-	switch (es->format)
-	{
-		case EXPLAIN_FORMAT_TEXT:
-			/* nothing to do */
-			break;
-
-		case EXPLAIN_FORMAT_XML:
-			es->indent -= depth;
-			break;
-
-		case EXPLAIN_FORMAT_JSON:
-			es->indent -= depth;
-			*state_save = linitial_int(es->grouping_stack);
-			es->grouping_stack = list_delete_first(es->grouping_stack);
-			break;
-
-		case EXPLAIN_FORMAT_YAML:
-			es->indent -= depth;
-			*state_save = linitial_int(es->grouping_stack);
-			es->grouping_stack = list_delete_first(es->grouping_stack);
-			break;
-	}
-}
-
-
-/*
- * Re-push one level of grouping state, undoing the effects of ExplainSaveGroup.
- */
-static void
-ExplainRestoreGroup(ExplainState *es, int depth, int *state_save)
-{
-	switch (es->format)
-	{
-		case EXPLAIN_FORMAT_TEXT:
-			/* nothing to do */
-			break;
-
-		case EXPLAIN_FORMAT_XML:
-			es->indent += depth;
-			break;
-
-		case EXPLAIN_FORMAT_JSON:
-			es->grouping_stack = lcons_int(*state_save, es->grouping_stack);
-			es->indent += depth;
-			break;
-
-		case EXPLAIN_FORMAT_YAML:
-			es->grouping_stack = lcons_int(*state_save, es->grouping_stack);
-			es->indent += depth;
-			break;
-	}
-}
 
 #ifndef __PG_QUERY_PLAN__
 /*
@@ -5241,20 +5152,6 @@ ExplainXMLTag(const char *tagname, int flags, ExplainState *es)
 
 #endif							/* __PG_QUERY_PLAN__ */
 
-/*
- * Indent a text-format line.
- *
- * We indent by two spaces per indentation level.  However, when emitting
- * data for a parallel worker there might already be data on the current line
- * (cf. ExplainOpenWorker); in that case, don't indent any more.
- */
-static void
-ExplainIndentText(ExplainState *es)
-{
-	Assert(es->format == EXPLAIN_FORMAT_TEXT);
-	if (es->str->len == 0 || es->str->data[es->str->len - 1] == '\n')
-		appendStringInfoSpaces(es->str, es->indent * 2);
-}
 
 #ifndef __PG_QUERY_PLAN__
 /*

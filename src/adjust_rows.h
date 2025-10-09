@@ -95,6 +95,15 @@ extern void set_join_config_options(unsigned char enforce_mask, bool set_memoize
 									GucContext context);
 
 /*
+ * Declare Variables
+ */
+extern CurrentState current_state;
+extern char	   *pgqp_reg_params;
+extern bool		pgqp_adjust_rows;
+extern regParams	reg_params;
+
+
+/*
  * Declare functions
  */
 extern int	get_join_mask(NodeTag join_type);

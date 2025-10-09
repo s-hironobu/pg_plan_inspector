@@ -6,6 +6,10 @@
  * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
+ *
+ * IDENTIFICATION
+ *	  src/backend/optimizer/path/allpaths.c
+ *
  *-------------------------------------------------------------------------
  */
 #define __PG_QUERY_PLAN__
@@ -32,27 +36,16 @@
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
 #include "optimizer/geqo.h"
-#if PG_VERSION_NUM < 170000
-#include "optimizer/inherit.h"
-#endif
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/plancat.h"
 #include "optimizer/planner.h"
-#if PG_VERSION_NUM < 170000
-#include "optimizer/restrictinfo.h"
-#endif
 #include "optimizer/tlist.h"
 #include "parser/parse_clause.h"
 #include "parser/parsetree.h"
 #include "partitioning/partbounds.h"
-#if PG_VERSION_NUM < 170000
-#include "partitioning/partprune.h"
-#endif
-#if PG_VERSION_NUM >= 160000
 #include "port/pg_bitutils.h"
-#endif
 #include "rewrite/rewriteManip.h"
 #include "utils/lsyscache.h"
 
@@ -67,39 +60,31 @@
 #include "../adjust_rows.h"
 #endif
 
-#if PG_VERSION_NUM >= 160000
 /* Bitmask flags for pushdown_safety_info.unsafeFlags */
 #define UNSAFE_HAS_VOLATILE_FUNC		(1 << 0)
 #define UNSAFE_HAS_SET_FUNC				(1 << 1)
 #define UNSAFE_NOTIN_DISTINCTON_CLAUSE	(1 << 2)
 #define UNSAFE_NOTIN_PARTITIONBY_CLAUSE	(1 << 3)
 #define UNSAFE_TYPE_MISMATCH			(1 << 4)
-#endif
 
 /* results of subquery_is_pushdown_safe */
 typedef struct pushdown_safety_info
 {
-#if PG_VERSION_NUM >= 160000
 	unsigned char *unsafeFlags; /* bitmask of reasons why this target list
 								 * column is unsafe for qual pushdown, or 0 if
 								 * no reason. */
-#else
-	bool	   *unsafeColumns;	/* which output columns are unsafe to use */
-#endif
 	bool		unsafeVolatile; /* don't push down volatile quals */
 	bool		unsafeLeaky;	/* don't push down leaky quals */
 } pushdown_safety_info;
 
-#if PG_VERSION_NUM >= 160000
 /* Return type for qual_is_pushdown_safe */
 typedef enum pushdown_safe_type
 {
 	PUSHDOWN_UNSAFE,			/* unsafe to push qual into subquery */
 	PUSHDOWN_SAFE,				/* safe to push qual into subquery */
-	PUSHDOWN_WINDOWCLAUSE_RUNCOND	/* unsafe, but may work as WindowClause
+	PUSHDOWN_WINDOWCLAUSE_RUNCOND,	/* unsafe, but may work as WindowClause
 									 * run condition */
 } pushdown_safe_type;
-#endif
 
 /* These parameters are set by GUC */
 bool		enable_geqo = false;	/* just in case GUC doesn't set it */
@@ -177,15 +162,9 @@ static void check_output_expressions(Query *subquery,
 static void compare_tlist_datatypes(List *tlist, List *colTypes,
 									pushdown_safety_info *safetyInfo);
 static bool targetIsInAllPartitionLists(TargetEntry *tle, Query *query);
-#if PG_VERSION_NUM >= 160000
 static pushdown_safe_type qual_is_pushdown_safe(Query *subquery, Index rti,
 												RestrictInfo *rinfo,
 												pushdown_safety_info *safetyInfo);
-#else
-static bool qual_is_pushdown_safe(Query *subquery, Index rti,
-								  RestrictInfo *rinfo,
-								  pushdown_safety_info *safetyInfo);
-#endif
 static void subquery_push_qual(Query *subquery,
 							   RangeTblEntry *rte, Index rti, Node *qual);
 static void recurse_push_qual(Node *setOp, Query *topquery,
@@ -209,29 +188,6 @@ make_one_rel(PlannerInfo *root, List *joinlist)
 	RelOptInfo *rel;
 	Index		rti;
 	double		total_pages;
-
-#if PG_VERSION_NUM < 160000
-	/*
-	 * Construct the all_baserels Relids set.
-	 */
-	root->all_baserels = NULL;
-	for (rti = 1; rti < root->simple_rel_array_size; rti++)
-	{
-		RelOptInfo *brel = root->simple_rel_array[rti];
-
-		/* there may be empty slots corresponding to non-baserel RTEs */
-		if (brel == NULL)
-			continue;
-
-		Assert(brel->relid == rti); /* sanity check on array */
-
-		/* ignore RTEs that are "other rels" */
-		if (brel->reloptkind != RELOPT_BASEREL)
-			continue;
-
-		root->all_baserels = bms_add_member(root->all_baserels, brel->relid);
-	}
-#endif
 
 	/* Mark base rels as to whether we care about fast-start plans */
 	set_base_rel_consider_startup(root);
@@ -287,11 +243,7 @@ make_one_rel(PlannerInfo *root, List *joinlist)
 	/*
 	 * The result should join all and only the query's base + outer-join rels.
 	 */
-#if PG_VERSION_NUM >= 160000
 	Assert(bms_equal(rel->relids, root->all_query_rels));
-#else
-	Assert(bms_equal(rel->relids, root->all_baserels));
-#endif
 
 	return rel;
 }
@@ -616,13 +568,8 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	 * Also, if this is the topmost scan/join rel, we postpone gathering until
 	 * the final scan/join targetlist is available (see grouping_planner).
 	 */
-#if PG_VERSION_NUM >= 160000
 	if (rel->reloptkind == RELOPT_BASEREL &&
 		!bms_equal(rel->relids, root->all_query_rels))
-#else
-	if (rel->reloptkind == RELOPT_BASEREL &&
-		!bms_equal(rel->relids, root->all_baserels))
-#endif
 #ifdef __PG_QUERY_PLAN__
 		pgqp_generate_useful_gather_paths(root, rel, false);
 #else
@@ -633,11 +580,7 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	set_cheapest(rel);
 
 #ifdef OPTIMIZER_DEBUG
-#if PG_VERSION_NUM >= 170000
 	pprint(rel);
-#else
-	debug_print_rel(root, rel);
-#endif
 #endif
 }
 
@@ -812,6 +755,10 @@ set_rel_consider_parallel(PlannerInfo *root, RelOptInfo *rel,
 		case RTE_RESULT:
 			/* RESULT RTEs, in themselves, are no problem. */
 			break;
+		case RTE_GROUP:
+			/* Shouldn't happen; we're only considering baserels here. */
+			Assert(false);
+			return;
 	}
 
 	/*
@@ -852,6 +799,17 @@ set_plain_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 	 * its tlist.
 	 */
 	required_outer = rel->lateral_relids;
+
+	/*
+	 * Consider TID scans.
+	 *
+	 * If create_tidscan_paths returns true, then a TID scan path is forced.
+	 * This happens when rel->baserestrictinfo contains CurrentOfExpr, because
+	 * the executor can't handle any other type of path for such queries.
+	 * Hence, we return without adding any other paths.
+	 */
+	if (create_tidscan_paths(root, rel))
+		return;
 
 	/* Consider sequential scan */
 #ifdef __PG_QUERY_PLAN__
@@ -984,15 +942,9 @@ set_tablesample_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *
 	 * GetTsmRoutine is relatively expensive compared to the other tests here,
 	 * so check repeatable_across_scans last, even though that's a bit odd.
 	 */
-#if PG_VERSION_NUM >= 160000
 	if ((root->query_level > 1 ||
 		 bms_membership(root->all_query_rels) != BMS_SINGLETON) &&
 		!(GetTsmRoutine(rte->tablesample->tsmhandler)->repeatable_across_scans))
-#else
-	if ((root->query_level > 1 ||
-		 bms_membership(root->all_baserels) != BMS_SINGLETON) &&
-		!(GetTsmRoutine(rte->tablesample->tsmhandler)->repeatable_across_scans))
-#endif
 	{
 		path = (Path *) create_material_path(rel, path);
 	}
@@ -1054,6 +1006,7 @@ set_append_rel_size(PlannerInfo *root, RelOptInfo *rel,
 {
 	int			parentRTindex = rti;
 	bool		has_live_children;
+	double		parent_tuples;
 	double		parent_rows;
 	double		parent_size;
 	double	   *parent_attrsizes;
@@ -1070,21 +1023,23 @@ set_append_rel_size(PlannerInfo *root, RelOptInfo *rel,
 	 * flag; currently, we only consider partitionwise joins with the baserel
 	 * if its targetlist doesn't contain a whole-row Var.
 	 */
-#if PG_VERSION_NUM >= 160000
 	if (enable_partitionwise_join &&
 		rel->reloptkind == RELOPT_BASEREL &&
 		rte->relkind == RELKIND_PARTITIONED_TABLE &&
 		bms_is_empty(rel->attr_needed[InvalidAttrNumber - rel->min_attr]))
-#else
-	if (enable_partitionwise_join &&
-		rel->reloptkind == RELOPT_BASEREL &&
-		rte->relkind == RELKIND_PARTITIONED_TABLE &&
-		rel->attr_needed[InvalidAttrNumber - rel->min_attr] == NULL)
-#endif
 		rel->consider_partitionwise_join = true;
 
 	/*
 	 * Initialize to compute size estimates for whole append relation.
+	 *
+	 * We handle tuples estimates by setting "tuples" to the total number of
+	 * tuples accumulated from each live child, rather than using "rows".
+	 * Although an appendrel itself doesn't directly enforce any quals, its
+	 * child relations may.  Therefore, setting "tuples" equal to "rows" for
+	 * an appendrel isn't always appropriate, and can lead to inaccurate cost
+	 * estimates.  For example, when estimating the number of distinct values
+	 * from an appendrel, we would be unable to adjust the estimate based on
+	 * the restriction selectivity (see estimate_num_groups).
 	 *
 	 * We handle width estimates by weighting the widths of different child
 	 * rels proportionally to their number of rows.  This is sensible because
@@ -1098,6 +1053,7 @@ set_append_rel_size(PlannerInfo *root, RelOptInfo *rel,
 	 * have zero rows and/or width, if they were excluded by constraints.
 	 */
 	has_live_children = false;
+	parent_tuples = 0;
 	parent_rows = 0;
 	parent_size = 0;
 	nattrs = rel->max_attr - rel->min_attr + 1;
@@ -1109,14 +1065,10 @@ set_append_rel_size(PlannerInfo *root, RelOptInfo *rel,
 		int			childRTindex;
 		RangeTblEntry *childRTE;
 		RelOptInfo *childrel;
-#if PG_VERSION_NUM >= 160000
 		List	   *childrinfos;
-#endif
 		ListCell   *parentvars;
 		ListCell   *childvars;
-#if PG_VERSION_NUM >= 160000
 		ListCell   *lc;
-#endif
 
 		/* append_rel_list contains all append rels; ignore others */
 		if (appinfo->parent_relid != parentRTindex)
@@ -1153,7 +1105,6 @@ set_append_rel_size(PlannerInfo *root, RelOptInfo *rel,
 			continue;
 		}
 
-#if PG_VERSION_NUM >= 160000
 		/*
 		 * Constraint exclusion failed, so copy the parent's join quals and
 		 * targetlist to the child, with appropriate variable substitutions.
@@ -1191,28 +1142,7 @@ set_append_rel_size(PlannerInfo *root, RelOptInfo *rel,
 			adjust_appendrel_attrs(root,
 								   (Node *) rel->reltarget->exprs,
 								   1, &appinfo);
-#else
-		/*
-		 * Constraint exclusion failed, so copy the parent's join quals and
-		 * targetlist to the child, with appropriate variable substitutions.
-		 *
-		 * NB: the resulting childrel->reltarget->exprs may contain arbitrary
-		 * expressions, which otherwise would not occur in a rel's targetlist.
-		 * Code that might be looking at an appendrel child must cope with
-		 * such.  (Normally, a rel's targetlist would only include Vars and
-		 * PlaceHolderVars.)  XXX we do not bother to update the cost or width
-		 * fields of childrel->reltarget; not clear if that would be useful.
-		 */
-		childrel->joininfo = (List *)
-			adjust_appendrel_attrs(root,
-								   (Node *) rel->joininfo,
-								   1, &appinfo);
-		childrel->reltarget->exprs = (List *)
-			adjust_appendrel_attrs(root,
-								   (Node *) rel->reltarget->exprs,
-								   1, &appinfo);
 
-#endif
 		/*
 		 * We have to make child entries in the EquivalenceClass data
 		 * structures as well.  This is needed either if the parent
@@ -1290,6 +1220,7 @@ set_append_rel_size(PlannerInfo *root, RelOptInfo *rel,
 		 */
 		Assert(childrel->rows > 0);
 
+		parent_tuples += childrel->tuples;
 		parent_rows += childrel->rows;
 		parent_size += childrel->reltarget->width * childrel->rows;
 
@@ -1336,16 +1267,11 @@ set_append_rel_size(PlannerInfo *root, RelOptInfo *rel,
 		int			i;
 
 		Assert(parent_rows > 0);
+		rel->tuples = parent_tuples;
 		rel->rows = parent_rows;
 		rel->reltarget->width = rint(parent_size / parent_rows);
 		for (i = 0; i < nattrs; i++)
 			rel->attr_widths[i] = rint(parent_attrsizes[i] / parent_rows);
-
-		/*
-		 * Set "raw tuples" count equal to "rows" for the appendrel; needed
-		 * because some places assume rel->tuples is valid for any baserel.
-		 */
-		rel->tuples = parent_rows;
 
 		/*
 		 * Note that we leave rel->pages as zero; this is important to avoid
@@ -1454,10 +1380,8 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 {
 	List	   *subpaths = NIL;
 	bool		subpaths_valid = true;
-#if PG_VERSION_NUM >= 170000
-	List       *startup_subpaths = NIL;
-	bool        startup_subpaths_valid = true;
-#endif
+	List	   *startup_subpaths = NIL;
+	bool		startup_subpaths_valid = true;
 	List	   *partial_subpaths = NIL;
 	List	   *pa_partial_subpaths = NIL;
 	List	   *pa_nonpartial_subpaths = NIL;
@@ -1497,7 +1421,6 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 		else
 			subpaths_valid = false;
 
-#if PG_VERSION_NUM >= 170000
 		/*
 		 * When the planner is considering cheap startup plans, we'll also
 		 * collect all the cheapest_startup_paths (if set) and build an
@@ -1505,15 +1428,28 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 		 */
 		if (rel->consider_startup && childrel->cheapest_startup_path != NULL)
 		{
+			Path	   *cheapest_path;
+
+			/*
+			 * With an indication of how many tuples the query should provide,
+			 * the optimizer tries to choose the path optimal for that
+			 * specific number of tuples.
+			 */
+			if (root->tuple_fraction > 0.0)
+				cheapest_path =
+					get_cheapest_fractional_path(childrel,
+												 root->tuple_fraction);
+			else
+				cheapest_path = childrel->cheapest_startup_path;
+
 			/* cheapest_startup_path must not be a parameterized path. */
-			Assert(childrel->cheapest_startup_path->param_info == NULL);
-			accumulate_append_subpath(childrel->cheapest_startup_path,
+			Assert(cheapest_path->param_info == NULL);
+			accumulate_append_subpath(cheapest_path,
 									  &startup_subpaths,
 									  NULL);
 		}
 		else
 			startup_subpaths_valid = false;
-#endif
 
 		/* Same idea, but for a partial plan. */
 		if (childrel->partial_pathlist != NIL)
@@ -1652,12 +1588,10 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 												  NIL, NULL, 0, false,
 												  -1));
 #endif
-#if PG_VERSION_NUM >= 170000
 	/* build an AppendPath for the cheap startup paths, if valid */
 	if (startup_subpaths_valid)
 		add_path(rel, (Path *) create_append_path(root, rel, startup_subpaths,
 												  NIL, NIL, NULL, 0, false, -1));
-#endif
 
 	/*
 	 * Consider an append of unordered, unparameterized partial paths.  Make
@@ -1689,13 +1623,8 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 		 */
 		if (enable_parallel_append)
 		{
-#if PG_VERSION_NUM >= 160000
 			parallel_workers = Max(parallel_workers,
 								   pg_leftmost_one_pos32(list_length(live_childrels)) + 1);
-#else
-			parallel_workers = Max(parallel_workers,
-								   fls(list_length(live_childrels)));
-#endif
 			parallel_workers = Min(parallel_workers,
 								   max_parallel_workers_per_gather);
 		}
@@ -1752,13 +1681,8 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 		 * instance because the non-partial paths won't contribute anything to
 		 * the planned number of parallel workers.
 		 */
-#if PG_VERSION_NUM >= 160000
 		parallel_workers = Max(parallel_workers,
 							   pg_leftmost_one_pos32(list_length(live_childrels)) + 1);
-#else
-		parallel_workers = Max(parallel_workers,
-							   fls(list_length(live_childrels)));
-#endif
 		parallel_workers = Min(parallel_workers,
 							   max_parallel_workers_per_gather);
 		Assert(parallel_workers > 0);
@@ -1958,16 +1882,11 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 		List	   *total_subpaths = NIL;
 		List	   *fractional_subpaths = NIL;
 		bool		startup_neq_total = false;
-#if PG_VERSION_NUM < 160000
-		ListCell   *lcr;
-#endif
 		bool		match_partition_order;
 		bool		match_partition_order_desc;
-#if PG_VERSION_NUM >= 160000
 		int			end_index;
 		int			first_index;
 		int			direction;
-#endif
 
 		/*
 		 * Determine if this sort ordering matches any partition pathkeys we
@@ -1988,7 +1907,6 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 			 (!partition_pathkeys_desc_partial &&
 			  pathkeys_contained_in(partition_pathkeys_desc, pathkeys)));
 
-#if PG_VERSION_NUM >= 160000
 		/*
 		 * When the required pathkeys match the reverse of the partition
 		 * order, we must build the list of paths in reverse starting with the
@@ -2016,20 +1934,11 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 			end_index = list_length(live_childrels);
 			direction = 1;
 		}
-#endif
 
 		/* Select the child paths for this ordering... */
-#if PG_VERSION_NUM >= 160000
 		for (int i = first_index; i != end_index; i += direction)
-#else
-		foreach(lcr, live_childrels)
-#endif
 		{
-#if PG_VERSION_NUM >= 160000
 			RelOptInfo *childrel = list_nth_node(RelOptInfo, live_childrels, i);
-#else
-			RelOptInfo *childrel = (RelOptInfo *) lfirst(lcr);
-#endif
 			Path	   *cheapest_startup,
 					   *cheapest_total,
 					   *cheapest_fractional = NULL;
@@ -2072,7 +1981,17 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 			 */
 			if (root->tuple_fraction > 0)
 			{
-				double		path_fraction = (1.0 / root->tuple_fraction);
+				double		path_fraction = root->tuple_fraction;
+
+				/*
+				 * Merge Append considers only live children relations.  Dummy
+				 * relations must be filtered out before.
+				 */
+				Assert(childrel->rows > 0);
+
+				/* Convert absolute limit to a path fraction */
+				if (path_fraction >= 1.0)
+					path_fraction /= childrel->rows;
 
 				cheapest_fractional =
 					get_cheapest_fractional_path_for_pathkeys(childrel->pathlist,
@@ -2125,27 +2044,6 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 					fractional_subpaths = lappend(fractional_subpaths, cheapest_fractional);
 				}
 			}
-#if PG_VERSION_NUM < 160000
-			else if (match_partition_order_desc)
-			{
-				/*
-				 * As above, but we need to reverse the order of the children,
-				 * because nodeAppend.c doesn't know anything about reverse
-				 * ordering and will scan the children in the order presented.
-				 */
-				cheapest_startup = get_singleton_append_subpath(cheapest_startup);
-				cheapest_total = get_singleton_append_subpath(cheapest_total);
-
-				startup_subpaths = lcons(cheapest_startup, startup_subpaths);
-				total_subpaths = lcons(cheapest_total, total_subpaths);
-
-				if (cheapest_fractional)
-				{
-					cheapest_fractional = get_singleton_append_subpath(cheapest_fractional);
-					fractional_subpaths = lcons(cheapest_fractional, fractional_subpaths);
-				}
-			}
-#endif /* PG_VERSION_NUM < 160000 */
 			else
 			{
 				/*
@@ -2164,11 +2062,7 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 		}
 
 		/* ... and build the Append or MergeAppend paths */
-#if PG_VERSION_NUM >= 160000
 		if (match_partition_order)
-#else
-		if (match_partition_order || match_partition_order_desc)
-#endif
 		{
 			/* We only need Append */
 #ifdef __PG_QUERY_PLAN__
@@ -2383,14 +2277,8 @@ accumulate_append_subpath(Path *path, List **subpaths, List **special_subpaths)
 			*subpaths = list_concat(*subpaths,
 									list_copy_tail(apath->subpaths,
 												   apath->first_partial_path));
-#if PG_VERSION_NUM >= 160000
 			new_special_subpaths = list_copy_head(apath->subpaths,
 												  apath->first_partial_path);
-#else
-			new_special_subpaths =
-				list_truncate(list_copy(apath->subpaths),
-							  apath->first_partial_path);
-#endif
 			*special_subpaths = list_concat(*special_subpaths,
 											new_special_subpaths);
 			return;
@@ -2480,30 +2368,6 @@ set_dummy_rel_pathlist(RelOptInfo *rel)
 	set_cheapest(rel);
 }
 
-#if PG_VERSION_NUM < 170000
-/* quick-and-dirty test to see if any joining is needed */
-static bool
-has_multiple_baserels(PlannerInfo *root)
-{
-	int			num_base_rels = 0;
-	Index		rti;
-
-	for (rti = 1; rti < root->simple_rel_array_size; rti++)
-	{
-		RelOptInfo *brel = root->simple_rel_array[rti];
-
-		if (brel == NULL)
-			continue;
-
-		/* ignore RTEs that are "other rels" */
-		if (brel->reloptkind == RELOPT_BASEREL)
-			if (++num_base_rels > 1)
-				return true;
-	}
-	return false;
-}
-#endif
-
 /*
  * find_window_run_conditions
  *		Determine if 'wfunc' is really a WindowFunc and call its prosupport
@@ -2552,11 +2416,9 @@ find_window_run_conditions(Query *subquery, RangeTblEntry *rte, Index rti,
 	if (!IsA(wfunc, WindowFunc))
 		return false;
 
-#if PG_VERSION_NUM >= 160000
 	/* can't use it if there are subplans in the WindowFunc */
 	if (contain_subplans((Node *) wfunc))
 		return false;
-#endif
 
 	prosupport = get_func_support(wfunc->winfnoid);
 
@@ -2599,16 +2461,15 @@ find_window_run_conditions(Query *subquery, RangeTblEntry *rte, Index rti,
 
 	runopexpr = NULL;
 	runoperator = InvalidOid;
-	opinfos = get_op_btree_interpretation(opexpr->opno);
+	opinfos = get_op_index_interpretation(opexpr->opno);
 
 	foreach(lc, opinfos)
 	{
-		OpBtreeInterpretation *opinfo = (OpBtreeInterpretation *) lfirst(lc);
-		int			strategy = opinfo->strategy;
+		OpIndexInterpretation *opinfo = (OpIndexInterpretation *) lfirst(lc);
+		CompareType cmptype = opinfo->cmptype;
 
 		/* handle < / <= */
-		if (strategy == BTLessStrategyNumber ||
-			strategy == BTLessEqualStrategyNumber)
+		if (cmptype == COMPARE_LT || cmptype == COMPARE_LE)
 		{
 			/*
 			 * < / <= is supported for monotonically increasing functions in
@@ -2625,8 +2486,7 @@ find_window_run_conditions(Query *subquery, RangeTblEntry *rte, Index rti,
 			break;
 		}
 		/* handle > / >= */
-		else if (strategy == BTGreaterStrategyNumber ||
-				 strategy == BTGreaterEqualStrategyNumber)
+		else if (cmptype == COMPARE_GT || cmptype == COMPARE_GE)
 		{
 			/*
 			 * > / >= is supported for monotonically decreasing functions in
@@ -2643,9 +2503,9 @@ find_window_run_conditions(Query *subquery, RangeTblEntry *rte, Index rti,
 			break;
 		}
 		/* handle = */
-		else if (strategy == BTEqualStrategyNumber)
+		else if (cmptype == COMPARE_EQ)
 		{
-			int16		newstrategy;
+			CompareType newcmptype;
 
 			/*
 			 * When both monotonically increasing and decreasing then the
@@ -2669,26 +2529,25 @@ find_window_run_conditions(Query *subquery, RangeTblEntry *rte, Index rti,
 			 * below the value in the equality condition.
 			 */
 			if (res->monotonic & MONOTONICFUNC_INCREASING)
-				newstrategy = wfunc_left ? BTLessEqualStrategyNumber : BTGreaterEqualStrategyNumber;
+				newcmptype = wfunc_left ? COMPARE_LE : COMPARE_GE;
 			else
-				newstrategy = wfunc_left ? BTGreaterEqualStrategyNumber : BTLessEqualStrategyNumber;
+				newcmptype = wfunc_left ? COMPARE_GE : COMPARE_LE;
 
 			/* We must keep the original equality qual */
 			*keep_original = true;
 			runopexpr = opexpr;
 
 			/* determine the operator to use for the WindowFuncRunCondition */
-			runoperator = get_opfamily_member(opinfo->opfamily_id,
-											  opinfo->oplefttype,
-											  opinfo->oprighttype,
-											  newstrategy);
+			runoperator = get_opfamily_member_for_cmptype(opinfo->opfamily_id,
+														  opinfo->oplefttype,
+														  opinfo->oprighttype,
+														  newcmptype);
 			break;
 		}
 	}
 
 	if (runopexpr != NULL)
 	{
-#if PG_VERSION_NUM >= 170000
 		WindowFuncRunCondition *wfuncrc;
 
 		wfuncrc = makeNode(WindowFuncRunCondition);
@@ -2698,29 +2557,6 @@ find_window_run_conditions(Query *subquery, RangeTblEntry *rte, Index rti,
 		wfuncrc->arg = copyObject(otherexpr);
 
 		wfunc->runCondition = lappend(wfunc->runCondition, wfuncrc);
-#else
-		Expr	   *newexpr;
-
-		/*
-		 * Build the qual required for the run condition keeping the
-		 * WindowFunc on the same side as it was originally.
-		 */
-		if (wfunc_left)
-			newexpr = make_opclause(runoperator,
-									runopexpr->opresulttype,
-									runopexpr->opretset, (Expr *) wfunc,
-									otherexpr, runopexpr->opcollid,
-									runopexpr->inputcollid);
-		else
-			newexpr = make_opclause(runoperator,
-									runopexpr->opresulttype,
-									runopexpr->opretset,
-									otherexpr, (Expr *) wfunc,
-									runopexpr->opcollid,
-									runopexpr->inputcollid);
-
-		wclause->runCondition = lappend(wclause->runCondition, newexpr);
-#endif
 
 		/* record that this attno was used in a run condition */
 		*run_cond_attrs = bms_add_member(*run_cond_attrs,
@@ -2762,7 +2598,6 @@ check_and_push_window_quals(Query *subquery, RangeTblEntry *rte, Index rti,
 	if (list_length(opexpr->args) != 2)
 		return true;
 
-#if PG_VERSION_NUM >= 160000
 	/*
 	 * Currently, we restrict this optimization to strict OpExprs.  The reason
 	 * for this is that during execution, once the runcondition becomes false,
@@ -2774,7 +2609,6 @@ check_and_push_window_quals(Query *subquery, RangeTblEntry *rte, Index rti,
 	set_opfuncid(opexpr);
 	if (!func_strict(opexpr->opfuncid))
 		return true;
-#endif
 
 	/*
 	 * Check for plain Vars that reference window functions in the subquery.
@@ -2830,9 +2664,7 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 {
 	Query	   *parse = root->parse;
 	Query	   *subquery = rte->subquery;
-#if PG_VERSION_NUM >= 160000
 	bool		trivial_pathtarget;
-#endif
 	Relids		required_outer;
 	pushdown_safety_info safetyInfo;
 	double		tuple_fraction;
@@ -2863,13 +2695,8 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	 * a pushed-down qual.
 	 */
 	memset(&safetyInfo, 0, sizeof(safetyInfo));
-#if PG_VERSION_NUM >= 160000
 	safetyInfo.unsafeFlags = (unsigned char *)
 		palloc0((list_length(subquery->targetList) + 1) * sizeof(unsigned char));
-#else
-	safetyInfo.unsafeColumns = (bool *)
-		palloc0((list_length(subquery->targetList) + 1) * sizeof(bool));
-#endif
 
 	/*
 	 * If the subquery has the "security_barrier" flag, it means the subquery
@@ -2912,7 +2739,6 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 			RestrictInfo *rinfo = (RestrictInfo *) lfirst(l);
 			Node	   *clause = (Node *) rinfo->clause;
 
-#if PG_VERSION_NUM >= 160000
 			if (rinfo->pseudoconstant)
 			{
 				upperrestrictlist = lappend(upperrestrictlist, rinfo);
@@ -2951,45 +2777,12 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 					upperrestrictlist = lappend(upperrestrictlist, rinfo);
 					break;
 			}
-#else
-			if (!rinfo->pseudoconstant &&
-				qual_is_pushdown_safe(subquery, rti, rinfo, &safetyInfo))
-			{
-				Node	   *clause = (Node *) rinfo->clause;
-
-				/* Push it down */
-				subquery_push_qual(subquery, rte, rti, clause);
-			}
-			else
-			{
-				/*
-				 * Since we can't push the qual down into the subquery, check
-				 * if it happens to reference a window function.  If so then
-				 * it might be useful to use for the WindowAgg's runCondition.
-				 */
-				if (!subquery->hasWindowFuncs ||
-					check_and_push_window_quals(subquery, rte, rti, clause,
-												&run_cond_attrs))
-				{
-					/*
-					 * subquery has no window funcs or the clause is not a
-					 * suitable window run condition qual or it is, but the
-					 * original must also be kept in the upper query.
-					 */
-					upperrestrictlist = lappend(upperrestrictlist, rinfo);
-				}
-			}
-#endif /* #if PG_VERSION_NUM >= 160000 */
 		}
 		rel->baserestrictinfo = upperrestrictlist;
 		/* We don't bother recomputing baserestrict_min_security */
 	}
 
-#if PG_VERSION_NUM >= 160000
 	pfree(safetyInfo.unsafeFlags);
-#else
-	pfree(safetyInfo.unsafeColumns);
-#endif
 
 	/*
 	 * The upper query might not use all the subquery's output columns; if
@@ -3008,18 +2801,10 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	if (parse->hasAggs ||
 		parse->groupClause ||
 		parse->groupingSets ||
-#if PG_VERSION_NUM >= 160000
 		root->hasHavingQual ||
-#else
-		parse->havingQual ||
-#endif
 		parse->distinctClause ||
 		parse->sortClause ||
-#if PG_VERSION_NUM >= 170000
 		bms_membership(root->all_baserels) == BMS_MULTIPLE)
-#else
-		has_multiple_baserels(root))
-#endif
 		tuple_fraction = 0.0;	/* default case */
 	else
 		tuple_fraction = root->tuple_fraction;
@@ -3029,24 +2814,12 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 
 	/* Generate a subroot and Paths for the subquery */
 #ifdef __PG_QUERY_PLAN__
-#if PG_VERSION_NUM >= 170000
 	rel->subroot = pgqp_subquery_planner(root->glob, subquery,
 										 root,
 										 false, tuple_fraction, NULL);
 #else
-	rel->subroot = pgqp_subquery_planner(root->glob, subquery,
-										 root,
-										 false, tuple_fraction);
-#endif
-#else
-#if PG_VERSION_NUM >= 170000
 	rel->subroot = subquery_planner(root->glob, subquery, root, false,
 									tuple_fraction, NULL);
-#else
-	rel->subroot = subquery_planner(root->glob, subquery,
-									root,
-									false, tuple_fraction);
-#endif
 #endif
 
 	/* Isolate the params needed by this specific subplan */
@@ -3073,7 +2846,6 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	 */
 	set_subquery_size_estimates(root, rel);
 
-#if PG_VERSION_NUM >= 160000
 	/*
 	 * Also detect whether the reltarget is trivial, so that we can pass that
 	 * info to cost_subqueryscan (rather than re-deriving it multiple times).
@@ -3103,7 +2875,6 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 			}
 		}
 	}
-#endif
 
 	/*
 	 * For each Path that subquery_planner produced, make a SubqueryScanPath
@@ -3124,15 +2895,11 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 		add_path(rel, (Path *)
 #ifdef __PG_QUERY_PLAN__
 				 pgqp_create_subqueryscan_path(root, rel, subpath,
-#if PG_VERSION_NUM >= 160000
 											   trivial_pathtarget,
-#endif
 											   pathkeys, required_outer));
 #else
 				 create_subqueryscan_path(root, rel, subpath,
-#if PG_VERSION_NUM >= 160000
 										  trivial_pathtarget,
-#endif
 										  pathkeys, required_outer));
 #endif
 	}
@@ -3160,16 +2927,12 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 			add_partial_path(rel, (Path *)
 #ifdef __PG_QUERY_PLAN__
 							 pgqp_create_subqueryscan_path(root, rel, subpath,
-#if PG_VERSION_NUM >= 160000
 														   trivial_pathtarget,
-#endif
 														   pathkeys,
 														   required_outer));
 #else
 							 create_subqueryscan_path(root, rel, subpath,
-#if PG_VERSION_NUM >= 160000
 													  trivial_pathtarget,
-#endif
 													  pathkeys,
 													  required_outer));
 #endif
@@ -3232,21 +2995,11 @@ set_function_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 		 * cares about the ordering.
 		 */
 		if (var)
-#if PG_VERSION_NUM >= 160000
 			pathkeys = build_expression_pathkey(root,
 												(Expr *) var,
 												Int8LessOperator,
 												rel->relids,
 												false);
-#else
-			pathkeys = build_expression_pathkey(root,
-												(Expr *) var,
-												Int8LessOperator,
-												NULL,	/* below outer joins */
-												Int8LessOperator,
-												rel->relids,
-												false);
-#endif
 	}
 
 	/* Generate appropriate path */
@@ -3305,15 +3058,11 @@ set_tablefunc_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 static void
 set_cte_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 {
-#if PG_VERSION_NUM >= 170000
 	Path	   *ctepath;
-#endif
 	Plan	   *cteplan;
 	PlannerInfo *cteroot;
 	Index		levelsup;
-#if PG_VERSION_NUM >= 170000
 	List	   *pathkeys;
-#endif
 	int			ndx;
 	ListCell   *lc;
 	int			plan_id;
@@ -3354,22 +3103,18 @@ set_cte_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 	if (plan_id <= 0)
 		elog(ERROR, "no plan was made for CTE \"%s\"", rte->ctename);
 
-#if PG_VERSION_NUM >= 170000
 	Assert(list_length(root->glob->subpaths) == list_length(root->glob->subplans));
 	ctepath = (Path *) list_nth(root->glob->subpaths, plan_id - 1);
-#endif
 	cteplan = (Plan *) list_nth(root->glob->subplans, plan_id - 1);
 
 	/* Mark rel with estimated output rows, width, etc */
 	set_cte_size_estimates(root, rel, cteplan->plan_rows);
 
-#if PG_VERSION_NUM >= 170000
 	/* Convert the ctepath's pathkeys to outer query's representation */
 	pathkeys = convert_subquery_pathkeys(root,
 										 rel,
 										 ctepath->pathkeys,
 										 cteplan->targetlist);
-#endif
 
 	/*
 	 * We don't support pushing join clauses into the quals of a CTE scan, but
@@ -3380,17 +3125,9 @@ set_cte_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 
 	/* Generate appropriate path */
 #ifdef __PG_QUERY_PLAN__
-#if PG_VERSION_NUM >= 170000
 	add_path(rel, pgqp_create_ctescan_path(root, rel, pathkeys, required_outer));
 #else
-	add_path(rel, pgqp_create_ctescan_path(root, rel, required_outer));
-#endif
-#else
-#if PG_VERSION_NUM >= 170000
 	add_path(rel, create_ctescan_path(root, rel, pathkeys, required_outer));
-#else
-	add_path(rel, create_ctescan_path(root, rel, required_outer));
-#endif
 #endif
 }
 
@@ -3424,10 +3161,6 @@ set_namedtuplestore_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	add_path(rel, create_namedtuplestorescan_path(root, rel, required_outer));
 #endif
 
-#if PG_VERSION_NUM < 170000
-	/* Select cheapest path (pretty easy in this case...) */
-	set_cheapest(rel);
-#endif
 }
 
 /*
@@ -3459,10 +3192,6 @@ set_result_pathlist(PlannerInfo *root, RelOptInfo *rel,
 
 	/* Generate appropriate path */
 	add_path(rel, create_resultscan_path(root, rel, required_outer));
-#if PG_VERSION_NUM < 170000
-	/* Select cheapest path (pretty easy in this case...) */
-	set_cheapest(rel);
-#endif
 }
 
 /*
@@ -3558,8 +3287,7 @@ generate_gather_paths(PlannerInfo *root, RelOptInfo *rel, bool override_rows)
 	 * of partial_pathlist because of the way add_partial_path works.
 	 */
 	cheapest_partial_path = linitial(rel->partial_pathlist);
-	rows =
-		cheapest_partial_path->rows * cheapest_partial_path->parallel_workers;
+	rows = compute_gather_rows(cheapest_partial_path);
 	simple_gather_path = (Path *)
 #ifdef __PG_QUERY_PLAN__
 		pgqp_create_gather_path(root, rel, cheapest_partial_path, rel->reltarget,
@@ -3582,7 +3310,7 @@ generate_gather_paths(PlannerInfo *root, RelOptInfo *rel, bool override_rows)
 		if (subpath->pathkeys == NIL)
 			continue;
 
-		rows = subpath->rows * subpath->parallel_workers;
+		rows = compute_gather_rows(subpath);
 #ifdef __PG_QUERY_PLAN__
 		path = pgqp_create_gather_merge_path(root, rel, subpath, rel->reltarget,
 											 subpath->pathkeys, NULL, rowsp);
@@ -3666,15 +3394,9 @@ get_useful_pathkeys_for_relation(PlannerInfo *root, RelOptInfo *rel,
 			useful_pathkeys_list = lappend(useful_pathkeys_list,
 										   root->query_pathkeys);
 		else if (npathkeys > 0)
-#if PG_VERSION_NUM >= 160000
 			useful_pathkeys_list = lappend(useful_pathkeys_list,
 										   list_copy_head(root->query_pathkeys,
 														  npathkeys));
-#else
-			useful_pathkeys_list = lappend(useful_pathkeys_list,
-										   list_truncate(list_copy(root->query_pathkeys),
-														 npathkeys));
-#endif
 	}
 
 	return useful_pathkeys_list;
@@ -3756,7 +3478,6 @@ generate_useful_gather_paths(PlannerInfo *root, RelOptInfo *rel, bool override_r
 			if (is_sorted)
 				continue;
 
-#if PG_VERSION_NUM >= 160000
 			/*
 			 * Try at least sorting the cheapest path and also try
 			 * incrementally sorting any path which is partially sorted
@@ -3767,9 +3488,6 @@ generate_useful_gather_paths(PlannerInfo *root, RelOptInfo *rel, bool override_r
 			if (subpath != cheapest_partial_path &&
 				(presorted_keys == 0 || !enable_incremental_sort))
 				continue;
-#endif
-
-#if PG_VERSION_NUM >= 160000
 
 			/*
 			 * Consider regular sort for any path that's not presorted or if
@@ -3790,7 +3508,6 @@ generate_useful_gather_paths(PlannerInfo *root, RelOptInfo *rel, bool override_r
 													subpath,
 													useful_pathkeys,
 													-1.0);
-				rows = subpath->rows * subpath->parallel_workers;
 			}
 			else
 				subpath = (Path *) create_incremental_sort_path(root,
@@ -3800,6 +3517,7 @@ generate_useful_gather_paths(PlannerInfo *root, RelOptInfo *rel, bool override_r
 																presorted_keys,
 																-1);
 #ifdef __PG_QUERY_PLAN__
+			rows = compute_gather_rows(subpath);
 			path = pgqp_create_gather_merge_path(root, rel,
 												 subpath,
 												 rel->reltarget,
@@ -3807,6 +3525,7 @@ generate_useful_gather_paths(PlannerInfo *root, RelOptInfo *rel, bool override_r
 												 NULL,
 												 rowsp);
 #else
+			rows = compute_gather_rows(subpath);
 			path = create_gather_merge_path(root, rel,
 											subpath,
 											rel->reltarget,
@@ -3816,91 +3535,6 @@ generate_useful_gather_paths(PlannerInfo *root, RelOptInfo *rel, bool override_r
 #endif
 
 			add_path(rel, &path->path);
-#else
-			/*
-			 * Consider regular sort for the cheapest partial path (for each
-			 * useful pathkeys). We know the path is not sorted, because we'd
-			 * not get here otherwise.
-			 *
-			 * This is not redundant with the gather paths created in
-			 * generate_gather_paths, because that doesn't generate ordered
-			 * output. Here we add an explicit sort to match the useful
-			 * ordering.
-			 */
-			if (cheapest_partial_path == subpath)
-			{
-				Path	   *tmp;
-
-				tmp = (Path *) create_sort_path(root,
-												rel,
-												subpath,
-												useful_pathkeys,
-												-1.0);
-
-				rows = tmp->rows * tmp->parallel_workers;
-
-#ifdef __PG_QUERY_PLAN__
-				path = pgqp_create_gather_merge_path(root, rel,
-													 tmp,
-													 rel->reltarget,
-													 tmp->pathkeys,
-													 NULL,
-													 rowsp);
-#else
-				path = create_gather_merge_path(root, rel,
-												tmp,
-												rel->reltarget,
-												tmp->pathkeys,
-												NULL,
-												rowsp);
-#endif
-
-				add_path(rel, &path->path);
-
-				/* Fall through */
-			}
-
-			/*
-			 * Consider incremental sort, but only when the subpath is already
-			 * partially sorted on a pathkey prefix.
-			 */
-			if (enable_incremental_sort && presorted_keys > 0)
-			{
-				Path	   *tmp;
-
-				/*
-				 * We should have already excluded pathkeys of length 1
-				 * because then presorted_keys > 0 would imply is_sorted was
-				 * true.
-				 */
-				Assert(list_length(useful_pathkeys) != 1);
-
-				tmp = (Path *) create_incremental_sort_path(root,
-															rel,
-															subpath,
-															useful_pathkeys,
-															presorted_keys,
-															-1);
-
-#ifdef __PG_QUERY_PLAN__
-				path = pgqp_create_gather_merge_path(root, rel,
-													 tmp,
-													 rel->reltarget,
-													 tmp->pathkeys,
-													 NULL,
-													 rowsp);
-#else
-				path = create_gather_merge_path(root, rel,
-												tmp,
-												rel->reltarget,
-												tmp->pathkeys,
-												NULL,
-												rowsp);
-#endif
-
-				add_path(rel, &path->path);
-			}
-#endif /* #if PG_VERSION_NUM >= 160000 */
 		}
 	}
 }
@@ -4094,11 +3728,7 @@ standard_join_search(PlannerInfo *root, int levels_needed, List *initial_rels)
 			 * once we know the final targetlist (see grouping_planner's and
 			 * its call to apply_scanjoin_target_to_paths).
 			 */
-#if PG_VERSION_NUM >= 160000
 			if (!bms_equal(rel->relids, root->all_query_rels))
-#else
-			if (!bms_equal(rel->relids, root->all_baserels))
-#endif
 #ifdef __PG_QUERY_PLAN__
 				pgqp_generate_useful_gather_paths(root, rel, false);
 #else
@@ -4109,11 +3739,7 @@ standard_join_search(PlannerInfo *root, int levels_needed, List *initial_rels)
 			set_cheapest(rel);
 
 #ifdef OPTIMIZER_DEBUG
-#if PG_VERSION_NUM >= 170000
 			pprint(rel);
-#else
-			debug_print_rel(root, rel);
-#endif
 #endif
 		}
 	}
@@ -4354,76 +3980,44 @@ check_output_expressions(Query *subquery, pushdown_safety_info *safetyInfo)
 		if (tle->resjunk)
 			continue;			/* ignore resjunk columns */
 
-#if PG_VERSION_NUM < 160000
-		/* We need not check further if output col is already known unsafe */
-		if (safetyInfo->unsafeColumns[tle->resno])
-			continue;
-#endif
-
 		/* Functions returning sets are unsafe (point 1) */
 		if (subquery->hasTargetSRFs &&
-#if PG_VERSION_NUM >= 160000
 			(safetyInfo->unsafeFlags[tle->resno] &
 			 UNSAFE_HAS_SET_FUNC) == 0 &&
-#endif
 			expression_returns_set((Node *) tle->expr))
 		{
-#if PG_VERSION_NUM >= 160000
 			safetyInfo->unsafeFlags[tle->resno] |= UNSAFE_HAS_SET_FUNC;
-#else
-			safetyInfo->unsafeColumns[tle->resno] = true;
-#endif
 			continue;
 		}
 
 		/* Volatile functions are unsafe (point 2) */
-#if PG_VERSION_NUM >= 160000
 		if ((safetyInfo->unsafeFlags[tle->resno] &
 			 UNSAFE_HAS_VOLATILE_FUNC) == 0 &&
 			contain_volatile_functions((Node *) tle->expr))
-#else
-		if (contain_volatile_functions((Node *) tle->expr))
-#endif
 		{
-#if PG_VERSION_NUM >= 160000
 			safetyInfo->unsafeFlags[tle->resno] |= UNSAFE_HAS_VOLATILE_FUNC;
-#else
-			safetyInfo->unsafeColumns[tle->resno] = true;
-#endif
 			continue;
 		}
 
 		/* If subquery uses DISTINCT ON, check point 3 */
 		if (subquery->hasDistinctOn &&
-#if PG_VERSION_NUM >= 160000
 			(safetyInfo->unsafeFlags[tle->resno] &
 			 UNSAFE_NOTIN_DISTINCTON_CLAUSE) == 0 &&
-#endif
 			!targetIsInSortList(tle, InvalidOid, subquery->distinctClause))
 		{
 			/* non-DISTINCT column, so mark it unsafe */
-#if PG_VERSION_NUM >= 160000
 			safetyInfo->unsafeFlags[tle->resno] |= UNSAFE_NOTIN_DISTINCTON_CLAUSE;
-#else
-			safetyInfo->unsafeColumns[tle->resno] = true;
-#endif
 			continue;
 		}
 
 		/* If subquery uses window functions, check point 4 */
 		if (subquery->hasWindowFuncs &&
-#if PG_VERSION_NUM >= 160000
 			(safetyInfo->unsafeFlags[tle->resno] &
 			 UNSAFE_NOTIN_DISTINCTON_CLAUSE) == 0 &&
-#endif
 			!targetIsInAllPartitionLists(tle, subquery))
 		{
 			/* not present in all PARTITION BY clauses, so mark it unsafe */
-#if PG_VERSION_NUM >= 160000
 			safetyInfo->unsafeFlags[tle->resno] |= UNSAFE_NOTIN_PARTITIONBY_CLAUSE;
-#else
-			safetyInfo->unsafeColumns[tle->resno] = true;
-#endif
 			continue;
 		}
 	}
@@ -4462,11 +4056,7 @@ compare_tlist_datatypes(List *tlist, List *colTypes,
 		if (colType == NULL)
 			elog(ERROR, "wrong number of tlist entries");
 		if (exprType((Node *) tle->expr) != lfirst_oid(colType))
-#if PG_VERSION_NUM >= 160000
 			safetyInfo->unsafeFlags[tle->resno] |= UNSAFE_TYPE_MISMATCH;
-#else
-			safetyInfo->unsafeColumns[tle->resno] = true;
-#endif
 		colType = lnext(colTypes, colType);
 	}
 	if (colType != NULL)
@@ -4526,57 +4116,28 @@ targetIsInAllPartitionLists(TargetEntry *tle, Query *query)
  * 5. rinfo's clause must not refer to any subquery output columns that were
  * found to be unsafe to reference by subquery_is_pushdown_safe().
  */
-#if PG_VERSION_NUM >= 160000
 static pushdown_safe_type
-#else
-static bool
-#endif
 qual_is_pushdown_safe(Query *subquery, Index rti, RestrictInfo *rinfo,
 					  pushdown_safety_info *safetyInfo)
 {
-#if PG_VERSION_NUM >= 160000
 	pushdown_safe_type safe = PUSHDOWN_SAFE;
-#else
-	bool		safe = true;
-#endif
 	Node	   *qual = (Node *) rinfo->clause;
 	List	   *vars;
 	ListCell   *vl;
 
 	/* Refuse subselects (point 1) */
 	if (contain_subplans(qual))
-#if PG_VERSION_NUM >= 160000
 		return PUSHDOWN_UNSAFE;
-#else
-		return false;
-#endif
 
 	/* Refuse volatile quals if we found they'd be unsafe (point 2) */
 	if (safetyInfo->unsafeVolatile &&
 		contain_volatile_functions((Node *) rinfo))
-#if PG_VERSION_NUM >= 160000
 		return PUSHDOWN_UNSAFE;
-#else
-		return false;
-#endif
 
 	/* Refuse leaky quals if told to (point 3) */
 	if (safetyInfo->unsafeLeaky &&
 		contain_leaked_vars(qual))
-#if PG_VERSION_NUM >= 160000
 		return PUSHDOWN_UNSAFE;
-#else
-		return false;
-#endif
-
-#if PG_VERSION_NUM < 160000
-	/*
-	 * It would be unsafe to push down window function calls, but at least for
-	 * the moment we could never see any in a qual anyhow.  (The same applies
-	 * to aggregates, which we check for in pull_var_clause below.)
-	 */
-	Assert(!contain_window_function(qual));
-#endif
 
 	/*
 	 * Examine all Vars used in clause.  Since it's a restriction clause, all
@@ -4603,11 +4164,7 @@ qual_is_pushdown_safe(Query *subquery, Index rti, RestrictInfo *rinfo,
 		 */
 		if (!IsA(var, Var))
 		{
-#if PG_VERSION_NUM >= 160000
 			safe = PUSHDOWN_UNSAFE;
-#else
-			safe  false;
-#endif
 			break;
 		}
 
@@ -4619,11 +4176,7 @@ qual_is_pushdown_safe(Query *subquery, Index rti, RestrictInfo *rinfo,
 		 */
 		if (var->varno != rti)
 		{
-#if PG_VERSION_NUM >= 160000
 			safe = PUSHDOWN_UNSAFE;
-#else
-			safe  false;
-#endif
 			break;
 		}
 
@@ -4633,16 +4186,11 @@ qual_is_pushdown_safe(Query *subquery, Index rti, RestrictInfo *rinfo,
 		/* Check point 4 */
 		if (var->varattno == 0)
 		{
-#if PG_VERSION_NUM >= 160000
 			safe = PUSHDOWN_UNSAFE;
-#else
-			safe  false;
-#endif
 			break;
 		}
 
 		/* Check point 5 */
-#if PG_VERSION_NUM >= 160000
 		if (safetyInfo->unsafeFlags[var->varattno] != 0)
 		{
 			if (safetyInfo->unsafeFlags[var->varattno] &
@@ -4659,13 +4207,6 @@ qual_is_pushdown_safe(Query *subquery, Index rti, RestrictInfo *rinfo,
 				/* don't break, we might find another Var that's unsafe */
 			}
 		}
-#else
-		if (safetyInfo->unsafeColumns[var->varattno])
-		{
-			safe  false;
-			break;
-		}
-#endif
 	}
 
 	list_free(vars);
@@ -4698,6 +4239,7 @@ subquery_push_qual(Query *subquery, RangeTblEntry *rte, Index rti, Node *qual)
 		 */
 		qual = ReplaceVarsFromTargetList(qual, rti, 0, rte,
 										 subquery->targetList,
+										 subquery->resultRelation,
 										 REPLACEVARS_REPORT_ERROR, 0,
 										 &subquery->hasSubLinks);
 
@@ -5074,7 +4616,6 @@ generate_partitionwise_join_paths(PlannerInfo *root, RelOptInfo *rel)
 #else
 		generate_partitionwise_join_paths(root, child_rel);
 #endif
-#if PG_VERSION_NUM >= 160000
 		/* If we failed to make any path for this child, we must give up. */
 		if (child_rel->pathlist == NIL)
 		{
@@ -5085,7 +4626,6 @@ generate_partitionwise_join_paths(PlannerInfo *root, RelOptInfo *rel)
 			rel->nparts = 0;
 			return;
 		}
-#endif
 		/* Else, identify the cheapest path for it. */
 		set_cheapest(child_rel);
 
@@ -5094,11 +4634,7 @@ generate_partitionwise_join_paths(PlannerInfo *root, RelOptInfo *rel)
 			continue;
 
 #ifdef OPTIMIZER_DEBUG
-#if PG_VERSION_NUM >= 170000
-			pprint(rel);
-#else
-		debug_print_rel(root, child_rel);
-#endif
+		pprint(child_rel);
 #endif
 
 		live_children = lappend(live_children, child_rel);
@@ -5120,326 +4656,3 @@ generate_partitionwise_join_paths(PlannerInfo *root, RelOptInfo *rel)
 	list_free(live_children);
 }
 
-#if PG_VERSION_NUM < 170000
-
-/*****************************************************************************
- *			DEBUG SUPPORT
- *****************************************************************************/
-
-#ifdef OPTIMIZER_DEBUG
-
-static void
-print_relids(PlannerInfo *root, Relids relids)
-{
-	int			x;
-	bool		first = true;
-
-	x = -1;
-	while ((x = bms_next_member(relids, x)) >= 0)
-	{
-		if (!first)
-			printf(" ");
-		if (x < root->simple_rel_array_size &&
-			root->simple_rte_array[x])
-			printf("%s", root->simple_rte_array[x]->eref->aliasname);
-		else
-			printf("%d", x);
-		first = false;
-	}
-}
-
-static void
-print_restrictclauses(PlannerInfo *root, List *clauses)
-{
-	ListCell   *l;
-
-	foreach(l, clauses)
-	{
-		RestrictInfo *c = lfirst(l);
-
-		print_expr((Node *) c->clause, root->parse->rtable);
-		if (lnext(clauses, l))
-			printf(", ");
-	}
-}
-
-static void
-print_path(PlannerInfo *root, Path *path, int indent)
-{
-	const char *ptype;
-	bool		join = false;
-	Path	   *subpath = NULL;
-	int			i;
-
-	switch (nodeTag(path))
-	{
-		case T_Path:
-			switch (path->pathtype)
-			{
-				case T_SeqScan:
-					ptype = "SeqScan";
-					break;
-				case T_SampleScan:
-					ptype = "SampleScan";
-					break;
-				case T_FunctionScan:
-					ptype = "FunctionScan";
-					break;
-				case T_TableFuncScan:
-					ptype = "TableFuncScan";
-					break;
-				case T_ValuesScan:
-					ptype = "ValuesScan";
-					break;
-				case T_CteScan:
-					ptype = "CteScan";
-					break;
-				case T_NamedTuplestoreScan:
-					ptype = "NamedTuplestoreScan";
-					break;
-				case T_Result:
-					ptype = "Result";
-					break;
-				case T_WorkTableScan:
-					ptype = "WorkTableScan";
-					break;
-				default:
-					ptype = "???Path";
-					break;
-			}
-			break;
-		case T_IndexPath:
-			ptype = "IdxScan";
-			break;
-		case T_BitmapHeapPath:
-			ptype = "BitmapHeapScan";
-			break;
-		case T_BitmapAndPath:
-			ptype = "BitmapAndPath";
-			break;
-		case T_BitmapOrPath:
-			ptype = "BitmapOrPath";
-			break;
-		case T_TidPath:
-			ptype = "TidScan";
-			break;
-		case T_SubqueryScanPath:
-			ptype = "SubqueryScan";
-			break;
-		case T_ForeignPath:
-			ptype = "ForeignScan";
-			break;
-		case T_CustomPath:
-			ptype = "CustomScan";
-			break;
-		case T_NestPath:
-			ptype = "NestLoop";
-			join = true;
-			break;
-		case T_MergePath:
-			ptype = "MergeJoin";
-			join = true;
-			break;
-		case T_HashPath:
-			ptype = "HashJoin";
-			join = true;
-			break;
-		case T_AppendPath:
-			ptype = "Append";
-			break;
-		case T_MergeAppendPath:
-			ptype = "MergeAppend";
-			break;
-		case T_GroupResultPath:
-			ptype = "GroupResult";
-			break;
-		case T_MaterialPath:
-			ptype = "Material";
-			subpath = ((MaterialPath *) path)->subpath;
-			break;
-		case T_MemoizePath:
-			ptype = "Memoize";
-			subpath = ((MemoizePath *) path)->subpath;
-			break;
-		case T_UniquePath:
-			ptype = "Unique";
-			subpath = ((UniquePath *) path)->subpath;
-			break;
-		case T_GatherPath:
-			ptype = "Gather";
-			subpath = ((GatherPath *) path)->subpath;
-			break;
-		case T_GatherMergePath:
-			ptype = "GatherMerge";
-			subpath = ((GatherMergePath *) path)->subpath;
-			break;
-		case T_ProjectionPath:
-			ptype = "Projection";
-			subpath = ((ProjectionPath *) path)->subpath;
-			break;
-		case T_ProjectSetPath:
-			ptype = "ProjectSet";
-			subpath = ((ProjectSetPath *) path)->subpath;
-			break;
-		case T_SortPath:
-			ptype = "Sort";
-			subpath = ((SortPath *) path)->subpath;
-			break;
-		case T_IncrementalSortPath:
-			ptype = "IncrementalSort";
-			subpath = ((SortPath *) path)->subpath;
-			break;
-		case T_GroupPath:
-			ptype = "Group";
-			subpath = ((GroupPath *) path)->subpath;
-			break;
-		case T_UpperUniquePath:
-			ptype = "UpperUnique";
-			subpath = ((UpperUniquePath *) path)->subpath;
-			break;
-		case T_AggPath:
-			ptype = "Agg";
-			subpath = ((AggPath *) path)->subpath;
-			break;
-		case T_GroupingSetsPath:
-			ptype = "GroupingSets";
-			subpath = ((GroupingSetsPath *) path)->subpath;
-			break;
-		case T_MinMaxAggPath:
-			ptype = "MinMaxAgg";
-			break;
-		case T_WindowAggPath:
-			ptype = "WindowAgg";
-			subpath = ((WindowAggPath *) path)->subpath;
-			break;
-		case T_SetOpPath:
-			ptype = "SetOp";
-			subpath = ((SetOpPath *) path)->subpath;
-			break;
-		case T_RecursiveUnionPath:
-			ptype = "RecursiveUnion";
-			break;
-		case T_LockRowsPath:
-			ptype = "LockRows";
-			subpath = ((LockRowsPath *) path)->subpath;
-			break;
-		case T_ModifyTablePath:
-			ptype = "ModifyTable";
-			break;
-		case T_LimitPath:
-			ptype = "Limit";
-			subpath = ((LimitPath *) path)->subpath;
-			break;
-		default:
-			ptype = "???Path";
-			break;
-	}
-
-	for (i = 0; i < indent; i++)
-		printf("\t");
-	printf("%s", ptype);
-
-	if (path->parent)
-	{
-		printf("(");
-		print_relids(root, path->parent->relids);
-		printf(")");
-	}
-	if (path->param_info)
-	{
-		printf(" required_outer (");
-		print_relids(root, path->param_info->ppi_req_outer);
-		printf(")");
-	}
-	printf(" rows=%.0f cost=%.2f..%.2f\n",
-		   path->rows, path->startup_cost, path->total_cost);
-
-	if (path->pathkeys)
-	{
-		for (i = 0; i < indent; i++)
-			printf("\t");
-		printf("  pathkeys: ");
-		print_pathkeys(path->pathkeys, root->parse->rtable);
-	}
-
-	if (join)
-	{
-		JoinPath   *jp = (JoinPath *) path;
-
-		for (i = 0; i < indent; i++)
-			printf("\t");
-		printf("  clauses: ");
-		print_restrictclauses(root, jp->joinrestrictinfo);
-		printf("\n");
-
-		if (IsA(path, MergePath))
-		{
-			MergePath  *mp = (MergePath *) path;
-
-			for (i = 0; i < indent; i++)
-				printf("\t");
-			printf("  sortouter=%d sortinner=%d materializeinner=%d\n",
-				   ((mp->outersortkeys) ? 1 : 0),
-				   ((mp->innersortkeys) ? 1 : 0),
-				   ((mp->materialize_inner) ? 1 : 0));
-		}
-
-		print_path(root, jp->outerjoinpath, indent + 1);
-		print_path(root, jp->innerjoinpath, indent + 1);
-	}
-
-	if (subpath)
-		print_path(root, subpath, indent + 1);
-}
-
-#ifndef __PG_QUERY_PLAN__
-void
-debug_print_rel(PlannerInfo *root, RelOptInfo *rel)
-{
-	ListCell   *l;
-
-	printf("RELOPTINFO (");
-	print_relids(root, rel->relids);
-	printf("): rows=%.0f width=%d\n", rel->rows, rel->reltarget->width);
-
-	if (rel->baserestrictinfo)
-	{
-		printf("\tbaserestrictinfo: ");
-		print_restrictclauses(root, rel->baserestrictinfo);
-		printf("\n");
-	}
-
-	if (rel->joininfo)
-	{
-		printf("\tjoininfo: ");
-		print_restrictclauses(root, rel->joininfo);
-		printf("\n");
-	}
-
-	printf("\tpath list:\n");
-	foreach(l, rel->pathlist)
-		print_path(root, lfirst(l), 1);
-	if (rel->cheapest_parameterized_paths)
-	{
-		printf("\n\tcheapest parameterized paths:\n");
-		foreach(l, rel->cheapest_parameterized_paths)
-			print_path(root, lfirst(l), 1);
-	}
-	if (rel->cheapest_startup_path)
-	{
-		printf("\n\tcheapest startup path:\n");
-		print_path(root, rel->cheapest_startup_path, 1);
-	}
-	if (rel->cheapest_total_path)
-	{
-		printf("\n\tcheapest total path:\n");
-		print_path(root, rel->cheapest_total_path, 1);
-	}
-	printf("\n");
-	fflush(stdout);
-}
-#endif							/* #ifndef __PG_QUERY_PLAN__ */
-
-#endif							/* OPTIMIZER_DEBUG */
-
-#endif							/* #if PG_VERSION_NUM < 170000 */

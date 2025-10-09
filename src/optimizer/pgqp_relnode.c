@@ -24,19 +24,15 @@
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
 #include "optimizer/inherit.h"
-#if PG_VERSION_NUM >= 170000
 #include "optimizer/optimizer.h"
-#endif
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/placeholder.h"
 #include "optimizer/plancat.h"
 #include "optimizer/restrictinfo.h"
 #include "optimizer/tlist.h"
-#if PG_VERSION_NUM >= 160000
-#include "rewrite/rewriteManip.h"
 #include "parser/parse_relation.h"
-#endif
+#include "rewrite/rewriteManip.h"
 #include "utils/hsearch.h"
 #include "utils/lsyscache.h"
 
@@ -54,68 +50,38 @@ typedef struct JoinHashEntry
 	RelOptInfo *join_rel;
 } JoinHashEntry;
 
-#if PG_VERSION_NUM >= 160000
 static void build_joinrel_tlist(PlannerInfo *root, RelOptInfo *joinrel,
 								RelOptInfo *input_rel,
 								SpecialJoinInfo *sjinfo,
 								List *pushed_down_joins,
 								bool can_null);
-#else
-static void build_joinrel_tlist(PlannerInfo *root, RelOptInfo *joinrel,
-								RelOptInfo *input_rel);
-#endif
-#if PG_VERSION_NUM >= 160000
 static List *build_joinrel_restrictlist(PlannerInfo *root,
 										RelOptInfo *joinrel,
 										RelOptInfo *outer_rel,
 										RelOptInfo *inner_rel,
 										SpecialJoinInfo *sjinfo);
-#else
-static List *build_joinrel_restrictlist(PlannerInfo *root,
-										RelOptInfo *joinrel,
-										RelOptInfo *outer_rel,
-										RelOptInfo *inner_rel);
-#endif
 static void build_joinrel_joinlist(RelOptInfo *joinrel,
 								   RelOptInfo *outer_rel,
 								   RelOptInfo *inner_rel);
-#if PG_VERSION_NUM >= 160000
 static List *subbuild_joinrel_restrictlist(PlannerInfo *root,
 										   RelOptInfo *joinrel,
 										   RelOptInfo *input_rel,
 										   Relids both_input_relids,
 										   List *new_restrictlist);
-#else
-static List *subbuild_joinrel_restrictlist(RelOptInfo *joinrel,
-										   List *joininfo_list,
-										   List *new_restrictlist);
-#endif
 static List *subbuild_joinrel_joinlist(RelOptInfo *joinrel,
 									   List *joininfo_list,
 									   List *new_joininfo);
 static void set_foreign_rel_properties(RelOptInfo *joinrel,
 									   RelOptInfo *outer_rel, RelOptInfo *inner_rel);
 static void add_join_rel(PlannerInfo *root, RelOptInfo *joinrel);
-#if PG_VERSION_NUM >= 160000
 static void build_joinrel_partition_info(PlannerInfo *root,
 										 RelOptInfo *joinrel,
 										 RelOptInfo *outer_rel, RelOptInfo *inner_rel,
 										 SpecialJoinInfo *sjinfo,
 										 List *restrictlist);
-#else
-static void build_joinrel_partition_info(RelOptInfo *joinrel,
-										 RelOptInfo *outer_rel, RelOptInfo *inner_rel,
-										 List *restrictlist, JoinType jointype);
-#endif
-#if PG_VERSION_NUM >= 160000
 static bool have_partkey_equi_join(PlannerInfo *root, RelOptInfo *joinrel,
 								   RelOptInfo *rel1, RelOptInfo *rel2,
 								   JoinType jointype, List *restrictlist);
-#else
-static bool have_partkey_equi_join(RelOptInfo *joinrel,
-								   RelOptInfo *rel1, RelOptInfo *rel2,
-								   JoinType jointype, List *restrictlist);
-#endif
 static int	match_expr_to_partition_keys(Expr *expr, RelOptInfo *rel,
 										 bool strict_op);
 static void set_joinrel_partition_key_exprs(RelOptInfo *joinrel,
@@ -214,7 +180,6 @@ expand_planner_arrays(PlannerInfo *root, int add_size)
 
 	new_size = root->simple_rel_array_size + add_size;
 
-#if PG_VERSION_NUM >= 160000
 	root->simple_rel_array =
 		repalloc0_array(root->simple_rel_array, RelOptInfo *, root->simple_rel_array_size, new_size);
 
@@ -227,33 +192,6 @@ expand_planner_arrays(PlannerInfo *root, int add_size)
 	else
 		root->append_rel_array =
 			palloc0_array(AppendRelInfo *, new_size);
-#else
-	root->simple_rel_array = (RelOptInfo **)
-		repalloc(root->simple_rel_array,
-				 sizeof(RelOptInfo *) * new_size);
-	MemSet(root->simple_rel_array + root->simple_rel_array_size,
-		   0, sizeof(RelOptInfo *) * add_size);
-
-	root->simple_rte_array = (RangeTblEntry **)
-		repalloc(root->simple_rte_array,
-				 sizeof(RangeTblEntry *) * new_size);
-	MemSet(root->simple_rte_array + root->simple_rel_array_size,
-		   0, sizeof(RangeTblEntry *) * add_size);
-
-	if (root->append_rel_array)
-	{
-		root->append_rel_array = (AppendRelInfo **)
-			repalloc(root->append_rel_array,
-					 sizeof(AppendRelInfo *) * new_size);
-		MemSet(root->append_rel_array + root->simple_rel_array_size,
-			   0, sizeof(AppendRelInfo *) * add_size);
-	}
-	else
-	{
-		root->append_rel_array = (AppendRelInfo **)
-			palloc0(sizeof(AppendRelInfo *) * new_size);
-	}
-#endif
 
 	root->simple_rel_array_size = new_size;
 }
@@ -299,9 +237,7 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptInfo *parent)
 	rel->relid = relid;
 	rel->rtekind = rte->rtekind;
 	/* min_attr, max_attr, attr_needed, attr_widths are set below */
-#if PG_VERSION_NUM >= 170000
 	rel->notnullattnums = NULL;
-#endif
 	rel->lateral_vars = NIL;
 	rel->indexlist = NIL;
 	rel->statlist = NIL;
@@ -314,7 +250,7 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptInfo *parent)
 	rel->rel_parallel_workers = -1; /* set up in get_relation_info */
 	rel->amflags = 0;
 	rel->serverid = InvalidOid;
-#if PG_VERSION_NUM >= 160000
+
 	if (rte->rtekind == RTE_RELATION)
 	{
 		Assert(parent == NULL ||
@@ -344,9 +280,7 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptInfo *parent)
 	}
 	else
 		rel->userid = InvalidOid;
-#else
-	rel->userid = rte->checkAsUser;
-#endif
+
 	rel->useridiscurrent = false;
 	rel->fdwroutine = NULL;
 	rel->fdw_private = NULL;
@@ -375,7 +309,6 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptInfo *parent)
 	 */
 	if (parent)
 	{
-#if PG_VERSION_NUM >= 160000
 		/* We keep back-links to immediate parent and topmost parent. */
 		rel->parent = parent;
 		rel->top_parent = parent->top_parent ? parent->top_parent : parent;
@@ -401,38 +334,12 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptInfo *parent)
 		 * It's possible for child rels to have their own children, in which
 		 * case the topmost parent's lateral info propagates all the way down.
 		 */
-#else
-		/*
-		 * Each direct or indirect child wants to know the relids of its
-		 * topmost parent.
-		 */
-		if (parent->top_parent_relids)
-			rel->top_parent_relids = parent->top_parent_relids;
-		else
-			rel->top_parent_relids = bms_copy(parent->relids);
-
-		/*
-		 * Also propagate lateral-reference information from appendrel parent
-		 * rels to their child rels.  We intentionally give each child rel the
-		 * same minimum parameterization, even though it's quite possible that
-		 * some don't reference all the lateral rels.  This is because any
-		 * append path for the parent will have to have the same
-		 * parameterization for every child anyway, and there's no value in
-		 * forcing extra reparameterize_path() calls.  Similarly, a lateral
-		 * reference to the parent prevents use of otherwise-movable join rels
-		 * for each child.
-		 *
-		 * It's possible for child rels to have their own children, in which
-		 * case the topmost parent's lateral info propagates all the way down.
-		 */
-#endif
 		rel->direct_lateral_relids = parent->direct_lateral_relids;
 		rel->lateral_relids = parent->lateral_relids;
 		rel->lateral_referencers = parent->lateral_referencers;
 	}
 	else
 	{
-#if PG_VERSION_NUM >= 160000
 		rel->parent = NULL;
 		rel->top_parent = NULL;
 		rel->top_parent_relids = NULL;
@@ -440,12 +347,6 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptInfo *parent)
 		rel->direct_lateral_relids = NULL;
 		rel->lateral_relids = NULL;
 		rel->lateral_referencers = NULL;
-#else
-		rel->top_parent_relids = NULL;
-		rel->direct_lateral_relids = NULL;
-		rel->lateral_relids = NULL;
-		rel->lateral_referencers = NULL;
-#endif
 	}
 
 	/* Check type of rtable entry */
@@ -488,7 +389,6 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptInfo *parent)
 			break;
 	}
 
-#if PG_VERSION_NUM >= 170000
 	/*
 	 * We must apply the partially filled in RelOptInfo before calling
 	 * apply_child_basequals due to some transformations within that function
@@ -505,14 +405,6 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptInfo *parent)
 	 * immediately so that pruning works correctly when recursing in
 	 * expand_partitioned_rtentry.)
 	 */
-#else
-	/*
-	 * Copy the parent's quals to the child, with appropriate substitution of
-	 * variables.  If any constant false or NULL clauses turn up, we can mark
-	 * the child as dummy right away.  (We must do this immediately so that
-	 * pruning works correctly when recursing in expand_partitioned_rtentry.)
-	 */
-#endif
 	if (parent)
 	{
 		AppendRelInfo *appinfo = root->append_rel_array[relid];
@@ -527,11 +419,6 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptInfo *parent)
 			mark_dummy_rel(rel);
 		}
 	}
-
-#if PG_VERSION_NUM < 170000
-	/* Save the finished struct in the query's simple_rel_array */
-	root->simple_rel_array[relid] = rel;
-#endif
 
 	return rel;
 }
@@ -548,14 +435,8 @@ find_base_rel(PlannerInfo *root, int relid)
 {
 	RelOptInfo *rel;
 
-#if PG_VERSION_NUM >= 170000
 	/* use an unsigned comparison to prevent negative array element access */
 	if ((uint32) relid < (uint32) root->simple_rel_array_size)
-#else
-	Assert(relid > 0);
-
-	if (relid < root->simple_rel_array_size)
-#endif
 	{
 		rel = root->simple_rel_array[relid];
 		if (rel)
@@ -569,7 +450,6 @@ find_base_rel(PlannerInfo *root, int relid)
 #endif							/* ifndef __PG_QUERY_PLAN__ */
 
 #ifndef __PG_QUERY_PLAN__
-#if PG_VERSION_NUM >= 170000
 /*
  * find_base_rel_noerr
  *	  Find a base or otherrel relation entry, returning NULL if there's none
@@ -582,7 +462,6 @@ find_base_rel_noerr(PlannerInfo *root, int relid)
 		return root->simple_rel_array[relid];
 	return NULL;
 }
-#endif
 #endif							/* ifndef __PG_QUERY_PLAN__ */
 
 #ifndef __PG_QUERY_PLAN__
@@ -598,14 +477,8 @@ find_base_rel_noerr(PlannerInfo *root, int relid)
 RelOptInfo *
 find_base_rel_ignore_join(PlannerInfo *root, int relid)
 {
-#if PG_VERSION_NUM >= 170000
 	/* use an unsigned comparison to prevent negative array element access */
 	if ((uint32) relid < (uint32) root->simple_rel_array_size)
-#else
-	Assert(relid > 0);
-
-	if (relid < root->simple_rel_array_size)
-#endif
 	{
 		RelOptInfo *rel;
 		RangeTblEntry *rte;
@@ -825,9 +698,7 @@ pgqp_build_join_rel(PlannerInfo *root,
 					RelOptInfo *outer_rel,
 					RelOptInfo *inner_rel,
 					SpecialJoinInfo *sjinfo,
-#if PG_VERSION_NUM >= 160000
 					List *pushed_down_joins,
-#endif
 					List **restrictlist_ptr)
 #else
 build_join_rel(PlannerInfo *root,
@@ -835,9 +706,7 @@ build_join_rel(PlannerInfo *root,
 			   RelOptInfo *outer_rel,
 			   RelOptInfo *inner_rel,
 			   SpecialJoinInfo *sjinfo,
-#if PG_VERSION_NUM >= 160000
 			   List *pushed_down_joins,
-#endif
 			   List **restrictlist_ptr)
 #endif
 {
@@ -859,18 +728,11 @@ build_join_rel(PlannerInfo *root,
 		 * pair of component relations.
 		 */
 		if (restrictlist_ptr)
-#if PG_VERSION_NUM >= 160000
 			*restrictlist_ptr = build_joinrel_restrictlist(root,
 														   joinrel,
 														   outer_rel,
 														   inner_rel,
 														   sjinfo);
-#else
-			*restrictlist_ptr = build_joinrel_restrictlist(root,
-														   joinrel,
-														   outer_rel,
-														   inner_rel);
-#endif
 		return joinrel;
 	}
 
@@ -905,12 +767,8 @@ build_join_rel(PlannerInfo *root,
 	joinrel->max_attr = 0;
 	joinrel->attr_needed = NULL;
 	joinrel->attr_widths = NULL;
-#if PG_VERSION_NUM >= 170000
 	joinrel->notnullattnums = NULL;
-#endif
-#if PG_VERSION_NUM >= 160000
 	joinrel->nulling_relids = NULL;
-#endif
 	joinrel->lateral_vars = NIL;
 	joinrel->lateral_referencers = NULL;
 	joinrel->indexlist = NIL;
@@ -937,10 +795,8 @@ build_join_rel(PlannerInfo *root,
 	joinrel->joininfo = NIL;
 	joinrel->has_eclass_joins = false;
 	joinrel->consider_partitionwise_join = false;	/* might get changed later */
-#if PG_VERSION_NUM >= 160000
 	joinrel->parent = NULL;
 	joinrel->top_parent = NULL;
-#endif
 	joinrel->top_parent_relids = NULL;
 	joinrel->part_scheme = NULL;
 	joinrel->nparts = -1;
@@ -965,17 +821,11 @@ build_join_rel(PlannerInfo *root,
 	 * and inner rels we first try to build it from.  But the contents should
 	 * be the same regardless.
 	 */
-#if PG_VERSION_NUM >= 160000
 	build_joinrel_tlist(root, joinrel, outer_rel, sjinfo, pushed_down_joins,
 						(sjinfo->jointype == JOIN_FULL));
 	build_joinrel_tlist(root, joinrel, inner_rel, sjinfo, pushed_down_joins,
 						(sjinfo->jointype != JOIN_INNER));
 	add_placeholders_to_joinrel(root, joinrel, outer_rel, inner_rel, sjinfo);
-#else
-	build_joinrel_tlist(root, joinrel, outer_rel);
-	build_joinrel_tlist(root, joinrel, inner_rel);
-	add_placeholders_to_joinrel(root, joinrel, outer_rel, inner_rel);
-#endif
 
 	/*
 	 * add_placeholders_to_joinrel also took care of adding the ph_lateral
@@ -986,22 +836,15 @@ build_join_rel(PlannerInfo *root,
 	 */
 	joinrel->direct_lateral_relids =
 		bms_del_members(joinrel->direct_lateral_relids, joinrel->relids);
-	if (bms_is_empty(joinrel->direct_lateral_relids))
-		joinrel->direct_lateral_relids = NULL;
 
 	/*
 	 * Construct restrict and join clause lists for the new joinrel. (The
 	 * caller might or might not need the restrictlist, but I need it anyway
 	 * for set_joinrel_size_estimates().)
 	 */
-#if PG_VERSION_NUM >= 160000
 	restrictlist = build_joinrel_restrictlist(root, joinrel,
 											  outer_rel, inner_rel,
 											  sjinfo);
-#else
-	restrictlist = build_joinrel_restrictlist(root, joinrel,
-											  outer_rel, inner_rel);
-#endif
 	if (restrictlist_ptr)
 		*restrictlist_ptr = restrictlist;
 	build_joinrel_joinlist(joinrel, outer_rel, inner_rel);
@@ -1013,13 +856,8 @@ build_join_rel(PlannerInfo *root,
 	joinrel->has_eclass_joins = has_relevant_eclass_joinclause(root, joinrel);
 
 	/* Store the partition information. */
-#if PG_VERSION_NUM >= 160000
 	build_joinrel_partition_info(root, joinrel, outer_rel, inner_rel, sjinfo,
 								 restrictlist);
-#else
-	build_joinrel_partition_info(joinrel, outer_rel, inner_rel, restrictlist,
-								 sjinfo->jointype);
-#endif
 
 	/*
 	 * Set estimates of the joinrel's size.
@@ -1103,33 +941,23 @@ build_join_rel(PlannerInfo *root,
  *		translating corresponding members of this RelOptInfo
  * 'restrictlist': list of RestrictInfo nodes that apply to this particular
  *		pair of joinable relations
- * 'jointype' is the join type (inner, left, full, etc)
  * 'sjinfo': child join's join-type details
+ * 'nappinfos' and 'appinfos': AppendRelInfo array for child relids
  */
 RelOptInfo *
 #ifdef __PG_QUERY_PLAN__
 pgqp_build_child_join_rel(PlannerInfo *root, RelOptInfo *outer_rel,
 						  RelOptInfo *inner_rel, RelOptInfo *parent_joinrel,
-#if PG_VERSION_NUM >= 160000
-						  List *restrictlist, SpecialJoinInfo *sjinfo)
-#else
 						  List *restrictlist, SpecialJoinInfo *sjinfo,
-						  JoinType jointype)
-#endif
-#else
+						  int nappinfos, AppendRelInfo **appinfos)
+#else /* #ifdef __PG_QUERY_PLAN__ */
 build_child_join_rel(PlannerInfo *root, RelOptInfo *outer_rel,
 					 RelOptInfo *inner_rel, RelOptInfo *parent_joinrel,
-#if PG_VERSION_NUM >= 160000
-					 List *restrictlist, SpecialJoinInfo *sjinfo)
-#else
 					 List *restrictlist, SpecialJoinInfo *sjinfo,
-					 JoinType jointype)
-#endif
-#endif
+					 int nappinfos, AppendRelInfo **appinfos)
+#endif /* #ifdef __PG_QUERY_PLAN__ */
 {
 	RelOptInfo *joinrel = makeNode(RelOptInfo);
-	AppendRelInfo **appinfos;
-	int			nappinfos;
 
 	/* Only joins between "other" relations land here. */
 	Assert(IS_OTHER_REL(outer_rel) && IS_OTHER_REL(inner_rel));
@@ -1137,25 +965,9 @@ build_child_join_rel(PlannerInfo *root, RelOptInfo *outer_rel,
 	/* The parent joinrel should have consider_partitionwise_join set. */
 	Assert(parent_joinrel->consider_partitionwise_join);
 
-#if PG_VERSION_NUM >= 160000
-	/*
-	 * Find the AppendRelInfo structures for the child baserels.  We'll need
-	 * these for computing the child join's relid set, and later for mapping
-	 * Vars to the child rel.
-	 */
-	appinfos = find_appinfos_by_relids(root,
-									   bms_union(outer_rel->relids,
-												 inner_rel->relids),
-									   &nappinfos);
-#endif
-
 	joinrel->reloptkind = RELOPT_OTHER_JOINREL;
-#if PG_VERSION_NUM >= 160000
 	joinrel->relids = adjust_child_relids(parent_joinrel->relids,
 										  nappinfos, appinfos);
-#else
-	joinrel->relids = bms_union(outer_rel->relids, inner_rel->relids);
-#endif
 	joinrel->rows = 0;
 	/* cheap startup cost is interesting iff not all tuples to be retrieved */
 	joinrel->consider_startup = (root->tuple_fraction > 0);
@@ -1177,12 +989,8 @@ build_child_join_rel(PlannerInfo *root, RelOptInfo *outer_rel,
 	joinrel->max_attr = 0;
 	joinrel->attr_needed = NULL;
 	joinrel->attr_widths = NULL;
-#if PG_VERSION_NUM >= 170000
 	joinrel->notnullattnums = NULL;
-#endif
-#if PG_VERSION_NUM >= 160000
 	joinrel->nulling_relids = NULL;
-#endif
 	joinrel->lateral_vars = NIL;
 	joinrel->lateral_referencers = NULL;
 	joinrel->indexlist = NIL;
@@ -1204,13 +1012,9 @@ build_child_join_rel(PlannerInfo *root, RelOptInfo *outer_rel,
 	joinrel->joininfo = NIL;
 	joinrel->has_eclass_joins = false;
 	joinrel->consider_partitionwise_join = false;	/* might get changed later */
-#if PG_VERSION_NUM >= 160000
 	joinrel->parent = parent_joinrel;
 	joinrel->top_parent = parent_joinrel->top_parent ? parent_joinrel->top_parent : parent_joinrel;
 	joinrel->top_parent_relids = joinrel->top_parent->relids;
-#else
-	joinrel->top_parent_relids = NULL;
-#endif
 	joinrel->part_scheme = NULL;
 	joinrel->nparts = -1;
 	joinrel->boundinfo = NULL;
@@ -1222,14 +1026,8 @@ build_child_join_rel(PlannerInfo *root, RelOptInfo *outer_rel,
 	joinrel->partexprs = NULL;
 	joinrel->nullable_partexprs = NULL;
 
-	joinrel->top_parent_relids = bms_union(outer_rel->top_parent_relids,
-										   inner_rel->top_parent_relids);
-
 	/* Compute information relevant to foreign relations. */
 	set_foreign_rel_properties(joinrel, outer_rel, inner_rel);
-
-	/* Compute information needed for mapping Vars to the child rel */
-	appinfos = find_appinfos_by_relids(root, joinrel->relids, &nappinfos);
 
 	/* Set up reltarget struct */
 	build_child_join_reltarget(root, parent_joinrel, joinrel,
@@ -1255,13 +1053,8 @@ build_child_join_rel(PlannerInfo *root, RelOptInfo *outer_rel,
 	joinrel->has_eclass_joins = parent_joinrel->has_eclass_joins;
 
 	/* Is the join between partitions itself partitioned? */
-#if PG_VERSION_NUM >= 160000
 	build_joinrel_partition_info(root, joinrel, outer_rel, inner_rel, sjinfo,
 								 restrictlist);
-#else
-	build_joinrel_partition_info(joinrel, outer_rel, inner_rel, restrictlist,
-								 jointype);
-#endif
 
 	/* Child joinrel is parallel safe if parent is parallel safe. */
 	joinrel->consider_parallel = parent_joinrel->consider_parallel;
@@ -1291,8 +1084,6 @@ build_child_join_rel(PlannerInfo *root, RelOptInfo *outer_rel,
 		add_child_join_rel_equivalences(root,
 										nappinfos, appinfos,
 										parent_joinrel, joinrel);
-
-	pfree(appinfos);
 
 	return joinrel;
 }
@@ -1330,10 +1121,6 @@ min_join_parameterization(PlannerInfo *root,
 	 */
 	result = bms_union(outer_rel->lateral_relids, inner_rel->lateral_relids);
 	result = bms_del_members(result, joinrelids);
-
-	/* Maintain invariant that result is exactly NULL if empty */
-	if (bms_is_empty(result))
-		result = NULL;
 
 	return result;
 }
@@ -1393,23 +1180,15 @@ min_join_parameterization(PlannerInfo *root,
  * A/B join.
  */
 static void
-#if PG_VERSION_NUM >= 160000
 build_joinrel_tlist(PlannerInfo *root, RelOptInfo *joinrel,
 					RelOptInfo *input_rel,
 					SpecialJoinInfo *sjinfo,
 					List *pushed_down_joins,
 					bool can_null)
-#else
-build_joinrel_tlist(PlannerInfo *root, RelOptInfo *joinrel,
-					RelOptInfo *input_rel)
-#endif
 {
 	Relids		relids = joinrel->relids;
-#if PG_VERSION_NUM >= 170000
 	int64		tuple_width = joinrel->reltarget->width;
-#endif
 	ListCell   *vars;
-#if PG_VERSION_NUM >= 160000
 	ListCell   *lc;
 
 
@@ -1462,11 +1241,7 @@ build_joinrel_tlist(PlannerInfo *root, RelOptInfo *joinrel,
 				joinrel->reltarget->exprs = lappend(joinrel->reltarget->exprs,
 													phv);
 				/* Bubbling up the precomputed result has cost zero */
-#if PG_VERSION_NUM >= 170000
 				tuple_width += phinfo->ph_width;
-#else
-				joinrel->reltarget->width += phinfo->ph_width;
-#endif
 			}
 			continue;
 		}
@@ -1487,11 +1262,7 @@ build_joinrel_tlist(PlannerInfo *root, RelOptInfo *joinrel,
 				list_nth(root->row_identity_vars, var->varattno - 1);
 
 			/* Update reltarget width estimate from RowIdentityVarInfo */
-#if PG_VERSION_NUM >= 170000
 			tuple_width += ridinfo->rowidwidth;
-#else
-			joinrel->reltarget->width += ridinfo->rowidwidth;
-#endif
 		}
 		else
 		{
@@ -1507,11 +1278,7 @@ build_joinrel_tlist(PlannerInfo *root, RelOptInfo *joinrel,
 				continue;		/* nope, skip it */
 
 			/* Update reltarget width estimate from baserel's attr_widths */
-#if PG_VERSION_NUM >= 170000
 			tuple_width += baserel->attr_widths[ndx];
-#else
-			joinrel->reltarget->width += baserel->attr_widths[ndx];
-#endif
 		}
 
 		/*
@@ -1552,63 +1319,7 @@ build_joinrel_tlist(PlannerInfo *root, RelOptInfo *joinrel,
 		/* Vars have cost zero, so no need to adjust reltarget->cost */
 	}
 
-#if PG_VERSION_NUM >= 170000
 	joinrel->reltarget->width = clamp_width_est(tuple_width);
-#endif
-#else
-
-	foreach(vars, input_rel->reltarget->exprs)
-	{
-		Var		   *var = (Var *) lfirst(vars);
-
-		/*
-		 * Ignore PlaceHolderVars in the input tlists; we'll make our own
-		 * decisions about whether to copy them.
-		 */
-		if (IsA(var, PlaceHolderVar))
-			continue;
-
-		/*
-		 * Otherwise, anything in a baserel or joinrel targetlist ought to be
-		 * a Var.  (More general cases can only appear in appendrel child
-		 * rels, which will never be seen here.)
-		 */
-		if (!IsA(var, Var))
-			elog(ERROR, "unexpected node type in rel targetlist: %d",
-				 (int) nodeTag(var));
-
-		if (var->varno == ROWID_VAR)
-		{
-			/* UPDATE/DELETE row identity vars are always needed */
-			RowIdentityVarInfo *ridinfo = (RowIdentityVarInfo *)
-			list_nth(root->row_identity_vars, var->varattno - 1);
-
-			joinrel->reltarget->exprs = lappend(joinrel->reltarget->exprs,
-												var);
-			/* Vars have cost zero, so no need to adjust reltarget->cost */
-			joinrel->reltarget->width += ridinfo->rowidwidth;
-		}
-		else
-		{
-			RelOptInfo *baserel;
-			int			ndx;
-
-			/* Get the Var's original base rel */
-			baserel = find_base_rel(root, var->varno);
-
-			/* Is it still needed above this joinrel? */
-			ndx = var->varattno - baserel->min_attr;
-			if (bms_nonempty_difference(baserel->attr_needed[ndx], relids))
-			{
-				/* Yup, add it to the output */
-				joinrel->reltarget->exprs = lappend(joinrel->reltarget->exprs,
-													var);
-				/* Vars have cost zero, so no need to adjust reltarget->cost */
-				joinrel->reltarget->width += baserel->attr_widths[ndx];
-			}
-		}
-	}
-#endif
 }
 
 /*
@@ -1658,54 +1369,35 @@ static List *
 build_joinrel_restrictlist(PlannerInfo *root,
 						   RelOptInfo *joinrel,
 						   RelOptInfo *outer_rel,
-#if PG_VERSION_NUM >= 160000
 						   RelOptInfo *inner_rel,
 						   SpecialJoinInfo *sjinfo)
-#else
-						   RelOptInfo *inner_rel)
-#endif
 {
 	List	   *result;
-#if PG_VERSION_NUM >= 160000
 	Relids		both_input_relids;
 
 	both_input_relids = bms_union(outer_rel->relids, inner_rel->relids);
-#endif
+
 	/*
 	 * Collect all the clauses that syntactically belong at this level,
 	 * eliminating any duplicates (important since we will see many of the
 	 * same clauses arriving from both input relations).
 	 */
-#if PG_VERSION_NUM >= 160000
 	result = subbuild_joinrel_restrictlist(root, joinrel, outer_rel,
 										   both_input_relids, NIL);
 	result = subbuild_joinrel_restrictlist(root, joinrel, inner_rel,
 										   both_input_relids, result);
-#else
-	result = subbuild_joinrel_restrictlist(joinrel, outer_rel->joininfo, NIL);
-	result = subbuild_joinrel_restrictlist(joinrel, inner_rel->joininfo, result);
-#endif
 
 	/*
 	 * Add on any clauses derived from EquivalenceClasses.  These cannot be
 	 * redundant with the clauses in the joininfo lists, so don't bother
 	 * checking.
 	 */
-#if PG_VERSION_NUM >= 160000
 	result = list_concat(result,
 						 generate_join_implied_equalities(root,
 														  joinrel->relids,
 														  outer_rel->relids,
 														  inner_rel,
 														  sjinfo));
-#else
-	result = list_concat(result,
-						 generate_join_implied_equalities(root,
-														  joinrel->relids,
-														  outer_rel->relids,
-														  inner_rel));
-#endif
-
 	return result;
 }
 
@@ -1728,31 +1420,20 @@ build_joinrel_joinlist(RelOptInfo *joinrel,
 }
 
 static List *
-#if PG_VERSION_NUM >= 160000
 subbuild_joinrel_restrictlist(PlannerInfo *root,
 							  RelOptInfo *joinrel,
 							  RelOptInfo *input_rel,
 							  Relids both_input_relids,
 							  List *new_restrictlist)
-#else
-subbuild_joinrel_restrictlist(RelOptInfo *joinrel,
-							  List *joininfo_list,
-							  List *new_restrictlist)
-#endif
 {
 	ListCell   *l;
 
-#if PG_VERSION_NUM >= 160000
 	foreach(l, input_rel->joininfo)
-#else
-	foreach(l, joininfo_list)
-#endif
 	{
 		RestrictInfo *rinfo = (RestrictInfo *) lfirst(l);
 
 		if (bms_is_subset(rinfo->required_relids, joinrel->relids))
 		{
-#if PG_VERSION_NUM >= 160000
 			/*
 			 * This clause should become a restriction clause for the joinrel,
 			 * since it refers to no outside rels.  However, if it's a clone
@@ -1790,15 +1471,6 @@ subbuild_joinrel_restrictlist(RelOptInfo *joinrel,
 			 * will have been multiply-linked rather than copied, pointer
 			 * equality should be a sufficient test.)
 			 */
-#else
-			/*
-			 * This clause becomes a restriction clause for the joinrel, since
-			 * it refers to no outside rels.  Add it to the list, being
-			 * careful to eliminate duplicates. (Since RestrictInfo nodes in
-			 * different joinlists will have been multiply-linked rather than
-			 * copied, pointer equality should be a sufficient test.)
-			 */
-#endif
 			new_restrictlist = list_append_unique_ptr(new_restrictlist, rinfo);
 		}
 		else
@@ -1966,9 +1638,8 @@ get_baserel_parampathinfo(PlannerInfo *root, RelOptInfo *baserel,
 	ParamPathInfo *ppi;
 	Relids		joinrelids;
 	List	   *pclauses;
-#if PG_VERSION_NUM >= 160000
+	List	   *eqclauses;
 	Bitmapset  *pserials;
-#endif
 	double		rows;
 	ListCell   *lc;
 
@@ -2003,24 +1674,26 @@ get_baserel_parampathinfo(PlannerInfo *root, RelOptInfo *baserel,
 
 	/*
 	 * Add in joinclauses generated by EquivalenceClasses, too.  (These
-	 * necessarily satisfy join_clause_is_movable_into.)
+	 * necessarily satisfy join_clause_is_movable_into; but in assert-enabled
+	 * builds, let's verify that.)
 	 */
-#if PG_VERSION_NUM >= 160000
-	pclauses = list_concat(pclauses,
-						   generate_join_implied_equalities(root,
-															joinrelids,
-															required_outer,
-															baserel,
-															NULL));
-#else
-	pclauses = list_concat(pclauses,
-						   generate_join_implied_equalities(root,
-															joinrelids,
-															required_outer,
-															baserel));
-#endif
+	eqclauses = generate_join_implied_equalities(root,
+												 joinrelids,
+												 required_outer,
+												 baserel,
+												 NULL);
+#ifdef USE_ASSERT_CHECKING
+	foreach(lc, eqclauses)
+	{
+		RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
 
-#if PG_VERSION_NUM >= 160000
+		Assert(join_clause_is_movable_into(rinfo,
+										   baserel->relids,
+										   joinrelids));
+	}
+#endif
+	pclauses = list_concat(pclauses, eqclauses);
+
 	/* Compute set of serial numbers of the enforced clauses */
 	pserials = NULL;
 	foreach(lc, pclauses)
@@ -2029,7 +1702,6 @@ get_baserel_parampathinfo(PlannerInfo *root, RelOptInfo *baserel,
 
 		pserials = bms_add_member(pserials, rinfo->rinfo_serial);
 	}
-#endif
 
 	/* Estimate the number of rows returned by the parameterized scan */
 #ifdef __PG_QUERY_PLAN__
@@ -2043,9 +1715,7 @@ get_baserel_parampathinfo(PlannerInfo *root, RelOptInfo *baserel,
 	ppi->ppi_req_outer = required_outer;
 	ppi->ppi_rows = rows;
 	ppi->ppi_clauses = pclauses;
-#if PG_VERSION_NUM >= 160000
 	ppi->ppi_serials = pserials;
-#endif
 	baserel->ppilist = lappend(baserel->ppilist, ppi);
 
 	return ppi;
@@ -2154,36 +1824,20 @@ get_joinrel_parampathinfo(PlannerInfo *root, RelOptInfo *joinrel,
 	}
 
 	/* Consider joinclauses generated by EquivalenceClasses, too */
-#if PG_VERSION_NUM >= 160000
 	eclauses = generate_join_implied_equalities(root,
 												join_and_req,
 												required_outer,
 												joinrel,
 												NULL);
-#else
-	eclauses = generate_join_implied_equalities(root,
-												join_and_req,
-												required_outer,
-												joinrel);
-#endif
 	/* We only want ones that aren't movable to lower levels */
 	dropped_ecs = NIL;
 	foreach(lc, eclauses)
 	{
 		RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
 
-		/*
-		 * In principle, join_clause_is_movable_into() should accept anything
-		 * returned by generate_join_implied_equalities(); but because its
-		 * analysis is only approximate, sometimes it doesn't.  So we
-		 * currently cannot use this Assert; instead just assume it's okay to
-		 * apply the joinclause at this level.
-		 */
-#ifdef NOT_USED
 		Assert(join_clause_is_movable_into(rinfo,
 										   joinrel->relids,
 										   join_and_req));
-#endif
 		if (join_clause_is_movable_into(rinfo,
 										outer_path->parent->relids,
 										outer_and_req))
@@ -2237,19 +1891,11 @@ get_joinrel_parampathinfo(PlannerInfo *root, RelOptInfo *joinrel,
 		real_outer_and_req = bms_union(outer_path->parent->relids,
 									   required_outer);
 		eclauses =
-#if PG_VERSION_NUM >= 160000
 			generate_join_implied_equalities_for_ecs(root,
 													 dropped_ecs,
 													 real_outer_and_req,
 													 required_outer,
 													 outer_path->parent);
-#else
-			generate_join_implied_equalities_for_ecs(root,
-													 dropped_ecs,
-													 real_outer_and_req,
-													 required_outer,
-													 outer_path->parent);
-#endif
 		foreach(lc, eclauses)
 		{
 			RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
@@ -2304,9 +1950,7 @@ get_joinrel_parampathinfo(PlannerInfo *root, RelOptInfo *joinrel,
 	ppi->ppi_req_outer = required_outer;
 	ppi->ppi_rows = rows;
 	ppi->ppi_clauses = NIL;
-#if PG_VERSION_NUM >= 160000
 	ppi->ppi_serials = NULL;
-#endif
 	joinrel->ppilist = lappend(joinrel->ppilist, ppi);
 
 	return ppi;
@@ -2347,9 +1991,7 @@ get_appendrel_parampathinfo(RelOptInfo *appendrel, Relids required_outer)
 	ppi->ppi_req_outer = required_outer;
 	ppi->ppi_rows = 0;
 	ppi->ppi_clauses = NIL;
-#if PG_VERSION_NUM >= 160000
 	ppi->ppi_serials = NULL;
-#endif
 	appendrel->ppilist = lappend(appendrel->ppilist, ppi);
 
 	return ppi;
@@ -2378,7 +2020,6 @@ find_param_path_info(RelOptInfo *rel, Relids required_outer)
 }
 #endif							/* ifndef __PG_QUERY_PLAN__ */
 
-#if PG_VERSION_NUM >= 160000
 /*
  * get_param_path_clause_serials
  *		Given a parameterized Path, return the set of pushed-down clauses
@@ -2389,6 +2030,13 @@ get_param_path_clause_serials(Path *path)
 {
 	if (path->param_info == NULL)
 		return NULL;			/* not parameterized */
+
+	/*
+	 * We don't currently support parameterized MergeAppend paths, as
+	 * explained in the comments for generate_orderedappend_paths.
+	 */
+	Assert(!IsA(path, MergeAppendPath));
+
 	if (IsA(path, NestPath) ||
 		IsA(path, MergePath) ||
 		IsA(path, HashPath))
@@ -2442,27 +2090,6 @@ get_param_path_clause_serials(Path *path)
 		}
 		return pserials;
 	}
-	else if (IsA(path, MergeAppendPath))
-	{
-		/* Same as AppendPath case */
-		MergeAppendPath *apath = (MergeAppendPath *) path;
-		Bitmapset  *pserials;
-		ListCell   *lc;
-
-		pserials = NULL;
-		foreach(lc, apath->subpaths)
-		{
-			Path	   *subpath = (Path *) lfirst(lc);
-			Bitmapset  *subserials;
-
-			subserials = get_param_path_clause_serials(subpath);
-			if (lc == list_head(apath->subpaths))
-				pserials = bms_copy(subserials);
-			else
-				pserials = bms_int_members(pserials, subserials);
-		}
-		return pserials;
-	}
 	else
 	{
 		/*
@@ -2472,7 +2099,6 @@ get_param_path_clause_serials(Path *path)
 		return path->param_info->ppi_serials;
 	}
 }
-#endif
 
 /*
  * build_joinrel_partition_info
@@ -2481,16 +2107,10 @@ get_param_path_clause_serials(Path *path)
  *		partitioned join relation.
  */
 static void
-#if PG_VERSION_NUM >= 160000
 build_joinrel_partition_info(PlannerInfo *root,
 							 RelOptInfo *joinrel, RelOptInfo *outer_rel,
 							 RelOptInfo *inner_rel, SpecialJoinInfo *sjinfo,
 							 List *restrictlist)
-#else
-build_joinrel_partition_info(RelOptInfo *joinrel, RelOptInfo *outer_rel,
-							 RelOptInfo *inner_rel, List *restrictlist,
-							 JoinType jointype)
-#endif
 {
 	PartitionScheme part_scheme;
 
@@ -2512,21 +2132,12 @@ build_joinrel_partition_info(RelOptInfo *joinrel, RelOptInfo *outer_rel,
 	 * of the way the query planner deduces implied equalities and reorders
 	 * the joins.  Please see optimizer/README for details.
 	 */
-#if PG_VERSION_NUM >= 160000
 	if (outer_rel->part_scheme == NULL || inner_rel->part_scheme == NULL ||
 		!outer_rel->consider_partitionwise_join ||
 		!inner_rel->consider_partitionwise_join ||
 		outer_rel->part_scheme != inner_rel->part_scheme ||
 		!have_partkey_equi_join(root, joinrel, outer_rel, inner_rel,
 								sjinfo->jointype, restrictlist))
-#else
-	if (outer_rel->part_scheme == NULL || inner_rel->part_scheme == NULL ||
-		!outer_rel->consider_partitionwise_join ||
-		!inner_rel->consider_partitionwise_join ||
-		outer_rel->part_scheme != inner_rel->part_scheme ||
-		!have_partkey_equi_join(joinrel, outer_rel, inner_rel,
-								jointype, restrictlist))
-#endif
 	{
 		Assert(!IS_PARTITIONED_REL(joinrel));
 		return;
@@ -2550,12 +2161,8 @@ build_joinrel_partition_info(RelOptInfo *joinrel, RelOptInfo *outer_rel,
 	 * child-join relations of the join relation in try_partitionwise_join().
 	 */
 	joinrel->part_scheme = part_scheme;
-#if PG_VERSION_NUM >= 160000
 	set_joinrel_partition_key_exprs(joinrel, outer_rel, inner_rel,
 									sjinfo->jointype);
-#else
-	set_joinrel_partition_key_exprs(joinrel, outer_rel, inner_rel, jointype);
-#endif
 
 	/*
 	 * Set the consider_partitionwise_join flag.
@@ -2573,21 +2180,14 @@ build_joinrel_partition_info(RelOptInfo *joinrel, RelOptInfo *outer_rel,
  * partition keys.
  */
 static bool
-#if PG_VERSION_NUM >= 160000
 have_partkey_equi_join(PlannerInfo *root, RelOptInfo *joinrel,
 					   RelOptInfo *rel1, RelOptInfo *rel2,
 					   JoinType jointype, List *restrictlist)
-#else
-have_partkey_equi_join(RelOptInfo *joinrel,
-					   RelOptInfo *rel1, RelOptInfo *rel2,
-					   JoinType jointype, List *restrictlist)
-#endif
 {
 	PartitionScheme part_scheme = rel1->part_scheme;
+	bool		pk_known_equal[PARTITION_MAX_KEYS];
+	int			num_equal_pks;
 	ListCell   *lc;
-	int			cnt_pks;
-	bool		pk_has_clause[PARTITION_MAX_KEYS];
-	bool		strict_op;
 
 	/*
 	 * This function must only be called when the joined relations have same
@@ -2596,13 +2196,20 @@ have_partkey_equi_join(RelOptInfo *joinrel,
 	Assert(rel1->part_scheme == rel2->part_scheme);
 	Assert(part_scheme);
 
-	memset(pk_has_clause, 0, sizeof(pk_has_clause));
+	/* We use a bool array to track which partkey columns are known equal */
+	memset(pk_known_equal, 0, sizeof(pk_known_equal));
+
+	/* ... as well as a count of how many are known equal */
+	num_equal_pks = 0;
+
+	/* First, look through the join's restriction clauses */
 	foreach(lc, restrictlist)
 	{
 		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
 		OpExpr	   *opexpr;
 		Expr	   *expr1;
 		Expr	   *expr2;
+		bool		strict_op;
 		int			ipk1;
 		int			ipk2;
 
@@ -2644,7 +2251,6 @@ have_partkey_equi_join(RelOptInfo *joinrel,
 		 */
 		strict_op = op_strict(opexpr->opno);
 
-#if PG_VERSION_NUM >= 160000
 		/*
 		 * Vars appearing in the relation's partition keys will not have any
 		 * varnullingrels, but those in expr1 and expr2 will if we're above
@@ -2662,7 +2268,6 @@ have_partkey_equi_join(RelOptInfo *joinrel,
 													   root->outer_join_rels,
 													   NULL);
 		}
-#endif
 
 		/*
 		 * Only clauses referencing the partition keys are useful for
@@ -2682,11 +2287,19 @@ have_partkey_equi_join(RelOptInfo *joinrel,
 		if (ipk1 != ipk2)
 			continue;
 
+		/* Ignore clause if we already proved these keys equal. */
+		if (pk_known_equal[ipk1])
+			continue;
+
+		/* Reject if the partition key collation differs from the clause's. */
+		if (rel1->part_scheme->partcollation[ipk1] != opexpr->inputcollid)
+			return false;
+
 		/*
 		 * The clause allows partitionwise join only if it uses the same
 		 * operator family as that specified by the partition key.
 		 */
-		if (rel1->part_scheme->strategy == PARTITION_STRATEGY_HASH)
+		if (part_scheme->strategy == PARTITION_STRATEGY_HASH)
 		{
 			if (!OidIsValid(rinfo->hashjoinoperator) ||
 				!op_in_opfamily(rinfo->hashjoinoperator,
@@ -2698,17 +2311,109 @@ have_partkey_equi_join(RelOptInfo *joinrel,
 			continue;
 
 		/* Mark the partition key as having an equi-join clause. */
-		pk_has_clause[ipk1] = true;
+		pk_known_equal[ipk1] = true;
+
+		/* We can stop examining clauses once we prove all keys equal. */
+		if (++num_equal_pks == part_scheme->partnatts)
+			return true;
 	}
 
-	/* Check whether every partition key has an equi-join condition. */
-	for (cnt_pks = 0; cnt_pks < part_scheme->partnatts; cnt_pks++)
+	/*
+	 * Also check to see if any keys are known equal by equivclass.c.  In most
+	 * cases there would have been a join restriction clause generated from
+	 * any EC that had such knowledge, but there might be no such clause, or
+	 * it might happen to constrain other members of the ECs than the ones we
+	 * are looking for.
+	 */
+	for (int ipk = 0; ipk < part_scheme->partnatts; ipk++)
 	{
-		if (!pk_has_clause[cnt_pks])
-			return false;
+		Oid			btree_opfamily;
+
+		/* Ignore if we already proved these keys equal. */
+		if (pk_known_equal[ipk])
+			continue;
+
+		/*
+		 * We need a btree opfamily to ask equivclass.c about.  If the
+		 * partopfamily is a hash opfamily, look up its equality operator, and
+		 * select some btree opfamily that that operator is part of.  (Any
+		 * such opfamily should be good enough, since equivclass.c will track
+		 * multiple opfamilies as appropriate.)
+		 */
+		if (part_scheme->strategy == PARTITION_STRATEGY_HASH)
+		{
+			Oid			eq_op;
+			List	   *eq_opfamilies;
+
+			eq_op = get_opfamily_member(part_scheme->partopfamily[ipk],
+										part_scheme->partopcintype[ipk],
+										part_scheme->partopcintype[ipk],
+										HTEqualStrategyNumber);
+			if (!OidIsValid(eq_op))
+				break;			/* we're not going to succeed */
+			eq_opfamilies = get_mergejoin_opfamilies(eq_op);
+			if (eq_opfamilies == NIL)
+				break;			/* we're not going to succeed */
+			btree_opfamily = linitial_oid(eq_opfamilies);
+		}
+		else
+			btree_opfamily = part_scheme->partopfamily[ipk];
+
+		/*
+		 * We consider only non-nullable partition keys here; nullable ones
+		 * would not be treated as part of the same equivalence classes as
+		 * non-nullable ones.
+		 */
+		foreach(lc, rel1->partexprs[ipk])
+		{
+			Node	   *expr1 = (Node *) lfirst(lc);
+			ListCell   *lc2;
+			Oid			partcoll1 = rel1->part_scheme->partcollation[ipk];
+			Oid			exprcoll1 = exprCollation(expr1);
+
+			foreach(lc2, rel2->partexprs[ipk])
+			{
+				Node	   *expr2 = (Node *) lfirst(lc2);
+
+				if (exprs_known_equal(root, expr1, expr2, btree_opfamily))
+				{
+					/*
+					 * Ensure that the collation of the expression matches
+					 * that of the partition key. Checking just one collation
+					 * (partcoll1 and exprcoll1) suffices because partcoll1
+					 * and partcoll2, as well as exprcoll1 and exprcoll2,
+					 * should be identical. This holds because both rel1 and
+					 * rel2 use the same PartitionScheme and expr1 and expr2
+					 * are equal.
+					 */
+					if (partcoll1 == exprcoll1)
+					{
+						Oid			partcoll2 PG_USED_FOR_ASSERTS_ONLY =
+							rel2->part_scheme->partcollation[ipk];
+						Oid			exprcoll2 PG_USED_FOR_ASSERTS_ONLY =
+							exprCollation(expr2);
+
+						Assert(partcoll2 == exprcoll2);
+						pk_known_equal[ipk] = true;
+						break;
+					}
+				}
+			}
+			if (pk_known_equal[ipk])
+				break;
+		}
+
+		if (pk_known_equal[ipk])
+		{
+			/* We can stop examining keys once we prove all keys equal. */
+			if (++num_equal_pks == part_scheme->partnatts)
+				return true;
+		}
+		else
+			break;				/* no chance to succeed, give up */
 	}
 
-	return true;
+	return false;
 }
 
 /*

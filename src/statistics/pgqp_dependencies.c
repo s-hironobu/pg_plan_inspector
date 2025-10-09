@@ -14,10 +14,6 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
-#if PG_VERSION_NUM < 170000
-#include "access/sysattr.h"
-#include "catalog/pg_operator.h"
-#endif
 #include "catalog/pg_statistic_ext.h"
 #include "catalog/pg_statistic_ext_data.h"
 #include "lib/stringinfo.h"
@@ -26,26 +22,17 @@
 #include "nodes/pathnodes.h"
 #include "optimizer/clauses.h"
 #include "optimizer/optimizer.h"
-#if PG_VERSION_NUM >= 150000
 #include "parser/parsetree.h"
-#endif
 #include "statistics/extended_stats_internal.h"
 #include "statistics/statistics.h"
-#if PG_VERSION_NUM < 170000
-#include "utils/bytea.h"
-#endif
 #include "utils/fmgroids.h"
 #include "utils/fmgrprotos.h"
 #include "utils/lsyscache.h"
-#if PG_VERSION_NUM >= 150000
 #include "utils/memutils.h"
-#endif
 #include "utils/selfuncs.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
-#if PG_VERSION_NUM >= 170000
 #include "varatt.h"
-#endif
 
 /* size of the struct header fields (magic, type, ndeps) */
 #define SizeOfHeader		(3 * sizeof(uint32))
@@ -210,7 +197,6 @@ DependencyGenerator_free(DependencyGenerator state)
 {
 	pfree(state->dependencies);
 	pfree(state);
-
 }
 
 /* generate next combination */
@@ -338,12 +324,6 @@ dependency_degree(StatsBuildData *data, int k, AttrNumber *dependency)
 		group_size++;
 	}
 
-	if (items)
-		pfree(items);
-
-	pfree(mss);
-	pfree(attnums_dep);
-
 	/* Compute the 'degree of validity' as (supporting/total). */
 	return (n_supporting_rows * 1.0 / data->numrows);
 }
@@ -372,18 +352,14 @@ statext_dependencies_build(StatsBuildData *data)
 
 	/* result */
 	MVDependencies *dependencies = NULL;
-#if PG_VERSION_NUM >= 150000
 	MemoryContext cxt;
-#endif
 
 	Assert(data->nattnums >= 2);
 
-#if PG_VERSION_NUM >= 150000
 	/* tracks memory allocated by dependency_degree calls */
 	cxt = AllocSetContextCreate(CurrentMemoryContext,
 								"dependency_degree cxt",
 								ALLOCSET_DEFAULT_SIZES);
-#endif
 
 	/*
 	 * We'll try build functional dependencies starting from the smallest ones
@@ -403,19 +379,16 @@ statext_dependencies_build(StatsBuildData *data)
 		{
 			double		degree;
 			MVDependency *d;
-#if PG_VERSION_NUM >= 150000
 			MemoryContext oldcxt;
 
 			/* release memory used by dependency degree calculation */
 			oldcxt = MemoryContextSwitchTo(cxt);
-#endif
+
 			/* compute how valid the dependency seems */
 			degree = dependency_degree(data, k, dependency);
 
-#if PG_VERSION_NUM >= 150000
 			MemoryContextSwitchTo(oldcxt);
 			MemoryContextReset(cxt);
-#endif
 
 			/*
 			 * if the dependency seems entirely invalid, don't store it
@@ -458,9 +431,7 @@ statext_dependencies_build(StatsBuildData *data)
 		DependencyGenerator_free(DependencyGenerator);
 	}
 
-#if PG_VERSION_NUM >= 150000
 	MemoryContextDelete(cxt);
-#endif
 
 	return dependencies;
 }
@@ -536,13 +507,8 @@ statext_dependencies_deserialize(bytea *data)
 		return NULL;
 
 	if (VARSIZE_ANY_EXHDR(data) < SizeOfHeader)
-#if PG_VERSION_NUM >= 160000
 		elog(ERROR, "invalid MVDependencies size %zu (expected at least %zu)",
 			 VARSIZE_ANY_EXHDR(data), SizeOfHeader);
-#else
-		elog(ERROR, "invalid MVDependencies size %zd (expected at least %zd)",
-			 VARSIZE_ANY_EXHDR(data), SizeOfHeader);
-#endif
 
 	/* read the MVDependencies header */
 	dependencies = (MVDependencies *) palloc0(sizeof(MVDependencies));
@@ -573,13 +539,8 @@ statext_dependencies_deserialize(bytea *data)
 	min_expected_size = SizeOfItem(dependencies->ndeps);
 
 	if (VARSIZE_ANY_EXHDR(data) < min_expected_size)
-#if PG_VERSION_NUM >= 160000
 		elog(ERROR, "invalid dependencies size %zu (expected at least %zu)",
 			 VARSIZE_ANY_EXHDR(data), min_expected_size);
-#else
-		elog(ERROR, "invalid dependencies size %zd (expected at least %zd)",
-			 VARSIZE_ANY_EXHDR(data), min_expected_size);
-#endif
 
 	/* allocate space for the MCV items */
 	dependencies = repalloc(dependencies, offsetof(MVDependencies, deps)
@@ -655,24 +616,16 @@ dependency_is_fully_matched(MVDependency *dependency, Bitmapset *attnums)
  *		Load the functional dependencies for the indicated pg_statistic_ext tuple
  */
 MVDependencies *
-#if PG_VERSION_NUM >= 150000
 statext_dependencies_load(Oid mvoid, bool inh)
-#else
-statext_dependencies_load(Oid mvoid)
-#endif
 {
 	MVDependencies *result;
 	bool		isnull;
 	Datum		deps;
 	HeapTuple	htup;
 
-#if PG_VERSION_NUM >= 150000
 	htup = SearchSysCache2(STATEXTDATASTXOID,
 						   ObjectIdGetDatum(mvoid),
 						   BoolGetDatum(inh));
-#else
-	htup = SearchSysCache1(STATEXTDATASTXOID, ObjectIdGetDatum(mvoid));
-#endif
 	if (!HeapTupleIsValid(htup))
 		elog(ERROR, "cache lookup failed for statistics object %u", mvoid);
 
@@ -1208,13 +1161,12 @@ clauselist_apply_dependencies(PlannerInfo *root, List *clauses,
  *		Determines if the expression is compatible with functional dependencies
  *
  * Similar to dependency_is_compatible_clause, but doesn't enforce that the
- * expression is a simple Var. OTOH we check that there's at least one
- * statistics object matching the expression.
+ * expression is a simple Var.  On success, return the matching statistics
+ * expression into *expr.
  */
 static bool
 dependency_is_compatible_expression(Node *clause, Index relid, List *statlist, Node **expr)
 {
-	List	   *vars;
 	ListCell   *lc,
 			   *lc2;
 	Node	   *clause_expr;
@@ -1310,12 +1262,9 @@ dependency_is_compatible_expression(Node *clause, Index relid, List *statlist, N
 	else if (is_orclause(clause))
 	{
 		BoolExpr   *bool_expr = (BoolExpr *) clause;
-		ListCell   *lc;
 
 		/* start with no expression (we'll use the first match) */
-#if PG_VERSION_NUM < 160000
 		*expr = NULL;
-#endif
 
 		foreach(lc, bool_expr->args)
 		{
@@ -1364,29 +1313,8 @@ dependency_is_compatible_expression(Node *clause, Index relid, List *statlist, N
 	if (IsA(clause_expr, RelabelType))
 		clause_expr = (Node *) ((RelabelType *) clause_expr)->arg;
 
-	vars = pull_var_clause(clause_expr, 0);
-
-	foreach(lc, vars)
-	{
-		Var		   *var = (Var *) lfirst(lc);
-
-		/* Ensure Var is from the correct relation */
-		if (var->varno != relid)
-			return false;
-
-		/* We also better ensure the Var is from the current level */
-		if (var->varlevelsup != 0)
-			return false;
-
-		/* Also ignore system attributes (we don't allow stats on those) */
-		if (!AttrNumberIsForUserDefinedAttr(var->varattno))
-			return false;
-	}
-
 	/*
-	 * Check if we actually have a matching statistics for the expression.
-	 *
-	 * XXX Maybe this is an overkill. We'll eliminate the expressions later.
+	 * Search for a matching statistics expression.
 	 */
 	foreach(lc, statlist)
 	{
@@ -1459,9 +1387,8 @@ dependencies_clauselist_selectivity(PlannerInfo *root,
 	int			ndependencies;
 	int			i;
 	AttrNumber	attnum_offset;
-#if PG_VERSION_NUM >= 150000
 	RangeTblEntry *rte = planner_rt_fetch(rel->relid, root);
-#endif
+
 	/* unique expressions */
 	Node	  **unique_exprs;
 	int			unique_exprs_cnt;
@@ -1649,11 +1576,9 @@ dependencies_clauselist_selectivity(PlannerInfo *root,
 		if (stat->kind != STATS_EXT_DEPENDENCIES)
 			continue;
 
-#if PG_VERSION_NUM >= 150000
 		/* skip statistics with mismatching stxdinherit value */
 		if (stat->inherit != rte->inh)
 			continue;
-#endif
 
 		/*
 		 * Count matching attributes - we have to undo the attnum offsets. The
@@ -1701,11 +1626,7 @@ dependencies_clauselist_selectivity(PlannerInfo *root,
 		if (nmatched + nexprs < 2)
 			continue;
 
-#if PG_VERSION_NUM >= 150000
 		deps = statext_dependencies_load(stat->statOid, rte->inh);
-#else
-		deps = statext_dependencies_load(stat->statOid);
-#endif
 
 		/*
 		 * The expressions may be represented by different attnums in the
@@ -1747,9 +1668,6 @@ dependencies_clauselist_selectivity(PlannerInfo *root,
 				{
 					int			idx;
 					Node	   *expr;
-#if PG_VERSION_NUM < 160000
-					int			k;
-#endif
 					AttrNumber	unique_attnum = InvalidAttrNumber;
 					AttrNumber	attnum;
 
@@ -1797,29 +1715,17 @@ dependencies_clauselist_selectivity(PlannerInfo *root,
 					expr = (Node *) list_nth(stat->exprs, idx);
 
 					/* try to find the expression in the unique list */
-#if PG_VERSION_NUM >= 160000
 					for (int m = 0; m < unique_exprs_cnt; m++)
-#else
-					for (k = 0; k < unique_exprs_cnt; k++)
-#endif
 					{
 						/*
 						 * found a matching unique expression, use the attnum
 						 * (derived from index of the unique expression)
 						 */
-#if PG_VERSION_NUM >= 160000
 						if (equal(unique_exprs[m], expr))
 						{
 							unique_attnum = -(m + 1) + attnum_offset;
 							break;
 						}
-#else
-						if (equal(unique_exprs[k], expr))
-						{
-							unique_attnum = -(k + 1) + attnum_offset;
-							break;
-						}
-#endif
 					}
 
 					/*

@@ -21,31 +21,18 @@
 #include "utils/memutils.h"
 
 #ifdef __PG_QUERY_PLAN__
+#include "../pg_query_plan.h"
 #include "../adjust_rows.h"
 #include "pgqp_relnode.h"
 #include "pgqp_joinpath.h"
 #include "pgqp_joinrels.h"
 #include "utils/guc.h"
-
-extern CurrentState current_state;
-extern bool pgqp_adjust_rows;
-extern bool pgqp_enable_adjust_joinrel_rows;
 #endif							/* __PG_QUERY_PLAN__ */
 
 static void make_rels_by_clause_joins(PlannerInfo *root,
 									  RelOptInfo *old_rel,
-#if PG_VERSION_NUM >= 160000
-#if PG_VERSION_NUM >= 170000
 									  List *other_rels,
 									  int first_rel_idx);
-#else
-									  List *other_rels,
-									  int first_rel_idx);
-#endif
-#else
-									  List *other_rels_list,
-									  ListCell *other_rels);
-#endif
 static void make_rels_by_clauseless_joins(PlannerInfo *root,
 										  RelOptInfo *old_rel,
 										  List *other_rels);
@@ -66,9 +53,8 @@ static void try_partitionwise_join(PlannerInfo *root, RelOptInfo *rel1,
 static SpecialJoinInfo *build_child_join_sjinfo(PlannerInfo *root,
 												SpecialJoinInfo *parent_sjinfo,
 												Relids left_relids, Relids right_relids);
-#if PG_VERSION_NUM >= 170000
-static void free_child_join_sjinfo(SpecialJoinInfo *sjinfo);
-#endif
+static void free_child_join_sjinfo(SpecialJoinInfo *child_sjinfo,
+								   SpecialJoinInfo *parent_sjinfo);
 static void compute_partition_bounds(PlannerInfo *root, RelOptInfo *rel1,
 									 RelOptInfo *rel2, RelOptInfo *joinrel,
 									 SpecialJoinInfo *parent_sjinfo,
@@ -155,9 +141,7 @@ join_search_one_level(PlannerInfo *root, int level)
 		if (old_rel->joininfo != NIL || old_rel->has_eclass_joins ||
 			has_join_restriction(root, old_rel))
 		{
-#if PG_VERSION_NUM >= 160000
 			int			first_rel;
-#endif
 			/*
 			 * There are join clauses or join order restrictions relevant to
 			 * this rel, so consider joins between this rel and (only) those
@@ -171,33 +155,12 @@ join_search_one_level(PlannerInfo *root, int level)
 			 * to each initial rel they don't already include but have a join
 			 * clause or restriction with.
 			 */
-#if PG_VERSION_NUM >= 160000
 			if (level == 2)		/* consider remaining initial rels */
 				first_rel = foreach_current_index(r) + 1;
 			else
 				first_rel = 0;
 
 			make_rels_by_clause_joins(root, old_rel, joinrels[1], first_rel);
-#else
-			List	   *other_rels_list;
-			ListCell   *other_rels;
-
-			if (level == 2)		/* consider remaining initial rels */
-			{
-				other_rels_list = joinrels[level - 1];
-				other_rels = lnext(other_rels_list, r);
-			}
-			else				/* consider all initial rels */
-			{
-				other_rels_list = joinrels[1];
-				other_rels = list_head(other_rels_list);
-			}
-
-			make_rels_by_clause_joins(root,
-									  old_rel,
-									  other_rels_list,
-									  other_rels);
-#endif
 		}
 		else
 		{
@@ -241,12 +204,7 @@ join_search_one_level(PlannerInfo *root, int level)
 		foreach(r, joinrels[k])
 		{
 			RelOptInfo *old_rel = (RelOptInfo *) lfirst(r);
-#if PG_VERSION_NUM >= 160000
 			int			first_rel;
-#else
-			List	   *other_rels_list;
-			ListCell   *other_rels;
-#endif
 			ListCell   *r2;
 
 			/*
@@ -258,30 +216,12 @@ join_search_one_level(PlannerInfo *root, int level)
 				!has_join_restriction(root, old_rel))
 				continue;
 
-#if PG_VERSION_NUM >= 160000
 			if (k == other_level)	/* only consider remaining rels */
 				first_rel = foreach_current_index(r) + 1;
 			else
 				first_rel = 0;
-#else
-			if (k == other_level)
-			{
-				/* only consider remaining rels */
-				other_rels_list = joinrels[k];
-				other_rels = lnext(other_rels_list, r);
-			}
-			else
-			{
-				other_rels_list = joinrels[other_level];
-				other_rels = list_head(other_rels_list);
-			}
-#endif
 
-#if PG_VERSION_NUM >= 160000
 			for_each_from(r2, joinrels[other_level], first_rel)
-#else
-			for_each_cell(r2, other_rels_list, other_rels)
-#endif
 			{
 				RelOptInfo *new_rel = (RelOptInfo *) lfirst(r2);
 
@@ -361,11 +301,7 @@ join_search_one_level(PlannerInfo *root, int level)
 		if (joinrels[level] == NIL &&
 			root->join_info_list == NIL &&
 			!root->hasLateralRTEs)
-#if PG_VERSION_NUM >= 160000
 			elog(ERROR, "failed to build any %d-way joins", level);
-#else
-			elog(ERROR, "%s failed to build any %d-way joins", __func__, level);
-#endif
 	}
 }
 
@@ -392,21 +328,12 @@ join_search_one_level(PlannerInfo *root, int level)
 static void
 make_rels_by_clause_joins(PlannerInfo *root,
 						  RelOptInfo *old_rel,
-#if PG_VERSION_NUM >= 160000
 						  List *other_rels,
 						  int first_rel_idx)
-#else
-						  List *other_rels_list,
-						  ListCell *other_rels)
-#endif
 {
 	ListCell   *l;
 
-#if PG_VERSION_NUM >= 160000
 	for_each_from(l, other_rels, first_rel_idx)
-#else
-	for_each_cell(l, other_rels_list, other_rels)
-#endif
 	{
 		RelOptInfo *other_rel = (RelOptInfo *) lfirst(l);
 
@@ -695,9 +622,6 @@ join_is_legal(PlannerInfo *root, RelOptInfo *rel1, RelOptInfo *rel2,
 		 * Also, if the lateral reference is only indirect, we should reject
 		 * the join; whatever rel(s) the reference chain goes through must be
 		 * joined to first.
-		 *
-		 * Another case that might keep us from building a valid plan is the
-		 * implementation restriction described by have_dangerous_phv().
 		 */
 		lateral_fwd = bms_overlap(rel1->relids, rel2->lateral_relids);
 		lateral_rev = bms_overlap(rel2->relids, rel1->lateral_relids);
@@ -714,9 +638,6 @@ join_is_legal(PlannerInfo *root, RelOptInfo *rel1, RelOptInfo *rel2,
 			/* check there is a direct reference from rel2 to rel1 */
 			if (!bms_overlap(rel1->relids, rel2->direct_lateral_relids))
 				return false;	/* only indirect refs, so reject */
-			/* check we won't have a dangerous PHV */
-			if (have_dangerous_phv(root, rel1->relids, rel2->lateral_relids))
-				return false;	/* might be unable to handle required PHV */
 		}
 		else if (lateral_rev)
 		{
@@ -729,9 +650,6 @@ join_is_legal(PlannerInfo *root, RelOptInfo *rel1, RelOptInfo *rel2,
 			/* check there is a direct reference from rel1 to rel2 */
 			if (!bms_overlap(rel2->relids, rel1->direct_lateral_relids))
 				return false;	/* only indirect refs, so reject */
-			/* check we won't have a dangerous PHV */
-			if (have_dangerous_phv(root, rel2->relids, rel1->lateral_relids))
-				return false;	/* might be unable to handle required PHV */
 		}
 
 		/*
@@ -786,7 +704,6 @@ join_is_legal(PlannerInfo *root, RelOptInfo *rel1, RelOptInfo *rel2,
 }
 
 #ifndef  __PG_QUERY_PLAN__
-#if PG_VERSION_NUM >= 170000
 /*
  * init_dummy_sjinfo
  *    Populate the given SpecialJoinInfo for a plain inner join between the
@@ -821,7 +738,6 @@ init_dummy_sjinfo(SpecialJoinInfo *sjinfo, Relids left_relids,
 	sjinfo->semi_rhs_exprs = NIL;
 }
 #endif
-#endif
 
 /*
  * make_join_rel
@@ -845,9 +761,7 @@ make_join_rel(PlannerInfo *root, RelOptInfo *rel1, RelOptInfo *rel2)
 	Relids		joinrelids;
 	SpecialJoinInfo *sjinfo;
 	bool		reversed;
-#if PG_VERSION_NUM >= 160000
 	List	   *pushed_down_joins = NIL;
-#endif
 	SpecialJoinInfo sjinfo_data;
 	RelOptInfo *joinrel;
 	List	   *restrictlist;
@@ -893,14 +807,12 @@ make_join_rel(PlannerInfo *root, RelOptInfo *rel1, RelOptInfo *rel2)
 		return NULL;
 	}
 
-#if PG_VERSION_NUM >= 160000
 	/*
 	 * Add outer join relid(s) to form the canonical relids.  Any added outer
 	 * joins besides sjinfo itself are appended to pushed_down_joins.
 	 */
 	joinrelids = add_outer_joins_to_relids(root, joinrelids, sjinfo,
 										   &pushed_down_joins);
-#endif
 
 	/* Swap rels if needed to match the join info. */
 	if (reversed)
@@ -918,34 +830,8 @@ make_join_rel(PlannerInfo *root, RelOptInfo *rel1, RelOptInfo *rel2)
 	 */
 	if (sjinfo == NULL)
 	{
-#if PG_VERSION_NUM >= 170000
 		sjinfo = &sjinfo_data;
 		init_dummy_sjinfo(sjinfo, rel1->relids, rel2->relids);
-#else
-		sjinfo = &sjinfo_data;
-		sjinfo->type = T_SpecialJoinInfo;
-		sjinfo->min_lefthand = rel1->relids;
-		sjinfo->min_righthand = rel2->relids;
-		sjinfo->syn_lefthand = rel1->relids;
-		sjinfo->syn_righthand = rel2->relids;
-		sjinfo->jointype = JOIN_INNER;
-#if PG_VERSION_NUM >= 160000
-		sjinfo->ojrelid = 0;
-		sjinfo->commute_above_l = NULL;
-		sjinfo->commute_above_r = NULL;
-		sjinfo->commute_below_l = NULL;
-		sjinfo->commute_below_r = NULL;
-#endif
-		/* we don't bother trying to make the remaining fields valid */
-		sjinfo->lhs_strict = false;
-#if PG_VERSION_NUM < 160000
-		sjinfo->delay_upper_joins = false;
-#endif
-		sjinfo->semi_can_btree = false;
-		sjinfo->semi_can_hash = false;
-		sjinfo->semi_operators = NIL;
-		sjinfo->semi_rhs_exprs = NIL;
-#endif
 	}
 
 	/*
@@ -953,23 +839,13 @@ make_join_rel(PlannerInfo *root, RelOptInfo *rel1, RelOptInfo *rel2)
 	 * goes with this particular joining.
 	 */
 #ifdef  __PG_QUERY_PLAN__
-#if PG_VERSION_NUM >= 160000
 	joinrel = pgqp_build_join_rel(root, joinrelids, rel1, rel2,
 								  sjinfo, pushed_down_joins,
 								  &restrictlist);
 #else
-	joinrel = pgqp_build_join_rel(root, joinrelids, rel1, rel2, sjinfo,
-								  &restrictlist);
-#endif
-#else
-#if PG_VERSION_NUM >= 160000
 	joinrel = build_join_rel(root, joinrelids, rel1, rel2,
 							 sjinfo, pushed_down_joins,
 							 &restrictlist);
-#else
-	joinrel = build_join_rel(root, joinrelids, rel1, rel2, sjinfo,
-							 &restrictlist);
-#endif
 #endif							/* __PG_QUERY_PLAN__ */
 
 	/*
@@ -996,7 +872,6 @@ make_join_rel(PlannerInfo *root, RelOptInfo *rel1, RelOptInfo *rel2)
 }
 
 #ifndef __PG_QUERY_PLAN__
-#if PG_VERSION_NUM >= 160000
 /*
  * add_outer_joins_to_relids
  *	  Add relids to input_relids to represent any outer joins that will be
@@ -1098,7 +973,6 @@ add_outer_joins_to_relids(PlannerInfo *root, Relids input_relids,
 
 	return input_relids;
 }
-#endif
 #endif							/* __PG_QUERY_PLAN__ */
 
 
@@ -1364,9 +1238,15 @@ populate_joinrel_with_paths(PlannerInfo *root, RelOptInfo *rel1,
 				pgqp_add_paths_to_joinrel(root, joinrel, rel1, rel2,
 										  JOIN_SEMI, sjinfo,
 										  restrictlist);
+				pgqp_add_paths_to_joinrel(root, joinrel, rel2, rel1,
+										  JOIN_UNIQUE_OUTER, sjinfo,
+										  restrictlist);
 #else
 				add_paths_to_joinrel(root, joinrel, rel1, rel2,
 									 JOIN_SEMI, sjinfo,
+									 restrictlist);
+				add_paths_to_joinrel(root, joinrel, rel2, rel1,
+									 JOIN_UNIQUE_OUTER, sjinfo,
 									 restrictlist);
 #endif							/* __PG_QUERY_PLAN__ */
 			}
@@ -1469,20 +1349,16 @@ populate_joinrel_with_paths(PlannerInfo *root, RelOptInfo *rel1,
 			pgqp_add_paths_to_joinrel(root, joinrel, rel1, rel2,
 									  JOIN_ANTI, sjinfo,
 									  restrictlist);
-#if PG_VERSION_NUM >= 160000
 			pgqp_add_paths_to_joinrel(root, joinrel, rel2, rel1,
 									  JOIN_RIGHT_ANTI, sjinfo,
 									  restrictlist);
-#endif
 #else
 			add_paths_to_joinrel(root, joinrel, rel1, rel2,
 								 JOIN_ANTI, sjinfo,
 								 restrictlist);
-#if PG_VERSION_NUM >= 160000
 			add_paths_to_joinrel(root, joinrel, rel2, rel1,
 								 JOIN_RIGHT_ANTI, sjinfo,
 								 restrictlist);
-#endif
 #endif							/* __PG_QUERY_PLAN__ */
 			break;
 		default:
@@ -1725,57 +1601,7 @@ has_legal_joinclause(PlannerInfo *root, RelOptInfo *rel)
 #endif							/* #ifndef __PG_QUERY_PLAN__ */
 
 
-#ifndef  __PG_QUERY_PLAN__
-/*
- * There's a pitfall for creating parameterized nestloops: suppose the inner
- * rel (call it A) has a parameter that is a PlaceHolderVar, and that PHV's
- * minimum eval_at set includes the outer rel (B) and some third rel (C).
- * We might think we could create a B/A nestloop join that's parameterized by
- * C.  But we would end up with a plan in which the PHV's expression has to be
- * evaluated as a nestloop parameter at the B/A join; and the executor is only
- * set up to handle simple Vars as NestLoopParams.  Rather than add complexity
- * and overhead to the executor for such corner cases, it seems better to
- * forbid the join.  (Note that we can still make use of A's parameterized
- * path with pre-joined B+C as the outer rel.  have_join_order_restriction()
- * ensures that we will consider making such a join even if there are not
- * other reasons to do so.)
- *
- * So we check whether any PHVs used in the query could pose such a hazard.
- * We don't have any simple way of checking whether a risky PHV would actually
- * be used in the inner plan, and the case is so unusual that it doesn't seem
- * worth working very hard on it.
- *
- * This needs to be checked in two places.  If the inner rel's minimum
- * parameterization would trigger the restriction, then join_is_legal() should
- * reject the join altogether, because there will be no workable paths for it.
- * But joinpath.c has to check again for every proposed nestloop path, because
- * the inner path might have more than the minimum parameterization, causing
- * some PHV to be dangerous for it that otherwise wouldn't be.
- */
-bool
-have_dangerous_phv(PlannerInfo *root,
-				   Relids outer_relids, Relids inner_params)
-{
-	ListCell   *lc;
 
-	foreach(lc, root->placeholder_list)
-	{
-		PlaceHolderInfo *phinfo = (PlaceHolderInfo *) lfirst(lc);
-
-		if (!bms_is_subset(phinfo->ph_eval_at, inner_params))
-			continue;			/* ignore, could not be a nestloop param */
-		if (!bms_overlap(phinfo->ph_eval_at, outer_relids))
-			continue;			/* ignore, not relevant to this join */
-		if (bms_is_subset(phinfo->ph_eval_at, outer_relids))
-			continue;			/* safe, it can be eval'd within outerrel */
-		/* Otherwise, it's potentially unsafe, so reject the join */
-		return true;
-	}
-
-	/* OK to perform the join */
-	return false;
-}
-#endif							/* #ifndef  __PG_QUERY_PLAN__ */
 
 #ifndef  __PG_QUERY_PLAN__
 /*
@@ -2005,11 +1831,9 @@ try_partitionwise_join(PlannerInfo *root, RelOptInfo *rel1, RelOptInfo *rel2,
 		SpecialJoinInfo *child_sjinfo;
 		List	   *child_restrictlist;
 		RelOptInfo *child_joinrel;
-#if PG_VERSION_NUM < 160000
-		Relids		child_joinrelids;
-#endif
 		AppendRelInfo **appinfos;
 		int			nappinfos;
+		Relids		child_relids;
 
 		if (joinrel->partbounds_merged)
 		{
@@ -2095,10 +1919,6 @@ try_partitionwise_join(PlannerInfo *root, RelOptInfo *rel1, RelOptInfo *rel2,
 
 		/* We should never try to join two overlapping sets of rels. */
 		Assert(!bms_overlap(child_rel1->relids, child_rel2->relids));
-#if PG_VERSION_NUM < 160000
-		child_joinrelids = bms_union(child_rel1->relids, child_rel2->relids);
-		appinfos = find_appinfos_by_relids(root, child_joinrelids, &nappinfos);
-#endif
 
 		/*
 		 * Construct SpecialJoinInfo from parent join relations's
@@ -2108,13 +1928,10 @@ try_partitionwise_join(PlannerInfo *root, RelOptInfo *rel1, RelOptInfo *rel2,
 											   child_rel1->relids,
 											   child_rel2->relids);
 
-#if PG_VERSION_NUM >= 160000
 		/* Find the AppendRelInfo structures */
-		appinfos = find_appinfos_by_relids(root,
-										   bms_union(child_rel1->relids,
-													 child_rel2->relids),
+		child_relids = bms_union(child_rel1->relids, child_rel2->relids);
+		appinfos = find_appinfos_by_relids(root, child_relids,
 										   &nappinfos);
-#endif
 
 		/*
 		 * Construct restrictions applicable to the child join from those
@@ -2124,65 +1941,45 @@ try_partitionwise_join(PlannerInfo *root, RelOptInfo *rel1, RelOptInfo *rel2,
 			(List *) adjust_appendrel_attrs(root,
 											(Node *) parent_restrictlist,
 											nappinfos, appinfos);
-#if PG_VERSION_NUM < 160000
-		pfree(appinfos);
-#endif
 
 		/* Find or construct the child join's RelOptInfo */
 		child_joinrel = joinrel->part_rels[cnt_parts];
 		if (!child_joinrel)
 		{
-#if PG_VERSION_NUM >= 160000
 #ifdef __PG_QUERY_PLAN__
 			child_joinrel = pgqp_build_child_join_rel(root, child_rel1, child_rel2,
-												 joinrel, child_restrictlist,
-												 child_sjinfo);
+													  joinrel, child_restrictlist,
+													  child_sjinfo, nappinfos, appinfos);
 #else
 			child_joinrel = build_child_join_rel(root, child_rel1, child_rel2,
 												 joinrel, child_restrictlist,
-												 child_sjinfo);
-#endif
-#else
-#ifdef __PG_QUERY_PLAN__
-			child_joinrel = pgqp_build_child_join_rel(root, child_rel1, child_rel2,
-												 joinrel, child_restrictlist,
-												 child_sjinfo,
-												 child_sjinfo->jointype);
-#else
-			child_joinrel = build_child_join_rel(root, child_rel1, child_rel2,
-												 joinrel, child_restrictlist,
-												 child_sjinfo,
-												 child_sjinfo->jointype);
-#endif
+												 child_sjinfo, nappinfos, appinfos);
 #endif
 			joinrel->part_rels[cnt_parts] = child_joinrel;
-#if PG_VERSION_NUM >= 160000
 			joinrel->live_parts = bms_add_member(joinrel->live_parts, cnt_parts);
-#endif
 			joinrel->all_partrels = bms_add_members(joinrel->all_partrels,
 													child_joinrel->relids);
 		}
 
-#if PG_VERSION_NUM >= 160000
 		/* Assert we got the right one */
 		Assert(bms_equal(child_joinrel->relids,
 						 adjust_child_relids(joinrel->relids,
 											 nappinfos, appinfos)));
 
 		/* And make paths for the child join */
-#else
-		Assert(bms_equal(child_joinrel->relids, child_joinrelids));
-
-#endif
 		populate_joinrel_with_paths(root, child_rel1, child_rel2,
 									child_joinrel, child_sjinfo,
 									child_restrictlist);
-#if PG_VERSION_NUM >= 160000
+
+		/*
+		 * When there are thousands of partitions involved, this loop will
+		 * accumulate a significant amount of memory usage from objects that
+		 * are only needed within the loop.  Free these local objects eagerly
+		 * at the end of each iteration.
+		 */
 		pfree(appinfos);
-#if PG_VERSION_NUM >= 170000
-		free_child_join_sjinfo(child_sjinfo);
-#endif
-#endif
+		bms_free(child_relids);
+		free_child_join_sjinfo(child_sjinfo, parent_sjinfo);
 	}
 }
 
@@ -2204,7 +2001,6 @@ build_child_join_sjinfo(PlannerInfo *root, SpecialJoinInfo *parent_sjinfo,
 	AppendRelInfo **right_appinfos;
 	int			right_nappinfos;
 
-#if PG_VERSION_NUM >= 170000
 	/* Dummy SpecialJoinInfos can be created without any translation. */
 	if (parent_sjinfo->jointype == JOIN_INNER)
 	{
@@ -2212,7 +2008,6 @@ build_child_join_sjinfo(PlannerInfo *root, SpecialJoinInfo *parent_sjinfo,
 		init_dummy_sjinfo(sjinfo, left_relids, right_relids);
 		return sjinfo;
 	}
-#endif
 
 	memcpy(sjinfo, parent_sjinfo, sizeof(SpecialJoinInfo));
 	left_appinfos = find_appinfos_by_relids(root, left_relids,
@@ -2242,7 +2037,6 @@ build_child_join_sjinfo(PlannerInfo *root, SpecialJoinInfo *parent_sjinfo,
 	return sjinfo;
 }
 
-#if PG_VERSION_NUM >= 170000
 /*
  * free_child_join_sjinfo
  *		Free memory consumed by a SpecialJoinInfo created by
@@ -2252,18 +2046,33 @@ build_child_join_sjinfo(PlannerInfo *root, SpecialJoinInfo *parent_sjinfo,
  * SpecialJoinInfo are freed here.
  */
 static void
-free_child_join_sjinfo(SpecialJoinInfo *sjinfo)
+free_child_join_sjinfo(SpecialJoinInfo *child_sjinfo,
+					   SpecialJoinInfo *parent_sjinfo)
 {
 	/*
 	 * Dummy SpecialJoinInfos of inner joins do not have any translated fields
 	 * and hence no fields that to be freed.
 	 */
-	if (sjinfo->jointype != JOIN_INNER)
+	if (child_sjinfo->jointype != JOIN_INNER)
 	{
-		bms_free(sjinfo->min_lefthand);
-		bms_free(sjinfo->min_righthand);
-		bms_free(sjinfo->syn_lefthand);
-		bms_free(sjinfo->syn_righthand);
+		if (child_sjinfo->min_lefthand != parent_sjinfo->min_lefthand)
+			bms_free(child_sjinfo->min_lefthand);
+
+		if (child_sjinfo->min_righthand != parent_sjinfo->min_righthand)
+			bms_free(child_sjinfo->min_righthand);
+
+		if (child_sjinfo->syn_lefthand != parent_sjinfo->syn_lefthand)
+			bms_free(child_sjinfo->syn_lefthand);
+
+		if (child_sjinfo->syn_righthand != parent_sjinfo->syn_righthand)
+			bms_free(child_sjinfo->syn_righthand);
+
+		Assert(child_sjinfo->commute_above_l == parent_sjinfo->commute_above_l);
+		Assert(child_sjinfo->commute_above_r == parent_sjinfo->commute_above_r);
+		Assert(child_sjinfo->commute_below_l == parent_sjinfo->commute_below_l);
+		Assert(child_sjinfo->commute_below_r == parent_sjinfo->commute_below_r);
+
+		Assert(child_sjinfo->semi_operators == parent_sjinfo->semi_operators);
 
 		/*
 		 * semi_rhs_exprs may in principle be freed, but a simple pfree() does
@@ -2271,9 +2080,8 @@ free_child_join_sjinfo(SpecialJoinInfo *sjinfo)
 		 */
 	}
 
-	pfree(sjinfo);
+	pfree(child_sjinfo);
 }
-#endif
 
 /*
  * compute_partition_bounds

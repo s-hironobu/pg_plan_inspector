@@ -29,6 +29,10 @@
 	 */
 	extern void init_input_param_buf(const int params_len);
 
+	extern int yydebug;
+	extern int yychar;
+	extern int yynerrs;
+
 	/*
 	 * A temporal buffer to hold the string retrieved from pgqp_reg_params.
 	 */

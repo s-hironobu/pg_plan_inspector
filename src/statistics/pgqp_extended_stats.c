@@ -21,25 +21,15 @@
 #include "access/htup_details.h"
 #include "access/table.h"
 #include "catalog/indexing.h"
-#if PG_VERSION_NUM < 170000
-#include "catalog/pg_collation.h"
-#endif
 #include "catalog/pg_statistic_ext.h"
 #include "catalog/pg_statistic_ext_data.h"
-#if PG_VERSION_NUM >= 150000
 #include "commands/defrem.h"
-#endif
 #include "commands/progress.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
-#if PG_VERSION_NUM < 170000
-#include "optimizer/clauses.h"
-#endif
 #include "optimizer/optimizer.h"
-#if PG_VERSION_NUM >= 150000
 #include "parser/parsetree.h"
-#endif
 #include "pgstat.h"
 #include "postmaster/autovacuum.h"
 #include "statistics/extended_stats_internal.h"
@@ -55,9 +45,6 @@
 #include "utils/rel.h"
 #include "utils/selfuncs.h"
 #include "utils/syscache.h"
-#if PG_VERSION_NUM < 170000
-#include "utils/typcache.h"
-#endif
 
 /*
  * To avoid consuming too much memory during analysis and/or too much space
@@ -87,24 +74,13 @@ typedef struct StatExtEntry
 
 
 static List *fetch_statentries_for_relation(Relation pg_statext, Oid relid);
-static VacAttrStats **lookup_var_attr_stats(Relation rel, Bitmapset *attrs, List *exprs,
+static VacAttrStats **lookup_var_attr_stats(Bitmapset *attrs, List *exprs,
 											int nvacatts, VacAttrStats **vacatts);
-#if PG_VERSION_NUM >= 150000
 static void statext_store(Oid statOid, bool inh,
 						  MVNDistinct *ndistinct, MVDependencies *dependencies,
 						  MCVList *mcv, Datum exprs, VacAttrStats **stats);
-#else
-static void statext_store(Oid statOid,
-						  MVNDistinct *ndistinct, MVDependencies *dependencies,
-						  MCVList *mcv, Datum exprs, VacAttrStats **stats);
-#endif
-#if PG_VERSION_NUM >= 160000
 static int	statext_compute_stattarget(int stattarget,
 									   int nattrs, VacAttrStats **stats);
-#else
-static int	statext_compute_stattarget(int stattarget,
-									   int natts, VacAttrStats **stats);
-#endif
 
 /* Information needed to analyze a single simple expression. */
 typedef struct AnlExprData
@@ -113,18 +89,13 @@ typedef struct AnlExprData
 	VacAttrStats *vacattrstat;	/* statistics attrs to analyze */
 } AnlExprData;
 
-static void compute_expr_stats(Relation onerel, double totalrows,
-							   AnlExprData *exprdata, int nexprs,
-							   HeapTuple *rows, int numrows);
+static void compute_expr_stats(Relation onerel, AnlExprData *exprdata,
+							   int nexprs, HeapTuple *rows, int numrows);
 static Datum serialize_expr_stats(AnlExprData *exprdata, int nexprs);
 static Datum expr_fetch_func(VacAttrStatsP stats, int rownum, bool *isNull);
 static AnlExprData *build_expr_data(List *exprs, int stattarget);
 
-#if PG_VERSION_NUM >= 160000
 static StatsBuildData *make_build_data(Relation rel, StatExtEntry *stat,
-#else
-static StatsBuildData *make_build_data(Relation onerel, StatExtEntry *stat,
-#endif
 									   int numrows, HeapTuple *rows,
 									   VacAttrStats **stats, int stattarget);
 
@@ -137,15 +108,9 @@ static StatsBuildData *make_build_data(Relation onerel, StatExtEntry *stat,
  * requested stats, and serializes them back into the catalog.
  */
 void
-#if PG_VERSION_NUM >= 150000
 BuildRelationExtStatistics(Relation onerel, bool inh, double totalrows,
 						   int numrows, HeapTuple *rows,
 						   int natts, VacAttrStats **vacattrstats)
-#else
-BuildRelationExtStatistics(Relation onerel, double totalrows,
-						   int numrows, HeapTuple *rows,
-						   int natts, VacAttrStats **vacattrstats)
-#endif
 {
 	Relation	pg_stext;
 	ListCell   *lc;
@@ -158,22 +123,15 @@ BuildRelationExtStatistics(Relation onerel, double totalrows,
 	if (!natts)
 		return;
 
-#if PG_VERSION_NUM >= 150000
 	/* the list of stats has to be allocated outside the memory context */
 	pg_stext = table_open(StatisticExtRelationId, RowExclusiveLock);
 	statslist = fetch_statentries_for_relation(pg_stext, RelationGetRelid(onerel));
 
 	/* memory context for building each statistics object */
-#endif
 	cxt = AllocSetContextCreate(CurrentMemoryContext,
 								"BuildRelationExtStatistics",
 								ALLOCSET_DEFAULT_SIZES);
 	oldcxt = MemoryContextSwitchTo(cxt);
-
-#if PG_VERSION_NUM < 150000
-	pg_stext = table_open(StatisticExtRelationId, RowExclusiveLock);
-	statslist = fetch_statentries_for_relation(pg_stext, RelationGetRelid(onerel));
-#endif
 
 	/* report this phase */
 	if (statslist != NIL)
@@ -207,15 +165,11 @@ BuildRelationExtStatistics(Relation onerel, double totalrows,
 		 * Check if we can build these stats based on the column analyzed. If
 		 * not, report this fact (except in autovacuum) and move on.
 		 */
-		stats = lookup_var_attr_stats(onerel, stat->columns, stat->exprs,
+		stats = lookup_var_attr_stats(stat->columns, stat->exprs,
 									  natts, vacattrstats);
 		if (!stats)
 		{
-#if PG_VERSION_NUM >= 170000
 			if (!AmAutoVacuumWorkerProcess())
-#else
-			if (!IsAutoVacuumWorkerProcess())
-#endif
 				ereport(WARNING,
 						(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
 						 errmsg("statistics object \"%s.%s\" could not be computed for relation \"%s.%s\"",
@@ -226,7 +180,7 @@ BuildRelationExtStatistics(Relation onerel, double totalrows,
 			continue;
 		}
 
-		/* compute statistics target for this statistics */
+		/* compute statistics target for this statistics object */
 		stattarget = statext_compute_stattarget(stat->stattarget,
 												bms_num_members(stat->columns),
 												stats);
@@ -239,7 +193,7 @@ BuildRelationExtStatistics(Relation onerel, double totalrows,
 		if (stattarget == 0)
 			continue;
 
-		/* evaluate expressions (if the statistics has any) */
+		/* evaluate expressions (if the statistics object has any) */
 		data = make_build_data(onerel, stat, numrows, rows, stats, stattarget);
 
 		/* compute statistic of each requested type */
@@ -265,47 +219,30 @@ BuildRelationExtStatistics(Relation onerel, double totalrows,
 				exprdata = build_expr_data(stat->exprs, stattarget);
 				nexprs = list_length(stat->exprs);
 
-				compute_expr_stats(onerel, totalrows,
-								   exprdata, nexprs,
-								   rows, numrows);
+				compute_expr_stats(onerel, exprdata, nexprs, rows, numrows);
 
 				exprstats = serialize_expr_stats(exprdata, nexprs);
 			}
 		}
 
 		/* store the statistics in the catalog */
-#if PG_VERSION_NUM >= 150000
 		statext_store(stat->statOid, inh,
 					  ndistinct, dependencies, mcv, exprstats, stats);
-#else
-		statext_store(stat->statOid, ndistinct, dependencies, mcv, exprstats, stats);
-#endif
 
 		/* for reporting progress */
 		pgstat_progress_update_param(PROGRESS_ANALYZE_EXT_STATS_COMPUTED,
 									 ++ext_cnt);
-#if PG_VERSION_NUM >= 150000
+
 		/* free the data used for building this statistics object */
 		MemoryContextReset(cxt);
-#else
-		/* free the build data (allocated as a single chunk) */
-		pfree(data);
-#endif
 	}
 
-#if PG_VERSION_NUM >= 150000
 	MemoryContextSwitchTo(oldcxt);
 	MemoryContextDelete(cxt);
 
 	list_free(statslist);
 
 	table_close(pg_stext, RowExclusiveLock);
-#else
-	table_close(pg_stext, RowExclusiveLock);
-
-	MemoryContextSwitchTo(oldcxt);
-	MemoryContextDelete(cxt);
-#endif
 }
 
 /*
@@ -317,9 +254,9 @@ BuildRelationExtStatistics(Relation onerel, double totalrows,
  * when analyzing only some of the columns, this will skip statistics objects
  * that would require additional columns.
  *
- * See statext_compute_stattarget for details about how we compute statistics
- * target for a statistics object (from the object target, attribute targets
- * and default statistics target).
+ * See statext_compute_stattarget for details about how we compute the
+ * statistics target for a statistics object (from the object target,
+ * attribute targets and default statistics target).
  */
 int
 ComputeExtStatisticsRows(Relation onerel,
@@ -356,7 +293,7 @@ ComputeExtStatisticsRows(Relation onerel,
 		 * analyzed. If not, ignore it (don't report anything, we'll do that
 		 * during the actual build BuildRelationExtStatistics).
 		 */
-		stats = lookup_var_attr_stats(onerel, stat->columns, stat->exprs,
+		stats = lookup_var_attr_stats(stat->columns, stat->exprs,
 									  natts, vacattrstats);
 
 		if (!stats)
@@ -389,8 +326,8 @@ ComputeExtStatisticsRows(Relation onerel,
  *
  * When computing target for extended statistics objects, we consider three
  * places where the target may be set - the statistics object itself,
- * attributes the statistics is defined on, and then the default statistics
- * target.
+ * attributes the statistics object is defined on, and then the default
+ * statistics target.
  *
  * First we look at what's set for the statistics object itself, using the
  * ALTER STATISTICS ... SET STATISTICS command. If we find a valid value
@@ -423,13 +360,8 @@ statext_compute_stattarget(int stattarget, int nattrs, VacAttrStats **stats)
 	for (i = 0; i < nattrs; i++)
 	{
 		/* keep the maximum statistics target */
-#if PG_VERSION_NUM >= 170000
 		if (stats[i]->attstattarget > stattarget)
 			stattarget = stats[i]->attstattarget;
-#else
-		if (stats[i]->attr->attstattarget > stattarget)
-			stattarget = stats[i]->attr->attstattarget;
-#endif
 	}
 
 	/*
@@ -441,11 +373,7 @@ statext_compute_stattarget(int stattarget, int nattrs, VacAttrStats **stats)
 		stattarget = default_statistics_target;
 
 	/* As this point we should have a valid statistics target. */
-#if PG_VERSION_NUM >= 170000
 	Assert((stattarget >= 0) && (stattarget <= MAX_STATISTICS_TARGET));
-#else
-	Assert((stattarget >= 0) && (stattarget <= 10000));
-#endif
 
 	return stattarget;
 }
@@ -523,29 +451,18 @@ fetch_statentries_for_relation(Relation pg_statext, Oid relid)
 		entry->statOid = staForm->oid;
 		entry->schema = get_namespace_name(staForm->stxnamespace);
 		entry->name = pstrdup(NameStr(staForm->stxname));
-#if PG_VERSION_NUM < 170000
-		entry->stattarget = staForm->stxstattarget;
-#endif
 		for (i = 0; i < staForm->stxkeys.dim1; i++)
 		{
 			entry->columns = bms_add_member(entry->columns,
 											staForm->stxkeys.values[i]);
 		}
 
-#if PG_VERSION_NUM >= 170000
 		datum = SysCacheGetAttr(STATEXTOID, htup, Anum_pg_statistic_ext_stxstattarget, &isnull);
 		entry->stattarget = isnull ? -1 : DatumGetInt16(datum);
-#endif
 
 		/* decode the stxkind char array into a list of chars */
-#if PG_VERSION_NUM >= 160000
 		datum = SysCacheGetAttrNotNull(STATEXTOID, htup,
 									   Anum_pg_statistic_ext_stxkind);
-#else
-		datum = SysCacheGetAttr(STATEXTOID, htup,
-								Anum_pg_statistic_ext_stxkind, &isnull);
-		Assert(!isnull);
-#endif
 		arr = DatumGetArrayTypeP(datum);
 		if (ARR_NDIM(arr) != 1 ||
 			ARR_HASNULL(arr) ||
@@ -616,13 +533,7 @@ examine_attribute(Node *expr)
 	 * Create the VacAttrStats struct.
 	 */
 	stats = (VacAttrStats *) palloc0(sizeof(VacAttrStats));
-#if PG_VERSION_NUM >= 170000
 	stats->attstattarget = -1;
-#else
-	/* fake the attribute */
-	stats->attr = (Form_pg_attribute) palloc0(ATTRIBUTE_FIXED_PART_SIZE);
-	stats->attr->attstattarget = -1;
-#endif
 
 	/*
 	 * When analyzing an expression, believe the expression tree's type not
@@ -676,9 +587,6 @@ examine_attribute(Node *expr)
 	if (!ok || stats->compute_stats == NULL || stats->minrows <= 0)
 	{
 		heap_freetuple(typtuple);
-#if PG_VERSION_NUM < 170000
-		pfree(stats->attr);
-#endif
 		pfree(stats);
 		return NULL;
 	}
@@ -707,14 +615,12 @@ examine_expression(Node *expr, int stattarget)
 	 */
 	stats = (VacAttrStats *) palloc0(sizeof(VacAttrStats));
 
-#if PG_VERSION_NUM >= 170000
 	/*
 	 * We can't have statistics target specified for the expression, so we
 	 * could use either the default_statistics_target, or the target computed
 	 * for the extended statistics. The second option seems more reasonable.
 	 */
 	stats->attstattarget = stattarget;
-#endif
 
 	/*
 	 * When analyzing an expression, believe the expression tree's type.
@@ -729,27 +635,6 @@ examine_expression(Node *expr, int stattarget)
 	 * which case exprCollation() does the right thing.
 	 */
 	stats->attrcollid = exprCollation(expr);
-
-#if PG_VERSION_NUM < 170000
-	/*
-	 * We don't have any pg_attribute for expressions, so let's fake something
-	 * reasonable into attstattarget, which is the only thing std_typanalyze
-	 * needs.
-	 */
-	stats->attr = (Form_pg_attribute) palloc(ATTRIBUTE_FIXED_PART_SIZE);
-
-	/*
-	 * We can't have statistics target specified for the expression, so we
-	 * could use either the default_statistics_target, or the target computed
-	 * for the extended statistics. The second option seems more reasonable.
-	 */
-	stats->attr->attstattarget = stattarget;
-
-	/* initialize some basic fields */
-	stats->attr->attrelid = InvalidOid;
-	stats->attr->attnum = InvalidAttrNumber;
-	stats->attr->atttypid = stats->attrtypid;
-#endif
 
 	typtuple = SearchSysCacheCopy1(TYPEOID,
 								   ObjectIdGetDatum(stats->attrtypid));
@@ -795,14 +680,14 @@ examine_expression(Node *expr, int stattarget)
 }
 
 /*
- * Using 'vacatts' of size 'nvacatts' as input data, return a newly built
+ * Using 'vacatts' of size 'nvacatts' as input data, return a newly-built
  * VacAttrStats array which includes only the items corresponding to
- * attributes indicated by 'stxkeys'. If we don't have all of the per column
- * stats available to compute the extended stats, then we return NULL to indicate
- * to the caller that the stats should not be built.
+ * attributes indicated by 'attrs'.  If we don't have all of the per-column
+ * stats available to compute the extended stats, then we return NULL to
+ * indicate to the caller that the stats should not be built.
  */
 static VacAttrStats **
-lookup_var_attr_stats(Relation rel, Bitmapset *attrs, List *exprs,
+lookup_var_attr_stats(Bitmapset *attrs, List *exprs,
 					  int nvacatts, VacAttrStats **vacatts)
 {
 	int			i = 0;
@@ -841,14 +726,6 @@ lookup_var_attr_stats(Relation rel, Bitmapset *attrs, List *exprs,
 			return NULL;
 		}
 
-#if PG_VERSION_NUM < 170000
-		/*
-		 * Sanity check that the column is not dropped - stats should have
-		 * been removed in this case.
-		 */
-		Assert(!stats[i]->attr->attisdropped);
-#endif
-
 		i++;
 	}
 
@@ -879,45 +756,26 @@ lookup_var_attr_stats(Relation rel, Bitmapset *attrs, List *exprs,
  *	tuple.
  */
 static void
-#if PG_VERSION_NUM >= 150000
 statext_store(Oid statOid, bool inh,
 			  MVNDistinct *ndistinct, MVDependencies *dependencies,
 			  MCVList *mcv, Datum exprs, VacAttrStats **stats)
-#else
-statext_store(Oid statOid,
-			  MVNDistinct *ndistinct, MVDependencies *dependencies,
-			  MCVList *mcv, Datum exprs, VacAttrStats **stats)
-#endif
 {
 	Relation	pg_stextdata;
-#if PG_VERSION_NUM >= 150000
 	HeapTuple	stup;
 	Datum		values[Natts_pg_statistic_ext_data];
 	bool		nulls[Natts_pg_statistic_ext_data];
-#else
-	HeapTuple	stup,
-				oldtup;
-	Datum		values[Natts_pg_statistic_ext_data];
-	bool		nulls[Natts_pg_statistic_ext_data];
-	bool		replaces[Natts_pg_statistic_ext_data];
-#endif
 
 	pg_stextdata = table_open(StatisticExtDataRelationId, RowExclusiveLock);
 
 	memset(nulls, true, sizeof(nulls));
-#if PG_VERSION_NUM < 150000
-	memset(replaces, false, sizeof(replaces));
-#endif
 	memset(values, 0, sizeof(values));
 
-#if PG_VERSION_NUM >= 150000
 	/* basic info */
 	values[Anum_pg_statistic_ext_data_stxoid - 1] = ObjectIdGetDatum(statOid);
 	nulls[Anum_pg_statistic_ext_data_stxoid - 1] = false;
 
 	values[Anum_pg_statistic_ext_data_stxdinherit - 1] = BoolGetDatum(inh);
 	nulls[Anum_pg_statistic_ext_data_stxdinherit - 1] = false;
-#endif
 
 	/*
 	 * Construct a new pg_statistic_ext_data tuple, replacing the calculated
@@ -951,8 +809,6 @@ statext_store(Oid statOid,
 		values[Anum_pg_statistic_ext_data_stxdexpr - 1] = exprs;
 	}
 
-#if PG_VERSION_NUM >= 150000
-
 	/*
 	 * Delete the old tuple if it exists, and insert a new one. It's easier
 	 * than trying to update or insert, based on various conditions.
@@ -962,27 +818,6 @@ statext_store(Oid statOid,
 	/* form and insert a new tuple */
 	stup = heap_form_tuple(RelationGetDescr(pg_stextdata), values, nulls);
 	CatalogTupleInsert(pg_stextdata, stup);
-#else
-	/* always replace the value (either by bytea or NULL) */
-	replaces[Anum_pg_statistic_ext_data_stxdndistinct - 1] = true;
-	replaces[Anum_pg_statistic_ext_data_stxddependencies - 1] = true;
-	replaces[Anum_pg_statistic_ext_data_stxdmcv - 1] = true;
-	replaces[Anum_pg_statistic_ext_data_stxdexpr - 1] = true;
-
-	/* there should already be a pg_statistic_ext_data tuple */
-	oldtup = SearchSysCache1(STATEXTDATASTXOID, ObjectIdGetDatum(statOid));
-	if (!HeapTupleIsValid(oldtup))
-		elog(ERROR, "cache lookup failed for statistics object %u", statOid);
-
-	/* replace it */
-	stup = heap_modify_tuple(oldtup,
-							 RelationGetDescr(pg_stextdata),
-							 values,
-							 nulls,
-							 replaces);
-	ReleaseSysCache(oldtup);
-	CatalogTupleUpdate(pg_stextdata, &stup->t_self, stup);
-#endif
 
 	heap_freetuple(stup);
 
@@ -1095,7 +930,7 @@ compare_datums_simple(Datum a, Datum b, SortSupport ssup)
  * build_attnums_array
  *		Transforms a bitmap into an array of AttrNumber values.
  *
- * This is used for extended statistics only, so all the attribute must be
+ * This is used for extended statistics only, so all the attributes must be
  * user-defined. That means offsetting by FirstLowInvalidHeapAttributeNumber
  * is not necessary here (and when querying the bitmap).
  */
@@ -1266,18 +1101,8 @@ build_sorted_items(StatsBuildData *data, int *nitems,
 	}
 
 	/* do the sort, using the multi-sort */
-#if PG_VERSION_NUM >= 150000
-#if PG_VERSION_NUM >= 160000
 	qsort_interruptible(items, nrows, sizeof(SortItem),
 						multi_sort_compare, mss);
-#else
-	qsort_interruptible((void *) items, nrows, sizeof(SortItem),
-						multi_sort_compare, mss);
-#endif
-#else
-	qsort_arg((void *) items, nrows, sizeof(SortItem),
-			  multi_sort_compare, mss);
-#endif
 
 	return items;
 }
@@ -1378,15 +1203,9 @@ stat_covers_expressions(StatisticExtInfo *stat, List *exprs,
  * further tiebreakers are needed.
  */
 StatisticExtInfo *
-#if PG_VERSION_NUM >= 150000
 choose_best_statistics(List *stats, char requiredkind, bool inh,
 					   Bitmapset **clause_attnums, List **clause_exprs,
 					   int nclauses)
-#else
-choose_best_statistics(List *stats, char requiredkind,
-					   Bitmapset **clause_attnums, List **clause_exprs,
-					   int nclauses)
-#endif
 {
 	ListCell   *lc;
 	StatisticExtInfo *best_match = NULL;
@@ -1406,11 +1225,9 @@ choose_best_statistics(List *stats, char requiredkind,
 		if (info->kind != requiredkind)
 			continue;
 
-#if PG_VERSION_NUM >= 150000
 		/* skip statistics with mismatching inheritance flag */
 		if (info->inherit != inh)
 			continue;
-#endif
 
 		/*
 		 * Collect attributes and expressions in remaining (unestimated)
@@ -1467,7 +1284,6 @@ choose_best_statistics(List *stats, char requiredkind,
 	return best_match;
 }
 
-#if PG_VERSION_NUM >= 150000
 /*
  * statext_is_compatible_clause_internal
  *		Determines if the clause is compatible with MCV lists.
@@ -1501,25 +1317,17 @@ choose_best_statistics(List *stats, char requiredkind,
  *		so we can't cope with system columns.
  * *exprs: input/output parameter collecting primitive subclauses within
  *		the clause tree
+ * *leakproof: input/output parameter recording the leakproofness of the
+ *		clause tree.  This should be true initially, and will be set to false
+ *		if any operator function used in an OpExpr is not leakproof.
  *
  * Returns false if there is something we definitively can't handle.
  * On true return, we can proceed to match the *exprs against statistics.
  */
-#else
-/*
- * statext_is_compatible_clause_internal
- *		Determines if the clause is compatible with MCV lists.
- *
- * Does the heavy lifting of actually inspecting the clauses for
- * statext_is_compatible_clause. It needs to be split like this because
- * of recursion.  The attnums bitmap is an input/output parameter collecting
- * attribute numbers from all compatible clauses (recursively).
- */
-#endif
 static bool
 statext_is_compatible_clause_internal(PlannerInfo *root, Node *clause,
 									  Index relid, Bitmapset **attnums,
-									  List **exprs)
+									  List **exprs, bool *leakproof)
 {
 	/* Look inside any binary-compatible relabeling (as in examine_variable) */
 	if (IsA(clause, RelabelType))
@@ -1538,15 +1346,10 @@ statext_is_compatible_clause_internal(PlannerInfo *root, Node *clause,
 		if (var->varlevelsup > 0)
 			return false;
 
-#if PG_VERSION_NUM >= 150000
-
 		/*
 		 * Also reject system attributes and whole-row Vars (we don't allow
 		 * stats on those).
 		 */
-#else
-		/* Also skip system attributes (we don't allow stats on those). */
-#endif
 		if (!AttrNumberIsForUserDefinedAttr(var->varattno))
 			return false;
 
@@ -1559,7 +1362,6 @@ statext_is_compatible_clause_internal(PlannerInfo *root, Node *clause,
 	/* (Var/Expr op Const) or (Const op Var/Expr) */
 	if (is_opclause(clause))
 	{
-		RangeTblEntry *rte = root->simple_rte_array[relid];
 		OpExpr	   *expr = (OpExpr *) clause;
 		Node	   *clause_expr;
 
@@ -1594,24 +1396,15 @@ statext_is_compatible_clause_internal(PlannerInfo *root, Node *clause,
 				return false;
 		}
 
-		/*
-		 * If there are any securityQuals on the RTE from security barrier
-		 * views or RLS policies, then the user may not have access to all the
-		 * table's data, and we must check that the operator is leak-proof.
-		 *
-		 * If the operator is leaky, then we must ignore this clause for the
-		 * purposes of estimating with MCV lists, otherwise the operator might
-		 * reveal values from the MCV list that the user doesn't have
-		 * permission to see.
-		 */
-		if (rte->securityQuals != NIL &&
-			!get_func_leakproof(get_opcode(expr->opno)))
-			return false;
+		/* Check if the operator is leakproof */
+		if (*leakproof)
+			*leakproof = get_func_leakproof(get_opcode(expr->opno));
 
 		/* Check (Var op Const) or (Const op Var) clauses by recursing. */
 		if (IsA(clause_expr, Var))
 			return statext_is_compatible_clause_internal(root, clause_expr,
-														 relid, attnums, exprs);
+														 relid, attnums,
+														 exprs, leakproof);
 
 		/* Otherwise we have (Expr op Const) or (Const op Expr). */
 		*exprs = lappend(*exprs, clause_expr);
@@ -1621,29 +1414,21 @@ statext_is_compatible_clause_internal(PlannerInfo *root, Node *clause,
 	/* Var/Expr IN Array */
 	if (IsA(clause, ScalarArrayOpExpr))
 	{
-		RangeTblEntry *rte = root->simple_rte_array[relid];
 		ScalarArrayOpExpr *expr = (ScalarArrayOpExpr *) clause;
 		Node	   *clause_expr;
-#if PG_VERSION_NUM >= 150000
 		bool		expronleft;
-#endif
 
 		/* Only expressions with two arguments are considered compatible. */
 		if (list_length(expr->args) != 2)
 			return false;
 
 		/* Check if the expression has the right shape (one Var, one Const) */
-#if PG_VERSION_NUM >= 150000
 		if (!examine_opclause_args(expr->args, &clause_expr, NULL, &expronleft))
 			return false;
 
 		/* We only support Var on left, Const on right */
 		if (!expronleft)
 			return false;
-#else
-		if (!examine_opclause_args(expr->args, &clause_expr, NULL, NULL))
-			return false;
-#endif
 
 		/*
 		 * If it's not one of the supported operators ("=", "<", ">", etc.),
@@ -1668,24 +1453,15 @@ statext_is_compatible_clause_internal(PlannerInfo *root, Node *clause,
 				return false;
 		}
 
-		/*
-		 * If there are any securityQuals on the RTE from security barrier
-		 * views or RLS policies, then the user may not have access to all the
-		 * table's data, and we must check that the operator is leak-proof.
-		 *
-		 * If the operator is leaky, then we must ignore this clause for the
-		 * purposes of estimating with MCV lists, otherwise the operator might
-		 * reveal values from the MCV list that the user doesn't have
-		 * permission to see.
-		 */
-		if (rte->securityQuals != NIL &&
-			!get_func_leakproof(get_opcode(expr->opno)))
-			return false;
+		/* Check if the operator is leakproof */
+		if (*leakproof)
+			*leakproof = get_func_leakproof(get_opcode(expr->opno));
 
 		/* Check Var IN Array clauses by recursing. */
 		if (IsA(clause_expr, Var))
 			return statext_is_compatible_clause_internal(root, clause_expr,
-														 relid, attnums, exprs);
+														 relid, attnums,
+														 exprs, leakproof);
 
 		/* Otherwise we have Expr IN Array. */
 		*exprs = lappend(*exprs, clause_expr);
@@ -1717,12 +1493,13 @@ statext_is_compatible_clause_internal(PlannerInfo *root, Node *clause,
 		foreach(lc, expr->args)
 		{
 			/*
-			 * Had we found incompatible clause in the arguments, treat the
+			 * If we find an incompatible clause in the arguments, treat the
 			 * whole clause as incompatible.
 			 */
 			if (!statext_is_compatible_clause_internal(root,
 													   (Node *) lfirst(lc),
-													   relid, attnums, exprs))
+													   relid, attnums, exprs,
+													   leakproof))
 				return false;
 		}
 
@@ -1736,8 +1513,10 @@ statext_is_compatible_clause_internal(PlannerInfo *root, Node *clause,
 
 		/* Check Var IS NULL clauses by recursing. */
 		if (IsA(nt->arg, Var))
-			return statext_is_compatible_clause_internal(root, (Node *) (nt->arg),
-														 relid, attnums, exprs);
+			return statext_is_compatible_clause_internal(root,
+														 (Node *) (nt->arg),
+														 relid, attnums,
+														 exprs, leakproof);
 
 		/* Otherwise we have Expr IS NULL. */
 		*exprs = lappend(*exprs, nt->arg);
@@ -1756,36 +1535,29 @@ statext_is_compatible_clause_internal(PlannerInfo *root, Node *clause,
  * statext_is_compatible_clause
  *		Determines if the clause is compatible with MCV lists.
  *
- * Currently, we only support the following types of clauses:
+ * See statext_is_compatible_clause_internal, above, for the basic rules.
+ * This layer deals with RestrictInfo superstructure and applies permissions
+ * checks to verify that it's okay to examine all mentioned Vars.
  *
- * (a) OpExprs of the form (Var/Expr op Const), or (Const op Var/Expr), where
- * the op is one of ("=", "<", ">", ">=", "<=")
+ * Arguments:
+ * clause: clause to be inspected (in RestrictInfo form)
+ * relid: rel that all Vars in clause must belong to
+ * *attnums: input/output parameter collecting attribute numbers of all
+ *		mentioned Vars.  Note that we do not offset the attribute numbers,
+ *		so we can't cope with system columns.
+ * *exprs: input/output parameter collecting primitive subclauses within
+ *		the clause tree
  *
- * (b) (Var/Expr IS [NOT] NULL)
- *
- * (c) combinations using AND/OR/NOT
- *
- * (d) ScalarArrayOpExprs of the form (Var/Expr op ANY (array)) or (Var/Expr
- * op ALL (array))
- *
- * In the future, the range of supported clauses may be expanded to more
- * complex cases, for example (Var op Var).
+ * Returns false if there is something we definitively can't handle.
+ * On true return, we can proceed to match the *exprs against statistics.
  */
 static bool
 statext_is_compatible_clause(PlannerInfo *root, Node *clause, Index relid,
 							 Bitmapset **attnums, List **exprs)
 {
-	RangeTblEntry *rte = root->simple_rte_array[relid];
-#if PG_VERSION_NUM >= 160000
-	RelOptInfo *rel = root->simple_rel_array[relid];
-#endif
-#if PG_VERSION_NUM >= 150000
 	RestrictInfo *rinfo;
-#else
-	RestrictInfo *rinfo = (RestrictInfo *) clause;
-#endif
 	int			clause_relid;
-	Oid			userid;
+	bool		leakproof;
 
 	/*
 	 * Special-case handling for bare BoolExpr AND clauses, because the
@@ -1812,14 +1584,9 @@ statext_is_compatible_clause(PlannerInfo *root, Node *clause, Index relid,
 	}
 
 	/* Otherwise it must be a RestrictInfo. */
-#if PG_VERSION_NUM >= 150000
 	if (!IsA(clause, RestrictInfo))
 		return false;
 	rinfo = (RestrictInfo *) clause;
-#else
-	if (!IsA(rinfo, RestrictInfo))
-		return false;
-#endif
 
 	/* Pseudoconstants are not really interesting here. */
 	if (rinfo->pseudoconstant)
@@ -1830,25 +1597,33 @@ statext_is_compatible_clause(PlannerInfo *root, Node *clause, Index relid,
 		clause_relid != relid)
 		return false;
 
-	/* Check the clause and determine what attributes it references. */
+	/*
+	 * Check the clause, determine what attributes it references, and whether
+	 * it includes any non-leakproof operators.
+	 */
+	leakproof = true;
 	if (!statext_is_compatible_clause_internal(root, (Node *) rinfo->clause,
-											   relid, attnums, exprs))
+											   relid, attnums, exprs,
+											   &leakproof))
 		return false;
 
 	/*
-	 * Check that the user has permission to read all required attributes.
+	 * If the clause includes any non-leakproof operators, check that the user
+	 * has permission to read all required attributes, otherwise the operators
+	 * might reveal values from the MCV list that the user doesn't have
+	 * permission to see.  We require all rows to be selectable --- there must
+	 * be no securityQuals from security barrier views or RLS policies.  See
+	 * similar code in examine_variable(), examine_simple_variable(), and
+	 * statistic_proc_security_check().
+	 *
+	 * Note that for an inheritance child, the permission checks are performed
+	 * on the inheritance root parent, and whole-table select privilege on the
+	 * parent doesn't guarantee that the user could read all columns of the
+	 * child. Therefore we must check all referenced columns.
 	 */
-#if PG_VERSION_NUM >= 160000
-	userid = OidIsValid(rel->userid) ? rel->userid : GetUserId();
-#else
-	userid = rte->checkAsUser ? rte->checkAsUser : GetUserId();
-#endif
-
-	/* Table-level SELECT privilege is sufficient for all columns */
-	if (pg_class_aclcheck(rte->relid, userid, ACL_SELECT) != ACLCHECK_OK)
+	if (!leakproof)
 	{
 		Bitmapset  *clause_attnums = NULL;
-#if PG_VERSION_NUM >= 150000
 		int			attnum = -1;
 
 		/*
@@ -1871,56 +1646,9 @@ statext_is_compatible_clause(PlannerInfo *root, Node *clause, Index relid,
 		if (*exprs != NIL)
 			pull_varattnos((Node *) *exprs, relid, &clause_attnums);
 
-		attnum = -1;
-		while ((attnum = bms_next_member(clause_attnums, attnum)) >= 0)
-		{
-			/* Undo the offset */
-			AttrNumber	attno = attnum + FirstLowInvalidHeapAttributeNumber;
-
-			if (attno == InvalidAttrNumber)
-			{
-				/* Whole-row reference, so must have access to all columns */
-				if (pg_attribute_aclcheck_all(rte->relid, userid, ACL_SELECT,
-											  ACLMASK_ALL) != ACLCHECK_OK)
-					return false;
-			}
-			else
-			{
-				if (pg_attribute_aclcheck(rte->relid, attno, userid,
-										  ACL_SELECT) != ACLCHECK_OK)
-					return false;
-			}
-		}
-#else
-		/* Don't have table privilege, must check individual columns */
-		if (*exprs != NIL)
-		{
-			pull_varattnos((Node *) exprs, relid, &clause_attnums);
-			clause_attnums = bms_add_members(clause_attnums, *attnums);
-		}
-		else
-			clause_attnums = *attnums;
-
-		if (bms_is_member(InvalidAttrNumber, clause_attnums))
-		{
-			/* Have a whole-row reference, must have access to all columns */
-			if (pg_attribute_aclcheck_all(rte->relid, userid, ACL_SELECT,
-										  ACLMASK_ALL) != ACLCHECK_OK)
-				return false;
-		}
-		else
-		{
-			/* Check the columns referenced by the clause */
-			int			attnum = -1;
-
-			while ((attnum = bms_next_member(clause_attnums, attnum)) >= 0)
-			{
-				if (pg_attribute_aclcheck(rte->relid, attnum, userid,
-										  ACL_SELECT) != ACLCHECK_OK)
-					return false;
-			}
-		}
-#endif
+		/* Must have permission to read all rows from these columns */
+		if (!all_rows_selectable(root, relid, clause_attnums))
+			return false;
 	}
 
 	/* If we reach here, the clause is OK */
@@ -1972,9 +1700,7 @@ statext_mcv_clauselist_selectivity(PlannerInfo *root, List *clauses, int varReli
 	List	  **list_exprs;		/* expressions matched to any statistic */
 	int			listidx;
 	Selectivity sel = (is_or) ? 0.0 : 1.0;
-#if PG_VERSION_NUM >= 150000
 	RangeTblEntry *rte = planner_rt_fetch(rel->relid, root);
-#endif
 
 	/* check if there's any stats that might be useful for us. */
 	if (!has_stats_of_kind(rel->statlist, STATS_EXT_MCV))
@@ -2027,15 +1753,9 @@ statext_mcv_clauselist_selectivity(PlannerInfo *root, List *clauses, int varReli
 		Bitmapset  *simple_clauses;
 
 		/* find the best suited statistics object for these attnums */
-#if PG_VERSION_NUM >= 150000
 		stat = choose_best_statistics(rel->statlist, STATS_EXT_MCV, rte->inh,
 									  list_attnums, list_exprs,
 									  list_length(clauses));
-#else
-		stat = choose_best_statistics(rel->statlist, STATS_EXT_MCV,
-									  list_attnums, list_exprs,
-									  list_length(clauses));
-#endif
 
 		/*
 		 * if no (additional) matching stats could be found then we've nothing
@@ -2076,8 +1796,8 @@ statext_mcv_clauselist_selectivity(PlannerInfo *root, List *clauses, int varReli
 
 			/*
 			 * The clause was not estimated yet, and we've extracted either
-			 * attnums of expressions from it. Ignore it if it's not fully
-			 * covered by the chosen statistics.
+			 * attnums or expressions from it. Ignore it if it's not fully
+			 * covered by the chosen statistics object.
 			 *
 			 * We need to check both attributes and expressions, and reject if
 			 * either is not covered.
@@ -2122,11 +1842,7 @@ statext_mcv_clauselist_selectivity(PlannerInfo *root, List *clauses, int varReli
 			MCVList    *mcv_list;
 
 			/* Load the MCV list stored in the statistics object */
-#if PG_VERSION_NUM >= 150000
 			mcv_list = statext_mcv_load(stat->statOid, rte->inh);
-#else
-			mcv_list = statext_mcv_load(stat->statOid);
-#endif
 
 			/*
 			 * Compute the selectivity of the ORed list of clauses covered by
@@ -2368,8 +2084,7 @@ examine_opclause_args(List *args, Node **exprp, Const **cstp,
  * Compute statistics about expressions of a relation.
  */
 static void
-compute_expr_stats(Relation onerel, double totalrows,
-				   AnlExprData *exprdata, int nexprs,
+compute_expr_stats(Relation onerel, AnlExprData *exprdata, int nexprs,
 				   HeapTuple *rows, int numrows)
 {
 	MemoryContext expr_context,
@@ -2474,12 +2189,7 @@ compute_expr_stats(Relation onerel, double totalrows,
 		if (tcnt > 0)
 		{
 			AttributeOpts *aopt =
-#if PG_VERSION_NUM >= 170000
 				get_attribute_options(onerel->rd_id, stats->tupattnum);
-#else
-				get_attribute_options(stats->attr->attrelid,
-									  stats->attr->attnum);
-#endif
 
 			stats->exprvals = exprvals;
 			stats->exprnulls = exprnulls;
@@ -2502,11 +2212,7 @@ compute_expr_stats(Relation onerel, double totalrows,
 
 		ExecDropSingleTupleTableSlot(slot);
 		FreeExecutorState(estate);
-#if PG_VERSION_NUM >= 170000
 		MemoryContextReset(expr_context);
-#else
-		MemoryContextResetAndDeleteChildren(expr_context);
-#endif
 	}
 
 	MemoryContextSwitchTo(old_context);
@@ -2642,14 +2348,7 @@ serialize_expr_stats(AnlExprData *exprdata, int nexprs)
 
 				for (n = 0; n < nnum; n++)
 					numdatums[n] = Float4GetDatum(stats->stanumbers[k][n]);
-#if PG_VERSION_NUM >= 160000
 				arry = construct_array_builtin(numdatums, nnum, FLOAT4OID);
-#else
-				/* XXX knows more than it should about type float4: */
-				arry = construct_array(numdatums, nnum,
-									   FLOAT4OID,
-									   sizeof(float4), true, TYPALIGN_INT);
-#endif
 				values[i++] = PointerGetDatum(arry);	/* stanumbersN */
 			}
 			else
@@ -2699,11 +2398,7 @@ serialize_expr_stats(AnlExprData *exprdata, int nexprs)
  * identified by the supplied index.
  */
 HeapTuple
-#if PG_VERSION_NUM >= 150000
 statext_expressions_load(Oid stxoid, bool inh, int idx)
-#else
-statext_expressions_load(Oid stxoid, int idx)
-#endif
 {
 	bool		isnull;
 	Datum		value;
@@ -2713,12 +2408,8 @@ statext_expressions_load(Oid stxoid, int idx)
 	HeapTupleData tmptup;
 	HeapTuple	tup;
 
-#if PG_VERSION_NUM >= 150000
 	htup = SearchSysCache2(STATEXTDATASTXOID,
 						   ObjectIdGetDatum(stxoid), BoolGetDatum(inh));
-#else
-	htup = SearchSysCache1(STATEXTDATASTXOID, ObjectIdGetDatum(stxoid));
-#endif
 	if (!HeapTupleIsValid(htup))
 		elog(ERROR, "cache lookup failed for statistics object %u", stxoid);
 
@@ -2727,7 +2418,7 @@ statext_expressions_load(Oid stxoid, int idx)
 	if (isnull)
 		elog(ERROR,
 			 "requested statistics kind \"%c\" is not yet built for statistics object %u",
-			 STATS_EXT_DEPENDENCIES, stxoid);
+			 STATS_EXT_EXPRESSIONS, stxoid);
 
 	eah = DatumGetExpandedArray(value);
 

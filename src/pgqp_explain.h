@@ -9,10 +9,11 @@
 #define PGQP_EXPLAIN_H
 
 #include "commands/explain.h"
+#include "commands/explain_state.h"
 #include "common.h"
 
-extern void pgqpExplainPrintQueryState(ExplainState *es, QueryDesc *queryDesc);
-extern void pgqpExplainBeginOutput(ExplainState *es);
-extern void pgqpExplainEndOutput(ExplainState *es);
+void pgqpExplainPrintQueryState(ExplainState *es, QueryDesc *queryDesc);
+void pgqpExplainBeginOutput(ExplainState *es);
+void pgqpExplainEndOutput(ExplainState *es);
 
 #endif							/* PGQP_EXPLAIN_H */

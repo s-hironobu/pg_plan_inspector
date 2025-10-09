@@ -10,6 +10,10 @@
 
 #include "common.h"
 
+extern char	   *pgqp_json_plan;		/* This is read by
+								 * input_params()@planid_scanner.l. */
+
+
 extern void set_query(struct queryPlanData *qpd, const int nested_level,
 					  const uint64 queryId, const bool nested);
 extern void set_plan(struct queryPlanData *qpd, const int nested_level,

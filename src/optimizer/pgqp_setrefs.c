@@ -24,49 +24,32 @@
 #include "optimizer/pathnode.h"
 #include "optimizer/planmain.h"
 #include "optimizer/planner.h"
-#if PG_VERSION_NUM >= 160000
 #include "optimizer/subselect.h"
-#endif
 #include "optimizer/tlist.h"
-#if PG_VERSION_NUM >= 160000
 #include "parser/parse_relation.h"
-#endif
+#include "rewrite/rewriteManip.h"
 #include "tcop/utility.h"
-#if PG_VERSION_NUM < 170000
-#include "utils/lsyscache.h"
-#endif
 #include "utils/syscache.h"
 #ifdef __PG_QUERY_PLAN__
 #include "pgqp_setrefs.h"
 #include "pgqp_planner.h"
 #endif
 
-#if PG_VERSION_NUM >= 160000
+
 typedef enum
 {
 	NRM_EQUAL,					/* expect exact match of nullingrels */
 	NRM_SUBSET,					/* actual Var may have a subset of input */
-	NRM_SUPERSET				/* actual Var may have a superset of input */
+	NRM_SUPERSET,				/* actual Var may have a superset of input */
 } NullingRelsMatch;
-#endif
 
 typedef struct
 {
-#if PG_VERSION_NUM >= 160000
 	int			varno;			/* RT index of Var */
-#else
-	Index		varno;			/* RT index of Var */
-#endif
 	AttrNumber	varattno;		/* attr number of Var */
 	AttrNumber	resno;			/* TLE position of Var */
-#if PG_VERSION_NUM >= 160000
 	Bitmapset  *varnullingrels; /* Var's varnullingrels */
-#endif
 } tlist_vinfo;
-
-#if PG_VERSION_NUM >= 160000
-
-#endif
 
 typedef struct
 {
@@ -91,9 +74,7 @@ typedef struct
 	indexed_tlist *inner_itlist;
 	Index		acceptable_rel;
 	int			rtoffset;
-#if PG_VERSION_NUM >= 160000
 	NullingRelsMatch nrm_match;
-#endif
 	double		num_exec;
 } fix_join_expr_context;
 
@@ -103,9 +84,7 @@ typedef struct
 	indexed_tlist *subplan_itlist;
 	int			newvarno;
 	int			rtoffset;
-#if PG_VERSION_NUM >= 160000
 	NullingRelsMatch nrm_match;
-#endif
 	double		num_exec;
 } fix_upper_expr_context;
 
@@ -116,14 +95,12 @@ typedef struct
 	int			newvarno;
 } fix_windowagg_cond_context;
 
-#if PG_VERSION_NUM >= 160000
 /* Context info for flatten_rtes_walker() */
 typedef struct
 {
 	PlannerGlobal *glob;
 	Query	   *query;
 } flatten_rtes_walker_context;
-#endif
 
 /*
  * Selecting the best alternative in an AlternativeSubPlan expression requires
@@ -160,14 +137,9 @@ typedef struct
 
 static void add_rtes_to_flat_rtable(PlannerInfo *root, bool recursing);
 static void flatten_unplanned_rtes(PlannerGlobal *glob, RangeTblEntry *rte);
-#if PG_VERSION_NUM >= 160000
 static bool flatten_rtes_walker(Node *node, flatten_rtes_walker_context *cxt);
 static void add_rte_to_flat_rtable(PlannerGlobal *glob, List *rteperminfos,
 								   RangeTblEntry *rte);
-#else
-static bool flatten_rtes_walker(Node *node, PlannerGlobal *glob);
-static void add_rte_to_flat_rtable(PlannerGlobal *glob, RangeTblEntry *rte);
-#endif
 static Plan *set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset);
 static Plan *set_indexonlyscan_references(PlannerInfo *root,
 										  IndexOnlyScan *plan,
@@ -203,18 +175,12 @@ static indexed_tlist *build_tlist_index(List *tlist);
 static Var *search_indexed_tlist_for_var(Var *var,
 										 indexed_tlist *itlist,
 										 int newvarno,
-#if PG_VERSION_NUM >= 160000
 										 int rtoffset,
 										 NullingRelsMatch nrm_match);
-#else
-										 int rtoffset);
-#endif
-#if PG_VERSION_NUM >= 160000
 static Var *search_indexed_tlist_for_phv(PlaceHolderVar *phv,
 										 indexed_tlist *itlist,
 										 int newvarno,
 										 NullingRelsMatch nrm_match);
-#endif
 static Var *search_indexed_tlist_for_non_var(Expr *node,
 											 indexed_tlist *itlist,
 											 int newvarno);
@@ -227,26 +193,18 @@ static List *fix_join_expr(PlannerInfo *root,
 						   indexed_tlist *outer_itlist,
 						   indexed_tlist *inner_itlist,
 						   Index acceptable_rel,
-#if PG_VERSION_NUM >= 160000
 						   int rtoffset,
 						   NullingRelsMatch nrm_match,
 						   double num_exec);
-#else
-						   int rtoffset, double num_exec);
-#endif
 static Node *fix_join_expr_mutator(Node *node,
 								   fix_join_expr_context *context);
 static Node *fix_upper_expr(PlannerInfo *root,
 							Node *node,
 							indexed_tlist *subplan_itlist,
 							int newvarno,
-#if PG_VERSION_NUM >= 160000
 							int rtoffset,
 							NullingRelsMatch nrm_match,
 							double num_exec);
-#else
-							int rtoffset, double num_exec);
-#endif
 static Node *fix_upper_expr_mutator(Node *node,
 									fix_upper_expr_context *context);
 static List *set_returning_clause_references(PlannerInfo *root,
@@ -257,6 +215,7 @@ static List *set_returning_clause_references(PlannerInfo *root,
 static List *set_windowagg_runcondition_references(PlannerInfo *root,
 												   List *runcondition,
 												   Plan *plan);
+
 
 /*****************************************************************************
  *
@@ -356,6 +315,10 @@ set_plan_references(PlannerInfo *root, Plan *plan)
 	{
 		PlanRowMark *rc = lfirst_node(PlanRowMark, lc);
 		PlanRowMark *newrc;
+
+		/* sanity check on existing row marks */
+		Assert(root->simple_rel_array[rc->rti] != NULL &&
+			   root->simple_rte_array[rc->rti] != NULL);
 
 		/* flat copy is enough since all fields are scalars */
 		newrc = (PlanRowMark *) palloc(sizeof(PlanRowMark));
@@ -457,14 +420,9 @@ add_rtes_to_flat_rtable(PlannerInfo *root, bool recursing)
 	{
 		RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc);
 
-#if PG_VERSION_NUM >= 160000
 		if (!recursing || rte->rtekind == RTE_RELATION ||
 			(rte->rtekind == RTE_SUBQUERY && OidIsValid(rte->relid)))
 			add_rte_to_flat_rtable(glob, root->parse->rteperminfos, rte);
-#else
-		if (!recursing || rte->rtekind == RTE_RELATION)
-			add_rte_to_flat_rtable(glob, rte);
-#endif
 	}
 
 	/*
@@ -531,30 +489,21 @@ add_rtes_to_flat_rtable(PlannerInfo *root, bool recursing)
 /*
  * Extract RangeTblEntries from a subquery that was never planned at all
  */
+
 static void
 flatten_unplanned_rtes(PlannerGlobal *glob, RangeTblEntry *rte)
 {
-#if PG_VERSION_NUM >= 160000
 	flatten_rtes_walker_context cxt = {glob, rte->subquery};
-#endif
 
 	/* Use query_tree_walker to find all RTEs in the parse tree */
 	(void) query_tree_walker(rte->subquery,
 							 flatten_rtes_walker,
-#if PG_VERSION_NUM >= 160000
-							 (void *) &cxt,
-#else
-							 (void *) glob,
-#endif
+							 &cxt,
 							 QTW_EXAMINE_RTES_BEFORE);
 }
 
 static bool
-#if PG_VERSION_NUM >= 160000
 flatten_rtes_walker(Node *node, flatten_rtes_walker_context *cxt)
-#else
-flatten_rtes_walker(Node *node, PlannerGlobal *glob)
-#endif
 {
 	if (node == NULL)
 		return false;
@@ -562,19 +511,12 @@ flatten_rtes_walker(Node *node, PlannerGlobal *glob)
 	{
 		RangeTblEntry *rte = (RangeTblEntry *) node;
 
-#if PG_VERSION_NUM >= 160000
 		/* As above, we need only save relation RTEs and former relations */
 		if (rte->rtekind == RTE_RELATION ||
 			(rte->rtekind == RTE_SUBQUERY && OidIsValid(rte->relid)))
 			add_rte_to_flat_rtable(cxt->glob, cxt->query->rteperminfos, rte);
-#else
-		/* As above, we need only save relation RTEs */
-		if (rte->rtekind == RTE_RELATION)
-			add_rte_to_flat_rtable(glob, rte);
-#endif
 		return false;
 	}
-#if PG_VERSION_NUM >= 160000
 	if (IsA(node, Query))
 	{
 		/*
@@ -587,25 +529,12 @@ flatten_rtes_walker(Node *node, PlannerGlobal *glob)
 		cxt->query = (Query *) node;
 		result = query_tree_walker((Query *) node,
 								   flatten_rtes_walker,
-								   (void *) cxt,
+								   cxt,
 								   QTW_EXAMINE_RTES_BEFORE);
 		cxt->query = save_query;
 		return result;
 	}
-	return expression_tree_walker(node, flatten_rtes_walker,
-								  (void *) cxt);
-#else
-	if (IsA(node, Query))
-	{
-		/* Recurse into subselects */
-		return query_tree_walker((Query *) node,
-								 flatten_rtes_walker,
-								 (void *) glob,
-								 QTW_EXAMINE_RTES_BEFORE);
-	}
-	return expression_tree_walker(node, flatten_rtes_walker,
-								  (void *) glob);
-#endif
+	return expression_tree_walker(node, flatten_rtes_walker, cxt);
 }
 
 /*
@@ -619,12 +548,8 @@ flatten_rtes_walker(Node *node, PlannerGlobal *glob)
  * executor to fetch the RTE's RTEPermissionInfo.
  */
 static void
-#if PG_VERSION_NUM >= 160000
 add_rte_to_flat_rtable(PlannerGlobal *glob, List *rteperminfos,
 					   RangeTblEntry *rte)
-#else
-add_rte_to_flat_rtable(PlannerGlobal *glob, RangeTblEntry *rte)
-#endif
 {
 	RangeTblEntry *newrte;
 
@@ -645,25 +570,16 @@ add_rte_to_flat_rtable(PlannerGlobal *glob, RangeTblEntry *rte)
 	newrte->coltypes = NIL;
 	newrte->coltypmods = NIL;
 	newrte->colcollations = NIL;
+	newrte->groupexprs = NIL;
 	newrte->securityQuals = NIL;
 
 	glob->finalrtable = lappend(glob->finalrtable, newrte);
 
-#if PG_VERSION_NUM < 160000
-	/*
-	 * Check for RT index overflow; it's very unlikely, but if it did happen,
-	 * the executor would get confused by varnos that match the special varno
-	 * values.
-	 */
-	if (IS_SPECIAL_VARNO(list_length(glob->finalrtable)))
-		ereport(ERROR,
-				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("too many range table entries")));
-#endif
-#if PG_VERSION_NUM >= 160000
 	/*
 	 * If it's a plain relation RTE (or a subquery that was once a view
-	 * reference), add the relation OID to relationOids.
+	 * reference), add the relation OID to relationOids.  Also add its new RT
+	 * index to the set of relations to be potentially accessed during
+	 * execution.
 	 *
 	 * We do this even though the RTE might be unreferenced in the plan tree;
 	 * this would correspond to cases such as views that were expanded, child
@@ -675,7 +591,11 @@ add_rte_to_flat_rtable(PlannerGlobal *glob, RangeTblEntry *rte)
 	 */
 	if (newrte->rtekind == RTE_RELATION ||
 		(newrte->rtekind == RTE_SUBQUERY && OidIsValid(newrte->relid)))
+	{
 		glob->relationOids = lappend_oid(glob->relationOids, newrte->relid);
+		glob->allRelids = bms_add_member(glob->allRelids,
+										 list_length(glob->finalrtable));
+	}
 
 	/*
 	 * Add a copy of the RTEPermissionInfo, if any, corresponding to this RTE
@@ -699,21 +619,6 @@ add_rte_to_flat_rtable(PlannerGlobal *glob, RangeTblEntry *rte)
 		newperminfo = addRTEPermissionInfo(&glob->finalrteperminfos, newrte);
 		memcpy(newperminfo, perminfo, sizeof(RTEPermissionInfo));
 	}
-#else				/* #if PG_VERSION_NUM >= 160000 */
-	/*
-	 * If it's a plain relation RTE, add the table to relationOids.
-	 *
-	 * We do this even though the RTE might be unreferenced in the plan tree;
-	 * this would correspond to cases such as views that were expanded, child
-	 * tables that were eliminated by constraint exclusion, etc. Schema
-	 * invalidation on such a rel must still force rebuilding of the plan.
-	 *
-	 * Note we don't bother to avoid making duplicate list entries.  We could,
-	 * but it would probably cost more cycles than it would save.
-	 */
-	if (newrte->rtekind == RTE_RELATION)
-		glob->relationOids = lappend_oid(glob->relationOids, newrte->relid);
-#endif				/* #if else PG_VERSION_NUM >= 160000 */
 }
 
 /*
@@ -738,7 +643,6 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 		case T_SeqScan:
 			{
 				SeqScan    *splan = (SeqScan *) plan;
-
 
 				splan->scan.scanrelid += rtoffset;
 				splan->scan.plan.targetlist =
@@ -1206,9 +1110,10 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 
 					/*
 					 * Set up the visible plan targetlist as being the same as
-					 * the first RETURNING list. This is for the use of
-					 * EXPLAIN; the executor won't pay any attention to the
-					 * targetlist.  We postpone this step until here so that
+					 * the first RETURNING list.  This is mostly for the use
+					 * of EXPLAIN; the executor won't execute that targetlist,
+					 * although it does use it to prepare the node's result
+					 * tuple slot.  We postpone this step until here so that
 					 * we don't have to do set_returning_clause_references()
 					 * twice on identical targetlists.
 					 */
@@ -1233,21 +1138,13 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 						fix_join_expr(root, splan->onConflictSet,
 									  NULL, itlist,
 									  linitial_int(splan->resultRelations),
-#if PG_VERSION_NUM >= 160000
 									  rtoffset, NRM_EQUAL, NUM_EXEC_QUAL(plan));
-#else
-									  rtoffset, NUM_EXEC_QUAL(plan));
-#endif
 
 					splan->onConflictWhere = (Node *)
 						fix_join_expr(root, (List *) splan->onConflictWhere,
 									  NULL, itlist,
 									  linitial_int(splan->resultRelations),
-#if PG_VERSION_NUM >= 160000
 									  rtoffset, NRM_EQUAL, NUM_EXEC_QUAL(plan));
-#else
-									  rtoffset, NUM_EXEC_QUAL(plan));
-#endif
 
 					pfree(itlist);
 
@@ -1267,15 +1164,10 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 				 */
 				if (splan->mergeActionLists != NIL)
 				{
-#if PG_VERSION_NUM >= 170000
 					List	   *newMJC = NIL;
 					ListCell   *lca,
 							   *lcj,
 							   *lcr;
-#else
-					ListCell   *lca,
-							   *lcr;
-#endif
 
 					/*
 					 * Fix the targetList of individual action nodes so that
@@ -1295,19 +1187,12 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 
 					itlist = build_tlist_index(subplan->targetlist);
 
-#if PG_VERSION_NUM >= 170000
 					forthree(lca, splan->mergeActionLists,
 							 lcj, splan->mergeJoinConditions,
 							 lcr, splan->resultRelations)
-#else
-					forboth(lca, splan->mergeActionLists,
-							lcr, splan->resultRelations)
-#endif
 					{
 						List	   *mergeActionList = lfirst(lca);
-#if PG_VERSION_NUM >= 170000
 						Node	   *mergeJoinCondition = lfirst(lcj);
-#endif
 						Index		resultrel = lfirst_int(lcr);
 
 						foreach(l, mergeActionList)
@@ -1320,9 +1205,7 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 															   NULL, itlist,
 															   resultrel,
 															   rtoffset,
-#if PG_VERSION_NUM >= 160000
 															   NRM_EQUAL,
-#endif
 															   NUM_EXEC_TLIST(plan));
 
 							/* Fix quals too. */
@@ -1331,13 +1214,10 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 																  NULL, itlist,
 																  resultrel,
 																  rtoffset,
-#if PG_VERSION_NUM >= 160000
 																  NRM_EQUAL,
-#endif
 																  NUM_EXEC_QUAL(plan));
 						}
 
-#if PG_VERSION_NUM >= 170000
 						/* Fix join condition too. */
 						mergeJoinCondition = (Node *)
 							fix_join_expr(root,
@@ -1348,11 +1228,8 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 										  NRM_EQUAL,
 										  NUM_EXEC_QUAL(plan));
 						newMJC = lappend(newMJC, mergeJoinCondition);
-#endif
 					}
-#if PG_VERSION_NUM >= 170000
 					splan->mergeJoinConditions = newMJC;
-#endif
 				}
 
 				splan->nominalRelation += rtoffset;
@@ -1495,9 +1372,7 @@ set_indexonlyscan_references(PlannerInfo *root,
 					   index_itlist,
 					   INDEX_VAR,
 					   rtoffset,
-#if PG_VERSION_NUM >= 160000
 					   NRM_EQUAL,
-#endif
 					   NUM_EXEC_TLIST((Plan *) plan));
 	plan->scan.plan.qual = (List *)
 		fix_upper_expr(root,
@@ -1505,9 +1380,7 @@ set_indexonlyscan_references(PlannerInfo *root,
 					   index_itlist,
 					   INDEX_VAR,
 					   rtoffset,
-#if PG_VERSION_NUM >= 160000
 					   NRM_EQUAL,
-#endif
 					   NUM_EXEC_QUAL((Plan *) plan));
 	plan->recheckqual = (List *)
 		fix_upper_expr(root,
@@ -1515,9 +1388,7 @@ set_indexonlyscan_references(PlannerInfo *root,
 					   index_itlist,
 					   INDEX_VAR,
 					   rtoffset,
-#if PG_VERSION_NUM >= 160000
 					   NRM_EQUAL,
-#endif
 					   NUM_EXEC_QUAL((Plan *) plan));
 
 	/* indexqual is already transformed to reference index columns */
@@ -1591,7 +1462,6 @@ set_subqueryscan_references(PlannerInfo *root,
 }
 
 
-#if PG_VERSION_NUM >= 160000
 /*
  * trivial_subqueryscan
  *		Detect whether a SubqueryScan can be deleted from the plan tree.
@@ -1679,7 +1549,6 @@ trivial_subqueryscan(SubqueryScan *plan)
 
 	return true;
 }
-#endif
 
 /*
  * clean_up_removed_plan_level
@@ -1691,7 +1560,6 @@ trivial_subqueryscan(SubqueryScan *plan)
 static Plan *
 clean_up_removed_plan_level(Plan *parent, Plan *child)
 {
-#if PG_VERSION_NUM >= 160000
 	/*
 	 * We have to be sure we don't lose any initplans, so move any that were
 	 * attached to the parent plan to the child.  If any are parallel-unsafe,
@@ -1718,11 +1586,6 @@ clean_up_removed_plan_level(Plan *parent, Plan *child)
 		child->initPlan = list_concat(parent->initPlan,
 									  child->initPlan);
 	}
-#else
-	/* We have to be sure we don't lose any initplans */
-	child->initPlan = list_concat(parent->initPlan,
-								  child->initPlan);
-#endif
 
 	/*
 	 * We also have to transfer the parent's column labeling info into the
@@ -1761,9 +1624,7 @@ set_foreignscan_references(PlannerInfo *root,
 						   itlist,
 						   INDEX_VAR,
 						   rtoffset,
-#if PG_VERSION_NUM >= 160000
 						   NRM_EQUAL,
-#endif
 						   NUM_EXEC_TLIST((Plan *) fscan));
 		fscan->scan.plan.qual = (List *)
 			fix_upper_expr(root,
@@ -1771,9 +1632,7 @@ set_foreignscan_references(PlannerInfo *root,
 						   itlist,
 						   INDEX_VAR,
 						   rtoffset,
-#if PG_VERSION_NUM >= 160000
 						   NRM_EQUAL,
-#endif
 						   NUM_EXEC_QUAL((Plan *) fscan));
 		fscan->fdw_exprs = (List *)
 			fix_upper_expr(root,
@@ -1781,9 +1640,7 @@ set_foreignscan_references(PlannerInfo *root,
 						   itlist,
 						   INDEX_VAR,
 						   rtoffset,
-#if PG_VERSION_NUM >= 160000
 						   NRM_EQUAL,
-#endif
 						   NUM_EXEC_QUAL((Plan *) fscan));
 		fscan->fdw_recheck_quals = (List *)
 			fix_upper_expr(root,
@@ -1791,9 +1648,7 @@ set_foreignscan_references(PlannerInfo *root,
 						   itlist,
 						   INDEX_VAR,
 						   rtoffset,
-#if PG_VERSION_NUM >= 160000
 						   NRM_EQUAL,
-#endif
 						   NUM_EXEC_QUAL((Plan *) fscan));
 		pfree(itlist);
 		/* fdw_scan_tlist itself just needs fix_scan_list() adjustments */
@@ -1822,9 +1677,7 @@ set_foreignscan_references(PlannerInfo *root,
 	}
 
 	fscan->fs_relids = offset_relid_set(fscan->fs_relids, rtoffset);
-#if PG_VERSION_NUM >= 160000
 	fscan->fs_base_relids = offset_relid_set(fscan->fs_base_relids, rtoffset);
-#endif
 
 	/* Adjust resultRelation if it's valid */
 	if (fscan->resultRelation > 0)
@@ -1857,9 +1710,7 @@ set_customscan_references(PlannerInfo *root,
 						   itlist,
 						   INDEX_VAR,
 						   rtoffset,
-#if PG_VERSION_NUM >= 160000
 						   NRM_EQUAL,
-#endif
 						   NUM_EXEC_TLIST((Plan *) cscan));
 		cscan->scan.plan.qual = (List *)
 			fix_upper_expr(root,
@@ -1867,9 +1718,7 @@ set_customscan_references(PlannerInfo *root,
 						   itlist,
 						   INDEX_VAR,
 						   rtoffset,
-#if PG_VERSION_NUM >= 160000
 						   NRM_EQUAL,
-#endif
 						   NUM_EXEC_QUAL((Plan *) cscan));
 		cscan->custom_exprs = (List *)
 			fix_upper_expr(root,
@@ -1877,9 +1726,7 @@ set_customscan_references(PlannerInfo *root,
 						   itlist,
 						   INDEX_VAR,
 						   rtoffset,
-#if PG_VERSION_NUM >= 160000
 						   NRM_EQUAL,
-#endif
 						   NUM_EXEC_QUAL((Plan *) cscan));
 		pfree(itlist);
 		/* custom_scan_tlist itself just needs fix_scan_list() adjustments */
@@ -1908,6 +1755,74 @@ set_customscan_references(PlannerInfo *root,
 	}
 
 	cscan->custom_relids = offset_relid_set(cscan->custom_relids, rtoffset);
+}
+
+/*
+ * register_partpruneinfo
+ *		Subroutine for set_append_references and set_mergeappend_references
+ *
+ * Add the PartitionPruneInfo from root->partPruneInfos at the given index
+ * into PlannerGlobal->partPruneInfos and return its index there.
+ *
+ * Also update the RT indexes present in PartitionedRelPruneInfos to add the
+ * offset.
+ *
+ * Finally, if there are initial pruning steps, add the RT indexes of the
+ * leaf partitions to the set of relations that are prunable at execution
+ * startup time.
+ */
+static int
+register_partpruneinfo(PlannerInfo *root, int part_prune_index, int rtoffset)
+{
+	PlannerGlobal *glob = root->glob;
+	PartitionPruneInfo *pinfo;
+	ListCell   *l;
+
+	Assert(part_prune_index >= 0 &&
+		   part_prune_index < list_length(root->partPruneInfos));
+	pinfo = list_nth_node(PartitionPruneInfo, root->partPruneInfos,
+						  part_prune_index);
+
+	pinfo->relids = offset_relid_set(pinfo->relids, rtoffset);
+	foreach(l, pinfo->prune_infos)
+	{
+		List	   *prune_infos = lfirst(l);
+		ListCell   *l2;
+
+		foreach(l2, prune_infos)
+		{
+			PartitionedRelPruneInfo *prelinfo = lfirst(l2);
+			int			i;
+
+			prelinfo->rtindex += rtoffset;
+			prelinfo->initial_pruning_steps =
+				fix_scan_list(root, prelinfo->initial_pruning_steps,
+							  rtoffset, 1);
+			prelinfo->exec_pruning_steps =
+				fix_scan_list(root, prelinfo->exec_pruning_steps,
+							  rtoffset, 1);
+
+			for (i = 0; i < prelinfo->nparts; i++)
+			{
+				/*
+				 * Non-leaf partitions and partitions that do not have a
+				 * subplan are not included in this map as mentioned in
+				 * make_partitionedrel_pruneinfo().
+				 */
+				if (prelinfo->leafpart_rti_map[i])
+				{
+					prelinfo->leafpart_rti_map[i] += rtoffset;
+					if (prelinfo->initial_pruning_steps)
+						glob->prunableRelids = bms_add_member(glob->prunableRelids,
+															  prelinfo->leafpart_rti_map[i]);
+				}
+			}
+		}
+	}
+
+	glob->partPruneInfos = lappend(glob->partPruneInfos, pinfo);
+
+	return list_length(glob->partPruneInfos) - 1;
 }
 
 /*
@@ -1945,7 +1860,6 @@ set_append_references(PlannerInfo *root,
 	 * plan may execute the non-parallel aware child multiple times.  (If you
 	 * change these rules, update create_append_path to match.)
 	 */
-#if PG_VERSION_NUM >= 160000
 	if (list_length(aplan->appendplans) == 1)
 	{
 		Plan	   *p = (Plan *) linitial(aplan->appendplans);
@@ -1953,12 +1867,6 @@ set_append_references(PlannerInfo *root,
 		if (p->parallel_aware == aplan->plan.parallel_aware)
 			return clean_up_removed_plan_level((Plan *) aplan, p);
 	}
-#else
-	if (list_length(aplan->appendplans) == 1 &&
-		((Plan *) linitial(aplan->appendplans))->parallel_aware == aplan->plan.parallel_aware)
-		return clean_up_removed_plan_level((Plan *) aplan,
-										   (Plan *) linitial(aplan->appendplans));
-#endif				/* #if PG_VERSION_NUM >= 160000 */
 
 	/*
 	 * Otherwise, clean up the Append as needed.  It's okay to do this after
@@ -1969,21 +1877,13 @@ set_append_references(PlannerInfo *root,
 
 	aplan->apprelids = offset_relid_set(aplan->apprelids, rtoffset);
 
-	if (aplan->part_prune_info)
-	{
-		foreach(l, aplan->part_prune_info->prune_infos)
-		{
-			List	   *prune_infos = lfirst(l);
-			ListCell   *l2;
-
-			foreach(l2, prune_infos)
-			{
-				PartitionedRelPruneInfo *pinfo = lfirst(l2);
-
-				pinfo->rtindex += rtoffset;
-			}
-		}
-	}
+	/*
+	 * Add PartitionPruneInfo, if any, to PlannerGlobal and update the index.
+	 * Also update the RT indexes present in it to add the offset.
+	 */
+	if (aplan->part_prune_index >= 0)
+		aplan->part_prune_index =
+			register_partpruneinfo(root, aplan->part_prune_index, rtoffset);
 
 	/* We don't need to recurse to lefttree or righttree ... */
 	Assert(aplan->plan.lefttree == NULL);
@@ -2028,7 +1928,6 @@ set_mergeappend_references(PlannerInfo *root,
 	 * multiple times.  (If you change these rules, update
 	 * create_merge_append_path to match.)
 	 */
-#if PG_VERSION_NUM >= 160000
 	if (list_length(mplan->mergeplans) == 1)
 	{
 		Plan	   *p = (Plan *) linitial(mplan->mergeplans);
@@ -2036,12 +1935,6 @@ set_mergeappend_references(PlannerInfo *root,
 		if (p->parallel_aware == mplan->plan.parallel_aware)
 			return clean_up_removed_plan_level((Plan *) mplan, p);
 	}
-#else
-	if (list_length(mplan->mergeplans) == 1 &&
-		((Plan *) linitial(mplan->mergeplans))->parallel_aware == mplan->plan.parallel_aware)
-		return clean_up_removed_plan_level((Plan *) mplan,
-										   (Plan *) linitial(mplan->mergeplans));
-#endif				/* #if PG_VERSION_NUM >= 160000 */
 
 	/*
 	 * Otherwise, clean up the MergeAppend as needed.  It's okay to do this
@@ -2052,21 +1945,13 @@ set_mergeappend_references(PlannerInfo *root,
 
 	mplan->apprelids = offset_relid_set(mplan->apprelids, rtoffset);
 
-	if (mplan->part_prune_info)
-	{
-		foreach(l, mplan->part_prune_info->prune_infos)
-		{
-			List	   *prune_infos = lfirst(l);
-			ListCell   *l2;
-
-			foreach(l2, prune_infos)
-			{
-				PartitionedRelPruneInfo *pinfo = lfirst(l2);
-
-				pinfo->rtindex += rtoffset;
-			}
-		}
-	}
+	/*
+	 * Add PartitionPruneInfo, if any, to PlannerGlobal and update the index.
+	 * Also update the RT indexes present in it to add the offset.
+	 */
+	if (mplan->part_prune_index >= 0)
+		mplan->part_prune_index =
+			register_partpruneinfo(root, mplan->part_prune_index, rtoffset);
 
 	/* We don't need to recurse to lefttree or righttree ... */
 	Assert(mplan->plan.lefttree == NULL);
@@ -2098,9 +1983,7 @@ set_hash_references(PlannerInfo *root, Plan *plan, int rtoffset)
 					   outer_itlist,
 					   OUTER_VAR,
 					   rtoffset,
-#if PG_VERSION_NUM >= 160000
 					   NRM_EQUAL,
-#endif
 					   NUM_EXEC_QUAL(plan));
 
 	/* Hash doesn't project */
@@ -2202,16 +2085,11 @@ fix_expr_common(PlannerInfo *root, Node *node)
 		set_sa_opfuncid(saop);
 		record_plan_function_dependency(root, saop->opfuncid);
 
-#if PG_VERSION_NUM >= 160000
 		if (OidIsValid(saop->hashfuncid))
 			record_plan_function_dependency(root, saop->hashfuncid);
 
 		if (OidIsValid(saop->negfuncid))
 			record_plan_function_dependency(root, saop->negfuncid);
-#else
-		if (!OidIsValid(saop->hashfuncid))
-			record_plan_function_dependency(root, saop->hashfuncid);
-#endif
 	}
 	else if (IsA(node, Const))
 	{
@@ -2409,7 +2287,6 @@ fix_scan_expr_mutator(Node *node, fix_scan_expr_context *context)
 	if (IsA(node, Aggref))
 	{
 		Aggref	   *aggref = (Aggref *) node;
-#if PG_VERSION_NUM >= 160000
 		Param	   *aggparam;
 
 		/* See if the Aggref should be replaced by a Param */
@@ -2419,25 +2296,6 @@ fix_scan_expr_mutator(Node *node, fix_scan_expr_context *context)
 			/* Make a copy of the Param for paranoia's sake */
 			return (Node *) copyObject(aggparam);
 		}
-#else
-
-		/* See if the Aggref should be replaced by a Param */
-		if (context->root->minmax_aggs != NIL &&
-			list_length(aggref->args) == 1)
-		{
-			TargetEntry *curTarget = (TargetEntry *) linitial(aggref->args);
-			ListCell   *lc;
-
-			foreach(lc, context->root->minmax_aggs)
-			{
-				MinMaxAggInfo *mminfo = (MinMaxAggInfo *) lfirst(lc);
-
-				if (mminfo->aggfnoid == aggref->aggfnoid &&
-					equal(mminfo->target, curTarget->expr))
-					return (Node *) copyObject(mminfo->param);
-			}
-		}
-#endif
 		/* If no match, just fall through to process it normally */
 	}
 	if (IsA(node, CurrentOfExpr))
@@ -2462,8 +2320,7 @@ fix_scan_expr_mutator(Node *node, fix_scan_expr_context *context)
 															 context->num_exec),
 									 context);
 	fix_expr_common(context->root, node);
-	return expression_tree_mutator(node, fix_scan_expr_mutator,
-								   (void *) context);
+	return expression_tree_mutator(node, fix_scan_expr_mutator, context);
 }
 
 static bool
@@ -2475,8 +2332,7 @@ fix_scan_expr_walker(Node *node, fix_scan_expr_context *context)
 	Assert(!IsA(node, PlaceHolderVar));
 	Assert(!IsA(node, AlternativeSubPlan));
 	fix_expr_common(context->root, node);
-	return expression_tree_walker(node, fix_scan_expr_walker,
-								  (void *) context);
+	return expression_tree_walker(node, fix_scan_expr_walker, context);
 }
 
 /*
@@ -2511,9 +2367,7 @@ set_join_references(PlannerInfo *root, Join *join, int rtoffset)
 								   inner_itlist,
 								   (Index) 0,
 								   rtoffset,
-#if PG_VERSION_NUM >= 160000
 								   NRM_EQUAL,
-#endif
 								   NUM_EXEC_QUAL((Plan *) join));
 
 	/* Now do join-type-specific stuff */
@@ -2542,9 +2396,7 @@ set_join_references(PlannerInfo *root, Join *join, int rtoffset)
 												   outer_itlist,
 												   OUTER_VAR,
 												   rtoffset,
-#if PG_VERSION_NUM >= 160000
 												   NRM_SUBSET,
-#endif
 												   NUM_EXEC_TLIST(outer_plan));
 			/* Check we replaced any PlaceHolderVar with simple Var */
 			if (!(IsA(nlp->paramval, Var) &&
@@ -2562,9 +2414,7 @@ set_join_references(PlannerInfo *root, Join *join, int rtoffset)
 										 inner_itlist,
 										 (Index) 0,
 										 rtoffset,
-#if PG_VERSION_NUM >= 160000
 										 NRM_EQUAL,
-#endif
 										 NUM_EXEC_QUAL((Plan *) join));
 	}
 	else if (IsA(join, HashJoin))
@@ -2577,9 +2427,7 @@ set_join_references(PlannerInfo *root, Join *join, int rtoffset)
 										inner_itlist,
 										(Index) 0,
 										rtoffset,
-#if PG_VERSION_NUM >= 160000
 										NRM_EQUAL,
-#endif
 										NUM_EXEC_QUAL((Plan *) join));
 
 		/*
@@ -2591,9 +2439,7 @@ set_join_references(PlannerInfo *root, Join *join, int rtoffset)
 											   outer_itlist,
 											   OUTER_VAR,
 											   rtoffset,
-#if PG_VERSION_NUM >= 160000
 											   NRM_EQUAL,
-#endif
 											   NUM_EXEC_QUAL((Plan *) join));
 	}
 
@@ -2607,35 +2453,13 @@ set_join_references(PlannerInfo *root, Join *join, int rtoffset)
 	 * be, so we just tell fix_join_expr to accept superset nullingrels
 	 * matches instead of exact ones.
 	 */
-#if PG_VERSION_NUM < 160000
-	switch (join->jointype)
-	{
-		case JOIN_LEFT:
-		case JOIN_SEMI:
-		case JOIN_ANTI:
-			inner_itlist->has_non_vars = false;
-			break;
-		case JOIN_RIGHT:
-			outer_itlist->has_non_vars = false;
-			break;
-		case JOIN_FULL:
-			outer_itlist->has_non_vars = false;
-			inner_itlist->has_non_vars = false;
-			break;
-		default:
-			break;
-	}
-
-#endif
 	join->plan.targetlist = fix_join_expr(root,
 										  join->plan.targetlist,
 										  outer_itlist,
 										  inner_itlist,
 										  (Index) 0,
 										  rtoffset,
-#if PG_VERSION_NUM >= 160000
 										  (join->jointype == JOIN_INNER ? NRM_EQUAL : NRM_SUPERSET),
-#endif
 										  NUM_EXEC_TLIST((Plan *) join));
 	join->plan.qual = fix_join_expr(root,
 									join->plan.qual,
@@ -2643,9 +2467,7 @@ set_join_references(PlannerInfo *root, Join *join, int rtoffset)
 									inner_itlist,
 									(Index) 0,
 									rtoffset,
-#if PG_VERSION_NUM >= 160000
 									(join->jointype == JOIN_INNER ? NRM_EQUAL : NRM_SUPERSET),
-#endif
 									NUM_EXEC_QUAL((Plan *) join));
 
 	pfree(outer_itlist);
@@ -2680,6 +2502,28 @@ set_upper_references(PlannerInfo *root, Plan *plan, int rtoffset)
 
 	subplan_itlist = build_tlist_index(subplan->targetlist);
 
+	/*
+	 * If it's a grouping node with grouping sets, any Vars and PHVs appearing
+	 * in the targetlist and quals should have nullingrels that include the
+	 * effects of the grouping step, ie they will have nullingrels equal to
+	 * the input Vars/PHVs' nullingrels plus the RT index of the grouping
+	 * step.  In order to perform exact nullingrels matches, we remove the RT
+	 * index of the grouping step first.
+	 */
+	if (IsA(plan, Agg) &&
+		root->group_rtindex > 0 &&
+		((Agg *) plan)->groupingSets)
+	{
+		plan->targetlist = (List *)
+			remove_nulling_relids((Node *) plan->targetlist,
+								  bms_make_singleton(root->group_rtindex),
+								  NULL);
+		plan->qual = (List *)
+			remove_nulling_relids((Node *) plan->qual,
+								  bms_make_singleton(root->group_rtindex),
+								  NULL);
+	}
+
 	output_targetlist = NIL;
 	foreach(l, plan->targetlist)
 	{
@@ -2700,9 +2544,7 @@ set_upper_references(PlannerInfo *root, Plan *plan, int rtoffset)
 										 subplan_itlist,
 										 OUTER_VAR,
 										 rtoffset,
-#if PG_VERSION_NUM >= 160000
 										 NRM_EQUAL,
-#endif
 										 NUM_EXEC_TLIST(plan));
 		}
 		else
@@ -2711,9 +2553,7 @@ set_upper_references(PlannerInfo *root, Plan *plan, int rtoffset)
 									 subplan_itlist,
 									 OUTER_VAR,
 									 rtoffset,
-#if PG_VERSION_NUM >= 160000
 									 NRM_EQUAL,
-#endif
 									 NUM_EXEC_TLIST(plan));
 		tle = flatCopyTargetEntry(tle);
 		tle->expr = (Expr *) newexpr;
@@ -2727,14 +2567,11 @@ set_upper_references(PlannerInfo *root, Plan *plan, int rtoffset)
 					   subplan_itlist,
 					   OUTER_VAR,
 					   rtoffset,
-#if PG_VERSION_NUM >= 160000
 					   NRM_EQUAL,
-#endif
 					   NUM_EXEC_QUAL(plan));
 
 	pfree(subplan_itlist);
 }
-
 /*
  * set_param_references
  *	  Initialize the initParam list in Gather or Gather merge node such that
@@ -2857,8 +2694,7 @@ convert_combining_aggrefs(Node *node, void *context)
 
 		return (Node *) parent_agg;
 	}
-	return expression_tree_mutator(node, convert_combining_aggrefs,
-								   (void *) context);
+	return expression_tree_mutator(node, convert_combining_aggrefs, context);
 }
 
 /*
@@ -2970,9 +2806,7 @@ build_tlist_index(List *tlist)
 			vinfo->varno = var->varno;
 			vinfo->varattno = var->varattno;
 			vinfo->resno = tle->resno;
-#if PG_VERSION_NUM >= 160000
 			vinfo->varnullingrels = var->varnullingrels;
-#endif
 			vinfo++;
 		}
 		else if (tle->expr && IsA(tle->expr, PlaceHolderVar))
@@ -3025,9 +2859,7 @@ build_tlist_index_other_vars(List *tlist, int ignore_rel)
 				vinfo->varno = var->varno;
 				vinfo->varattno = var->varattno;
 				vinfo->resno = tle->resno;
-#if PG_VERSION_NUM >= 160000
 				vinfo->varnullingrels = var->varnullingrels;
-#endif
 				vinfo++;
 			}
 		}
@@ -3056,12 +2888,8 @@ build_tlist_index_other_vars(List *tlist, int ignore_rel)
  */
 static Var *
 search_indexed_tlist_for_var(Var *var, indexed_tlist *itlist,
-#if PG_VERSION_NUM >= 160000
 							 int newvarno, int rtoffset,
 							 NullingRelsMatch nrm_match)
-#else
-										 int newvarno, int rtoffset)
-#endif /* #if PG_VERSION_NUM >= 160000 */
 {
 	int			varno = var->varno;
 	AttrNumber	varattno = var->varattno;
@@ -3077,7 +2905,6 @@ search_indexed_tlist_for_var(Var *var, indexed_tlist *itlist,
 			/* Found a match */
 			Var		   *newvar = copyVar(var);
 
-#if PG_VERSION_NUM >= 160000
 			/*
 			 * Verify that we kept all the nullingrels machinations straight.
 			 *
@@ -3102,7 +2929,6 @@ search_indexed_tlist_for_var(Var *var, indexed_tlist *itlist,
 					 bmsToString(var->varnullingrels),
 					 bmsToString(vinfo->varnullingrels),
 					 varno, varattno);
-#endif
 
 			newvar->varno = newvarno;
 			newvar->varattno = vinfo->resno;
@@ -3115,7 +2941,6 @@ search_indexed_tlist_for_var(Var *var, indexed_tlist *itlist,
 	return NULL;				/* no match */
 }
 
-#if PG_VERSION_NUM >= 160000
 /*
  * search_indexed_tlist_for_phv --- find a PlaceHolderVar in an indexed tlist
  *
@@ -3170,7 +2995,6 @@ search_indexed_tlist_for_phv(PlaceHolderVar *phv,
 	}
 	return NULL;				/* no match */
 }
-#endif
 
 /*
  * search_indexed_tlist_for_non_var --- find a non-Var/PHV in an indexed tlist
@@ -3220,18 +3044,11 @@ search_indexed_tlist_for_non_var(Expr *node,
  * where there are multiple textually-equal()-but-volatile sort expressions.
  * And it's also faster than search_indexed_tlist_for_non_var.
  */
-#if PG_VERSION_NUM >= 160000
 static Var *
 search_indexed_tlist_for_sortgroupref(Expr *node,
 									  Index sortgroupref,
 									  indexed_tlist *itlist,
 									  int newvarno)
-#else
-static Var *search_indexed_tlist_for_sortgroupref(Expr *node,
-												  Index sortgroupref,
-												  indexed_tlist *itlist,
-												  int newvarno)
-#endif
 {
 	ListCell   *lc;
 
@@ -3312,9 +3129,7 @@ fix_join_expr(PlannerInfo *root,
 			  indexed_tlist *inner_itlist,
 			  Index acceptable_rel,
 			  int rtoffset,
-#if PG_VERSION_NUM >= 160000
 			  NullingRelsMatch nrm_match,
-#endif
 			  double num_exec)
 {
 	fix_join_expr_context context;
@@ -3324,9 +3139,7 @@ fix_join_expr(PlannerInfo *root,
 	context.inner_itlist = inner_itlist;
 	context.acceptable_rel = acceptable_rel;
 	context.rtoffset = rtoffset;
-#if PG_VERSION_NUM >= 160000
 	context.nrm_match = nrm_match;
-#endif
 	context.num_exec = num_exec;
 	return (List *) fix_join_expr_mutator((Node *) clauses, &context);
 }
@@ -3342,18 +3155,29 @@ fix_join_expr_mutator(Node *node, fix_join_expr_context *context)
 	{
 		Var		   *var = (Var *) node;
 
+		/*
+		 * Verify that Vars with non-default varreturningtype only appear in
+		 * the RETURNING list, and refer to the target relation.
+		 */
+		if (var->varreturningtype != VAR_RETURNING_DEFAULT)
+		{
+			if (context->inner_itlist != NULL ||
+				context->outer_itlist == NULL ||
+				context->acceptable_rel == 0)
+				elog(ERROR, "variable returning old/new found outside RETURNING list");
+			if (var->varno != context->acceptable_rel)
+				elog(ERROR, "wrong varno %d (expected %d) for variable returning old/new",
+					 var->varno, context->acceptable_rel);
+		}
+
 		/* Look for the var in the input tlists, first in the outer */
 		if (context->outer_itlist)
 		{
 			newvar = search_indexed_tlist_for_var(var,
 												  context->outer_itlist,
 												  OUTER_VAR,
-#if PG_VERSION_NUM >= 160000
 												  context->rtoffset,
 												  context->nrm_match);
-#else
-												  context->rtoffset);
-#endif
 			if (newvar)
 				return (Node *) newvar;
 		}
@@ -3364,12 +3188,8 @@ fix_join_expr_mutator(Node *node, fix_join_expr_context *context)
 			newvar = search_indexed_tlist_for_var(var,
 												  context->inner_itlist,
 												  INNER_VAR,
-#if PG_VERSION_NUM >= 160000
 												  context->rtoffset,
 												  context->nrm_match);
-#else
-												  context->rtoffset);
-#endif
 			if (newvar)
 				return (Node *) newvar;
 		}
@@ -3394,31 +3214,19 @@ fix_join_expr_mutator(Node *node, fix_join_expr_context *context)
 		/* See if the PlaceHolderVar has bubbled up from a lower plan node */
 		if (context->outer_itlist && context->outer_itlist->has_ph_vars)
 		{
-#if PG_VERSION_NUM >= 160000
 			newvar = search_indexed_tlist_for_phv(phv,
 												  context->outer_itlist,
 												  OUTER_VAR,
 												  context->nrm_match);
-#else
-			newvar = search_indexed_tlist_for_non_var((Expr *) phv,
-													  context->outer_itlist,
-													  OUTER_VAR);
-#endif
 			if (newvar)
 				return (Node *) newvar;
 		}
 		if (context->inner_itlist && context->inner_itlist->has_ph_vars)
 		{
-#if PG_VERSION_NUM >= 160000
 			newvar = search_indexed_tlist_for_phv(phv,
 												  context->inner_itlist,
 												  INNER_VAR,
 												  context->nrm_match);
-#else
-			newvar = search_indexed_tlist_for_non_var((Expr *) phv,
-													  context->inner_itlist,
-													  INNER_VAR);
-#endif
 			if (newvar)
 				return (Node *) newvar;
 		}
@@ -3453,9 +3261,7 @@ fix_join_expr_mutator(Node *node, fix_join_expr_context *context)
 															 context->num_exec),
 									 context);
 	fix_expr_common(context->root, node);
-	return expression_tree_mutator(node,
-								   fix_join_expr_mutator,
-								   (void *) context);
+	return expression_tree_mutator(node, fix_join_expr_mutator, context);
 }
 
 /*
@@ -3496,9 +3302,7 @@ fix_upper_expr(PlannerInfo *root,
 			   indexed_tlist *subplan_itlist,
 			   int newvarno,
 			   int rtoffset,
-#if PG_VERSION_NUM >= 160000
 			   NullingRelsMatch nrm_match,
-#endif
 			   double num_exec)
 {
 	fix_upper_expr_context context;
@@ -3507,9 +3311,7 @@ fix_upper_expr(PlannerInfo *root,
 	context.subplan_itlist = subplan_itlist;
 	context.newvarno = newvarno;
 	context.rtoffset = rtoffset;
-#if PG_VERSION_NUM >= 160000
 	context.nrm_match = nrm_match;
-#endif	
 	context.num_exec = num_exec;
 	return fix_upper_expr_mutator(node, &context);
 }
@@ -3528,12 +3330,8 @@ fix_upper_expr_mutator(Node *node, fix_upper_expr_context *context)
 		newvar = search_indexed_tlist_for_var(var,
 											  context->subplan_itlist,
 											  context->newvarno,
-#if PG_VERSION_NUM >= 160000
 											  context->rtoffset,
 											  context->nrm_match);
-#else
-											  context->rtoffset);
-#endif
 		if (!newvar)
 			elog(ERROR, "variable not found in subplan target list");
 		return (Node *) newvar;
@@ -3545,16 +3343,10 @@ fix_upper_expr_mutator(Node *node, fix_upper_expr_context *context)
 		/* See if the PlaceHolderVar has bubbled up from a lower plan node */
 		if (context->subplan_itlist->has_ph_vars)
 		{
-#if PG_VERSION_NUM >= 160000
 			newvar = search_indexed_tlist_for_phv(phv,
 												  context->subplan_itlist,
 												  context->newvarno,
 												  context->nrm_match);
-#else
-			newvar = search_indexed_tlist_for_non_var((Expr *) phv,
-													  context->subplan_itlist,
-													  context->newvarno);
-#endif
 			if (newvar)
 				return (Node *) newvar;
 		}
@@ -3577,7 +3369,6 @@ fix_upper_expr_mutator(Node *node, fix_upper_expr_context *context)
 	if (IsA(node, Aggref))
 	{
 		Aggref	   *aggref = (Aggref *) node;
-#if PG_VERSION_NUM >= 160000
 		Param	   *aggparam;
 
 		/* See if the Aggref should be replaced by a Param */
@@ -3587,25 +3378,6 @@ fix_upper_expr_mutator(Node *node, fix_upper_expr_context *context)
 			/* Make a copy of the Param for paranoia's sake */
 			return (Node *) copyObject(aggparam);
 		}
-#else
-
-		/* See if the Aggref should be replaced by a Param */
-		if (context->root->minmax_aggs != NIL &&
-			list_length(aggref->args) == 1)
-		{
-			TargetEntry *curTarget = (TargetEntry *) linitial(aggref->args);
-			ListCell   *lc;
-
-			foreach(lc, context->root->minmax_aggs)
-			{
-				MinMaxAggInfo *mminfo = (MinMaxAggInfo *) lfirst(lc);
-
-				if (mminfo->aggfnoid == aggref->aggfnoid &&
-					equal(mminfo->target, curTarget->expr))
-					return (Node *) copyObject(mminfo->param);
-			}
-		}
-#endif
 		/* If no match, just fall through to process it normally */
 	}
 	if (IsA(node, AlternativeSubPlan))
@@ -3614,9 +3386,7 @@ fix_upper_expr_mutator(Node *node, fix_upper_expr_context *context)
 															  context->num_exec),
 									  context);
 	fix_expr_common(context->root, node);
-	return expression_tree_mutator(node,
-								   fix_upper_expr_mutator,
-								   (void *) context);
+	return expression_tree_mutator(node, fix_upper_expr_mutator, context);
 }
 
 /*
@@ -3678,9 +3448,7 @@ set_returning_clause_references(PlannerInfo *root,
 						  NULL,
 						  resultRelation,
 						  rtoffset,
-#if PG_VERSION_NUM >= 160000
 						  NRM_EQUAL,
-#endif
 						  NUM_EXEC_TLIST(topplan));
 
 	pfree(itlist);
@@ -3714,7 +3482,7 @@ fix_windowagg_condition_expr_mutator(Node *node,
 
 	return expression_tree_mutator(node,
 								   fix_windowagg_condition_expr_mutator,
-								   (void *) context);
+								   context);
 }
 
 /*
@@ -3762,7 +3530,6 @@ set_windowagg_runcondition_references(PlannerInfo *root,
 }
 
 #ifndef __PG_QUERY_PLAN__
-#if PG_VERSION_NUM >= 160000
 /*
  * find_minmax_agg_replacement_param
  *		If the given Aggref is one that we are optimizing into a subquery
@@ -3793,7 +3560,6 @@ find_minmax_agg_replacement_param(PlannerInfo *root, Aggref *aggref)
 	}
 	return NULL;
 }
-#endif
 #endif			/* #ifndef __PG_QUERY_PLAN__ */
 
 /*****************************************************************************
@@ -3938,8 +3704,27 @@ extract_query_dependencies_walker(Node *node, PlannerInfo *context)
 		if (query->commandType == CMD_UTILITY)
 		{
 			/*
-			 * Ignore utility statements, except those (such as EXPLAIN) that
-			 * contain a parsed-but-not-planned query.
+			 * This logic must handle any utility command for which parse
+			 * analysis was nontrivial (cf. stmt_requires_parse_analysis).
+			 *
+			 * Notably, CALL requires its own processing.
+			 */
+			if (IsA(query->utilityStmt, CallStmt))
+			{
+				CallStmt   *callstmt = (CallStmt *) query->utilityStmt;
+
+				/* We need not examine funccall, just the transformed exprs */
+				(void) extract_query_dependencies_walker((Node *) callstmt->funcexpr,
+														 context);
+				(void) extract_query_dependencies_walker((Node *) callstmt->outargs,
+														 context);
+				return false;
+			}
+
+			/*
+			 * Ignore other utility statements, except those (such as EXPLAIN)
+			 * that contain a parsed-but-not-planned query.  For those, we
+			 * just need to transfer our attention to the contained query.
 			 */
 			query = UtilityContainsQuery(query->utilityStmt);
 			if (query == NULL)
@@ -3955,30 +3740,19 @@ extract_query_dependencies_walker(Node *node, PlannerInfo *context)
 		{
 			RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc);
 
-#if PG_VERSION_NUM >= 160000
 			if (rte->rtekind == RTE_RELATION ||
 				(rte->rtekind == RTE_SUBQUERY && OidIsValid(rte->relid)) ||
 				(rte->rtekind == RTE_NAMEDTUPLESTORE && OidIsValid(rte->relid)))
 				context->glob->relationOids =
 					lappend_oid(context->glob->relationOids, rte->relid);
-#else
-			if (rte->rtekind == RTE_RELATION)
-				context->glob->relationOids =
-					lappend_oid(context->glob->relationOids, rte->relid);
-			else if (rte->rtekind == RTE_NAMEDTUPLESTORE &&
-					 OidIsValid(rte->relid))
-				context->glob->relationOids =
-					lappend_oid(context->glob->relationOids,
-								rte->relid);
-#endif
 		}
 
 		/* And recurse into the query's subexpressions */
 		return query_tree_walker(query, extract_query_dependencies_walker,
-								 (void *) context, 0);
+								 context, 0);
 	}
 	/* Extract function dependencies and check for regclass Consts */
 	fix_expr_common(context, node);
 	return expression_tree_walker(node, extract_query_dependencies_walker,
-								  (void *) context);
+								  context);
 }

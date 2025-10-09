@@ -52,7 +52,7 @@ Many methods I learned in statistics as a student are now classified as Machine 
 
 ## 1. Supported Versions
 
-This framework supports PostgreSQL versions: 17, 16 and 15.
+This framework supports PostgreSQL versions: 18.
 
 ## 2. Installation and Usage
 
@@ -175,7 +175,7 @@ Two interesting demonstrations were shown at [VLDB 2021: Demonstrations](http://
 
 Use this framework at your own risk.
 
-+ With the pg_query_plan module, the performance of query processing is reduced by a few percent due to the overhead of data collection.
++ With the pg_query_plan module, the performance of query processing is reduced by around 30% due to the overhead of data collection. (To address this issue, I conducted a feasibility study and created some patches, which can be found in [this repository](https://github.com/s-hironobu/explain_analyze_bench).)
 + The values provided by the plan_analyzer module are estimates, not guaranteed to be 100% accurate.
 
 
@@ -202,6 +202,7 @@ Version 0.2 (POC model)
 
 ## Change Log
 
+ - 9th October 2025: Supported PG18 and Removed support for PG 17 and earlier.
  - 24th September 2024: Removed support for PG 13 and 14.
  - 24th September 2024: Supported PG 17.
  - 24th September 2023: Supported PG 16.

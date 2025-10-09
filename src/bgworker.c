@@ -39,6 +39,7 @@
 #include "utils/timestamp.h"
 
 #include "common.h"
+#include "pg_query_plan.h"
 #include "buffer.h"
 #include "bgworker.h"
 #include "hash.h"
@@ -50,19 +51,10 @@
 								 * is executed once. */
 
 /*
- * Global variable declarations
- */
-extern pgqpSharedState * pgqp;
-
-/*
  * Function declarations
  */
-void		pg_query_plan_main(Datum) pg_attribute_noreturn();
-#if PG_VERSION_NUM >= 160000
-PGDLLEXPORT void		pg_query_plan_main(Datum main_arg);
-#else
 void		pg_query_plan_main(Datum main_arg);
-#endif
+PGDLLEXPORT void		pg_query_plan_main(Datum main_arg);
 void		start_tx(void);
 void		commit_tx(void);
 

@@ -45,6 +45,7 @@
 #include "utils/lsyscache.h"
 #include "utils/guc.h"
 #include "utils/rel.h"
+#include "pg_query_plan.h"
 #include "adjust_rows.h"
 #include "param.h"
 #include "param_parser.h"
@@ -54,12 +55,6 @@
 /*
  * Declare variables
  */
-extern set_rel_pathlist_hook_type prev_set_rel_pathlist;
-extern set_join_pathlist_hook_type prev_set_join_pathlist;
-
-extern bool pgqp_enable_adjust_joinrel_rows;
-extern bool pgqp_enable_adjust_rel_rows;
-
 
 CurrentState current_state;		/* Hold the planner method configuration
 								 * variables related to join methods. */
