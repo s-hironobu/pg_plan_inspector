@@ -2,6 +2,7 @@
 
 MODULE_big = pg_query_plan
 OBJS = 	src/pgqp_explain.o \
+	src/pgqp_sortnode.o \
 	src/buffer.o \
 	src/hash.o \
 	src/bgworker.o \

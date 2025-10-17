@@ -16,4 +16,6 @@ void pgqpExplainPrintQueryState(ExplainState *es, QueryDesc *queryDesc);
 void pgqpExplainBeginOutput(ExplainState *es);
 void pgqpExplainEndOutput(ExplainState *es);
 
+int pgqp_ExplainQueryState(ExplainState *es, QueryDesc *queryDesc);
+
 #endif							/* PGQP_EXPLAIN_H */

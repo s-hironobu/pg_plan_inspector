@@ -160,6 +160,8 @@ As you have already noticed, similar functionality can also be implemented using
 
 ## 2. Adaptive work memory expansion
 
+### 2.1. Adaptive work memory size by Feedback
+
 This feature is an experimental implementation,
 and it temporarily expands the work_mem area during this query execution if the query has ever used temporary files.
 
@@ -275,3 +277,11 @@ plan    | Sort  (cost=127757.69..130257.70 rows=1000003 width=4) (actual rows=10
         |         Output: id                                                                                        +
         |
 ```
+
+### 2.2. Adaptive work_mem Sizing Based on Estimated Row Size
+
+This feature is **experimental**.
+
+It examines **Sort nodes** in the plan, estimates the memory required based on the estimated row count, and dynamically changes the **work_mem** setting.
+
+Since the value estimation is currently **heuristic**, a more sophisticated estimation routine is needed.

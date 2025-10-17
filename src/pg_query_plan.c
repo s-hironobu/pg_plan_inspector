@@ -59,6 +59,7 @@
 #include "param.h"
 
 #ifdef __ADAPT_WORK_MEM__
+#include "commands/explain.h"
 #include "access/skey.h"
 #include "access/relscan.h"
 #include "access/genam.h"
@@ -68,6 +69,7 @@
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "pgqp_sortnode.h"
 #endif
 
 PG_MODULE_MAGIC;
@@ -733,6 +735,7 @@ get_sort_space_used(const uint64 queryId)
 
 	return sort_space_used;
 }
+
 #endif
 
 /*
@@ -745,8 +748,6 @@ pgqp_ExecutorStart(QueryDesc *queryDesc, int eflags)
 	int			leader_pid;
 #ifdef __ADAPT_WORK_MEM__
 	int			sort_space_used = 0;
-
-	tmp_work_mem = 0;
 #endif
 
 #ifdef __DEBUG__
@@ -793,20 +794,20 @@ pgqp_ExecutorStart(QueryDesc *queryDesc, int eflags)
 	}
 
 #ifdef __ADAPT_WORK_MEM__
-
 	/*
 	 * Experimental implementation: It temporarily expands the work_mem area
 	 * during this query execution if the query has ever used temporary files.
 	 */
+	tmp_work_mem = atoi(GetConfigOption("work_mem", true, true));
+
 	if ((sort_space_used = get_sort_space_used(queryDesc->plannedstmt->queryId)) > 0)
 	{
 		int			wm;
 
 		pgqp_work_mem = true;
-		tmp_work_mem = atoi(GetConfigOption("work_mem", true, true));
 		wm = sort_space_used + tmp_work_mem;
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
-#define MAX_WORK_MEM (1024 * 200)	/* 200MB */
+#define MAX_WORK_MEM (1024 * 500)	/* 500MB */
 		set_work_mem(MIN(wm * 8, MAX_WORK_MEM));	/* wm*8 is heuristics. */
 	}
 #endif
@@ -866,6 +867,58 @@ pgqp_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction,
 				 uint64 count)
 {
 	nested_level++;
+
+#ifdef __ADAPT_WORK_MEM__
+	/*
+	 * This is a purely experimental implementation.
+	 *
+	 * Before executing a query, the system searches for the Sort node
+	 * and estimates the memory required for the sorting operation.
+	 * (Note: This estimate is strictly for testing and may not be accurate.)
+	 *
+	 * If the configured work_mem is less than the estimated memory,
+	 * the work_mem value is temporarily increased to the estimated value.
+	 *
+	 * After the query finishes executing, the work_mem value is reset to
+	 * its original configured value.
+	 */
+	if (MyBackendType == B_BACKEND || IsParallelWorker())
+	{
+		ExplainState *es;
+		int			wm = 0;
+		MemoryContext oldcxt;
+		MemoryContext tmpcxt = AllocSetContextCreate(CurrentMemoryContext,
+													 "adjust_work_mem_ctx",
+													 ALLOCSET_DEFAULT_MINSIZE,
+													 ALLOCSET_DEFAULT_INITSIZE,
+													 ALLOCSET_DEFAULT_MAXSIZE);
+
+		oldcxt = MemoryContextSwitchTo(tmpcxt);
+
+		es = NewExplainState();
+
+		if (queryDesc != NULL && queryDesc->planstate != NULL)
+		{
+		    wm = pgqp_ExplainQueryState(es, queryDesc);
+			//elog(INFO, "%s  calc wm=%d", __func__, wm);
+			if (wm > 0)
+				pgqp_work_mem = true;
+		}
+
+		MemoryContextSwitchTo(oldcxt);
+		MemoryContextDelete(tmpcxt);
+
+		if (pgqp_work_mem && wm > tmp_work_mem)
+		{
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define MAX_WORK_MEM (1024 * 500)	/* 500MB */
+			//elog(INFO, "%s  set work_mem=%d", __func__, wm);
+			set_work_mem(MIN(wm, MAX_WORK_MEM));
+		}
+	}
+#endif
+
+
 	PG_TRY();
 	{
 		if (prev_ExecutorRun)
