@@ -202,6 +202,7 @@ Version 0.2 (POC model)
 
 ## Change Log
 
+ - 23rd October 2026: Changed shared memory to DSM for data transfer (by Claude).
  - 18th October 2025: Added adaptive work_mem feature.
  - 9th October 2025: Supported PG18 and Removed support for PG 17 and earlier.
  - 24th September 2024: Removed support for PG 13 and 14.
