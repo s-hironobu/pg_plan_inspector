@@ -4,8 +4,11 @@
  * This file contains the access methods to read/write queries and [executed|query]
  * plans from/into the queryPlanData structure.
  *
- * The instances of queryPlanData are allocated on two places: the shared memory
- * and the dynamic shared memory on bgworker as the slots of the ring buffer.
+ * The instances of queryPlanData are allocated on the dynamic shared memory on
+ * bgworker as the slots of the ring buffer.
+ *
+ * make_plan_string() is also used by pg_query_plan() to build the plans that
+ * are sent to the caller through a per-request dsm segment.
  *
  * Copyright (c) 2021-2025, Hironobu Suzuki @ interdb.jp
  *
@@ -31,6 +34,8 @@ void		set_query(struct queryPlanData *qpd, const int nested_level,
 					  const uint64 queryId, const bool nested);
 void		set_plan(struct queryPlanData *qpd, const int nested_level,
 					 const bool nested, const PrintFormat format);
+void		make_plan_string(const int nested_level, const PrintFormat format,
+							 uint64 *planid);
 char	   *get_query_plan(struct queryPlanData *qpd, const PrintFormat format,
 						   bool *is_null, const int nested_level);
 void		init_qpd(struct queryPlanData *qpd);
@@ -147,13 +152,18 @@ set_query(struct queryPlanData *qpd, const int nested_level,
 
 
 /*
- * Set the [executed|query] plan to pgqp->queryPlan_XXX.
+ * Generate the [executed|query] plan of qp_qd[nested_level] in the specified
+ * format into qp_es[nested_level]->str.
+ *
+ * If format is PRINT_PLAN_JSON and planid is not NULL, the planId of the
+ * generated plan is stored into *planid.
+ *
+ * qp_es[nested_level] must be created by the caller beforehand.
  */
 void
-set_plan(struct queryPlanData *qpd, const int nested_level,
-		 const bool nested, const PrintFormat format)
+make_plan_string(const int nested_level, const PrintFormat format,
+				 uint64 *planid)
 {
-	int			level = (nested == true) ? nested_level : 0;
 	bool		_analyze = qp_es[nested_level]->analyze;
 	bool		_verbose = qp_es[nested_level]->verbose;
 
@@ -181,6 +191,41 @@ set_plan(struct queryPlanData *qpd, const int nested_level,
 	pgqpExplainEndOutput(qp_es[nested_level]);
 
 	/*
+	 * Get planId
+	 */
+	if (format == PRINT_PLAN_JSON && planid != NULL)
+	{
+		pgqp_json_plan = qp_es[nested_level]->str->data;
+		pre_plan_parse(qp_es[nested_level]->str->len);
+		if (plan_parse() != 0)
+			elog(WARNING, "Warning: Parse error in the json plan.");
+		*planid = get_planId();
+
+#ifdef __DEBUG__
+		elog(LOG, "planid = %lu  plan=%s", *planid, qp_es[nested_level]->str->data);
+#endif
+	}
+
+	qp_es[nested_level]->analyze = _analyze;
+	qp_es[nested_level]->verbose = _verbose;
+}
+
+
+/*
+ * Set the [executed|query] plan to pgqp->queryPlan_XXX.
+ */
+void
+set_plan(struct queryPlanData *qpd, const int nested_level,
+		 const bool nested, const PrintFormat format)
+{
+	int			level = (nested == true) ? nested_level : 0;
+	uint64		planid = 0;
+
+	Assert(format == PRINT_PLAN || format == PRINT_PLAN_JSON);
+
+	make_plan_string(nested_level, format, &planid);
+
+	/*
 	 * Set the getting [executed|query] plan to qpd->queryPlan_plan[] or
 	 * qpd->queryPlan_json[].
 	 */
@@ -194,23 +239,7 @@ set_plan(struct queryPlanData *qpd, const int nested_level,
 	 * Set planId
 	 */
 	if (format == PRINT_PLAN_JSON)
-	{
-		uint64		planid;
-
-		pgqp_json_plan = qp_es[nested_level]->str->data;
-		pre_plan_parse(qp_es[nested_level]->str->len);
-		if (plan_parse() != 0)
-			elog(WARNING, "Warning: Parse error in the json plan.");
-		planid = get_planId();
 		qpd->planId[nested_level] = planid;
-
-#ifdef __DEBUG__
-		elog(LOG, "planid = %lu  plan=%s", planid, qp_es[nested_level]->str->data);
-#endif
-	}
-
-	qp_es[nested_level]->analyze = _analyze;
-	qp_es[nested_level]->verbose = _verbose;
 }
 
 

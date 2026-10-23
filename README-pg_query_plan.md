@@ -221,20 +221,26 @@ A background worker process runs to store the executed plans.
 ### 3.1. How to show the query plans
 
 When Client 2 executes the pg_query_plan() function in order to show the query plan of the query issued by Client 1,
-the function invokes a kill system call to send a SIGUSR2 signal to the backend of Client 1.
-After that, the backend that sent the signal enters into sleep mode.
+the backend of Client 2 creates a dynamic shared memory (DSM) segment for this request,
+writes its handle into the request slot of the backend of Client 1 (each backend has its own small request slot in the shared memory),
+and sends a SIGUSR2 signal to the backend of Client 1.
+After that, the backend that sent the signal waits on its latch, at most 5 seconds.
 
 
-The backend received the SIGUSR2 signal is interrupted by the current processing and invokes the signal handler function.
-The signal handler function gathers the current states of the running query including the query plan, and stores them in the shared memory.
-After that, the backend invokes the latch to wake up the backend of Client 2, which is currently in sleep mode.
+The signal handler of the backend of Client 1 only sets a flag.
+The request is served at the next safe point, i.e. when any plan node of the running query is invoked:
+the backend gathers the current states of the running query including the query plan, attaches the DSM segment, writes them into it,
+and then sets the latch of the backend of Client 2 to wake it up.
 
 
-After waking up from receiving the latch, the backend of Client 2 gets the query plan on the shared memory and displays it.
+After waking up, the backend of Client 2 reads the query plan from the DSM segment and displays it.
+The segment is destroyed when both backends have detached it.
 
 
 ##### Note:
-This is the [strace log](./strace.log) of the backend that runs the signal handler function invoked by SIGUSR2 during executing the handler function.
++ Requests to different backends are processed concurrently. If the request slot of the target backend is used by another caller, the request is retried at most 5 times (at 1-second intervals).
++ There is no limit on the size of the query plans; if the initial segment (256 kB) is too small, it is recreated with the required size.
++ A long-running operation inside a single plan node (e.g. the sort phase of a Sort node) delays the response until the next plan node invocation. If the target does not respond within 5 seconds, pg_query_plan() emits a warning and skips it.
 
 
 ### 3.2. How to store the executed plans into the query_plan.log table

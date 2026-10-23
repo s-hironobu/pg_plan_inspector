@@ -34,6 +34,8 @@
 #include "utils/builtins.h"
 #include "utils/timestamp.h"
 #include "nodes/queryjumble.h"
+#include "nodes/nodeFuncs.h"
+#include "utils/memutils.h"
 
 #ifdef __ADJUST_ROWS__
 #include "nodes/pathnodes.h"
@@ -106,11 +108,63 @@ int	tmp_work_mem;
 
 bool		pgqp_received_signal;
 
+/*
+ * Set by the signal handler when a pg_query_plan() request arrives, and
+ * checked at the safe point, i.e. at the entry of every plan node.
+ */
+static volatile sig_atomic_t pgqp_request_pending = false;
+static bool pgqp_serving_request = false;	/* guard against reentrance */
+static dsm_segment *pgqp_serving_seg = NULL;	/* attached while serving */
+
+/*
+ * Map from a plan node to its original ExecProcNodeReal function.
+ *
+ * pgqp_ExecutorStart() replaces ExecProcNodeReal of every plan node with
+ * pgqp_ExecProcNode(), which checks pgqp_request_pending and then calls the
+ * original function.  The original functions are saved per EState, indexed
+ * by plan_node_id.  The map is allocated in es_query_cxt and unlinked by
+ * the reset callback of the context.
+ */
+typedef struct pgqpNodeMap
+{
+	EState	   *estate;
+	int			nnodes;
+	ExecProcNodeMtd *orig;		/* indexed by plan_node_id */
+	MemoryContextCallback cb;
+	struct pgqpNodeMap *next;
+}			pgqpNodeMap;
+
+static pgqpNodeMap *pgqp_node_maps = NULL;
+
+/*
+ * The request slot held by this process as a caller of pg_query_plan().
+ * It is released at the end of the request, on error, and at process exit.
+ */
+static int	pgqp_held_slot = -1;
+static uint32 pgqp_held_gen = 0;
+static bool pgqp_exit_callback_registered = false;
+
+/* Special return values of pgqp_request_plans() */
+#define PGQP_REQ_BUSY		(-1)	/* the slot was busy even after retries */
+#define PGQP_REQ_TIMEOUT	(-2)	/* the target did not respond in time */
+#define PGQP_REQ_GONE		(-3)	/* the target has exited */
+
 /* Query info */
 static queryInfo qi;
 
 /* Links to QueryDesc and ExplainState */
 QueryDesc  *qp_qd[MAX_NESTED_LEVEL];
+
+/*
+ * QueryDesc actually being executed at each nesting level.
+ *
+ * qp_qd[] is set in ExecutorStart, so it does not represent the running
+ * query when several portals are executed alternately (e.g. FETCH from
+ * cursors).  qp_run_qd[] is set when ExecutorRun/ExecutorFinish is entered,
+ * so qp_run_qd[0 .. nested_level-1] are always the running queries.
+ * This is used by pg_query_plan().
+ */
+static QueryDesc *qp_run_qd[MAX_NESTED_LEVEL];
 ExplainState *qp_es[MAX_NESTED_LEVEL];
 
 static bool enable_show_plan;	/* Whether showing query plan is enabled */
@@ -127,11 +181,6 @@ static uint64 queryId[MAX_NESTED_LEVEL];	/* QueryId of query in each
 											 * nested_level */
 
 static int	pgqp_hash_max;
-
-/*
- * Flag set by signal handlers
- */
-static volatile sig_atomic_t got_siguser2 = false;
 
 /* Saved hook values in case of unload */
 shmem_request_hook_type prev_shmem_request_hook = NULL;
@@ -181,7 +230,14 @@ static void pgqp_shmem_shutdown(int code, Datum arg);
 static Size pgqp_memsize(void);
 static bool is_parallel_worker(const int pid, PgBackendStatus *beentry);
 static int	get_leader_pid(void);
-static void init_pgqp(struct queryPlanData *qpd, struct queryInfo *qi);
+static void pgqp_install_node_wrappers(QueryDesc *queryDesc);
+static TupleTableSlot *pgqp_ExecProcNode(PlanState *node);
+static void pgqp_serve_request(void);
+static bool pgqp_respond(pgqpRequestSlot *slot, uint32 expected,
+						 ProcNumber caller, int result);
+static int	pgqp_request_plans(ProcNumber procno, pid_t pid,
+							   dsm_segment **segp);
+static void pgqp_release_held_slot(void);
 static bool checkConditionOfLogInsertion(const int pid,
 										 const TimestampTz currentTimestamp);
 static void sig_get_query_plan(SIGNAL_ARGS);
@@ -443,7 +499,10 @@ pgqp_shmem_startup(void)
 	/* Create or attach to the shared memory state, including hash table */
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 
-	pgqp = ShmemInitStruct("pg_query_plan", sizeof(pgqpSharedState), &found);
+	pgqp = ShmemInitStruct("pg_query_plan",
+						   add_size(MAXALIGN(sizeof(pgqpSharedState)),
+									mul_size(MaxBackends, sizeof(pgqpRequestSlot))),
+						   &found);
 
 	if (!found)
 	{
@@ -451,10 +510,21 @@ pgqp_shmem_startup(void)
 		pgqp->lock = &(GetNamedLWLockTranche("pg_query_plan"))->lock;
 		pgqp->htlock = &(GetNamedLWLockTranche("pg_query_plan"))->lock;
 
-		SpinLockInit(&pgqp->elock);
 		SpinLockInit(&pgqp->nwblock);
 		for (i = 0; i < BUFFER_SIZE; i++)
 			SpinLockInit(&pgqp->bd[i].bslock);
+
+		/* Initialize the request slots of pg_query_plan(). */
+		pgqp->slots = (pgqpRequestSlot *)
+			((char *) pgqp + MAXALIGN(sizeof(pgqpSharedState)));
+		for (i = 0; i < MaxBackends; i++)
+		{
+			pg_atomic_init_u32(&pgqp->slots[i].state,
+							   PGQP_SLOT_MAKE(0, PGQP_SLOT_IDLE, RESULT_OK));
+			pgqp->slots[i].caller = INVALID_PROC_NUMBER;
+			pgqp->slots[i].caller_pid = InvalidPid;
+			pgqp->slots[i].handle = DSM_HANDLE_INVALID;
+		}
 	}
 
 	/* Initialize hash table */
@@ -466,15 +536,11 @@ pgqp_shmem_startup(void)
 							  &info,
 							  HASH_ELEM | HASH_BLOBS);
 
-	/* Set initial values */
-	init_pgqp(&pgqp->qpd, &pgqp->qi);
-
 	/*
 	 * pgqp->wptr and pgqp->bd[] are initialized in
 	 * create_ring_buffer()@bgworker.c
 	 */
 	pgqp->bgworkerPid = InvalidPid;
-	pgqp->resultState = RESULT_OK;
 
 	LWLockRelease(AddinShmemInitLock);
 
@@ -500,145 +566,468 @@ pgqp_memsize(void)
 	Size		size;
 
 	size = MAXALIGN(sizeof(pgqpSharedState));
+	size = add_size(size, mul_size(MaxBackends, sizeof(pgqpRequestSlot)));
 	size = add_size(size, hash_estimate_size(pgqp_hash_max, sizeof(pgqpEntry)));
 
 	return size;
 }
 
-#define PROCESS_FINISHED(void) do \
-	{											\
-		SpinLockAcquire(&pgqp->elock);			\
-		pgqp->finished = true;					\
-		SpinLockRelease(&pgqp->elock);			\
-	} while(0);
+/*
+ * Set the result to the request slot and wake the caller up.
+ *
+ * `expected` is the state word observed in PGQP_SLOT_PENDING.  If the state
+ * has been changed since then (e.g. the caller gave up the request), this
+ * does nothing and returns false.
+ *
+ * This function is async-signal-safe: it uses only an atomic CAS and
+ * SetLatch().
+ */
+static bool
+pgqp_respond(pgqpRequestSlot *slot, uint32 expected, ProcNumber caller,
+			 int result)
+{
+	uint32		newval = PGQP_SLOT_MAKE(PGQP_SLOT_GEN(expected),
+										PGQP_SLOT_DONE, result);
+
+	Assert(PGQP_SLOT_STATE(expected) == PGQP_SLOT_PENDING);
+
+	/* The CAS is a full memory barrier; the writes to the segment precede. */
+	if (!pg_atomic_compare_exchange_u32(&slot->state, &expected, newval))
+		return false;
+
+	if (caller != INVALID_PROC_NUMBER && caller < MaxBackends)
+		SetLatch(&GetPGProcByNumber(caller)->procLatch);
+
+	return true;
+}
 
 
 /*
- * Initialize pgqp
+ * Return the request slot of this process, or NULL if not available.
  */
-static void
-init_pgqp(struct queryPlanData *qpd, struct queryInfo *qi)
+static inline pgqpRequestSlot *
+my_request_slot(void)
 {
-	pgqp->latch = NULL;
-	pgqp->finished = false;
-	pgqp->qpd.encoding = -1;
-	pgqp->callerPID = InvalidPid;
-	pgqp->targetPID = InvalidPid;
-	pgqp->resultState = RESULT_OK;
-
-	init_qpd(qpd);
-	init_qi(qi);
+	if (pgqp == NULL || MyProcNumber == INVALID_PROC_NUMBER
+		|| MyProcNumber >= MaxBackends)
+		return NULL;
+	return &pgqp->slots[MyProcNumber];
 }
 
 
 /*
  * Signal handler function
  *
- * When a signal (the default is SIGUSR2) is received, this function invokes
- * pgqpExplainPrintQueryState() to get the query plan, and then writes
- * the getting data to pgqp->queryPlan.
- * After that, this function sets the latch to wake the caller process up.
+ * When a signal (SIGUSR2) is received, this handler does only async-signal
+ * safe operations:
  *
- * Note: During the processing of this function, the caller process
- *       holds the pgqp->lock. Thus, it does not need to acquire
- *       any lock because no process writes pgqp->qpd except this process.
+ *  - If the showing query plan feature is disabled or no query is running,
+ *    it responds to the caller immediately via the request slot.
+ *  - Otherwise, it sets pgqp_request_pending and returns.  The request is
+ *    served at the next safe point, i.e. when any plan node is invoked
+ *    (see pgqp_ExecProcNode()).
+ *
+ * Note: The former implementation generated the query plans inside this
+ *       handler. That is unsafe because the handler can interrupt palloc(),
+ *       a critical section, a dsm operation and so on.
  */
 static void
 sig_get_query_plan(SIGNAL_ARGS)
 {
-	int			i;
 	int			save_errno = errno;
-	MemoryContext oldcxt;
-	QueryDesc  *queryDesc;
+	pgqpRequestSlot *slot = my_request_slot();
 
-	sigprocmask(SIG_SETMASK, &BlockSig, NULL);
-
-	/*
-	 * Check the showing query plan feature is enabled or not
-	 */
-	if (!(enable_show_plan && pgqp_global_show_plan && pgqp_show_plan))
+	if (slot != NULL)
 	{
-		pgqp->resultState = RESULT_DISABLE;
-		PROCESS_FINISHED();
-		goto final;
-	}
+		uint32		cur = pg_atomic_read_u32(&slot->state);
 
-	/*
-	 * Check queryDesc and ExplainState
-	 */
-	for (i = 0; i < nested_level; i++)
-	{
-		if (qp_qd[i] == NULL)
+		if (PGQP_SLOT_STATE(cur) == PGQP_SLOT_PENDING)
 		{
-			pgqp->resultState = RESULT_NO_QUERY;
-			PROCESS_FINISHED();
-			goto final;
-		}
-		else if (qp_qd[i]->planstate == NULL)
-		{
-			pgqp->resultState = RESULT_NO_QUERY;
-			PROCESS_FINISHED();
-			goto final;
+			if (!(enable_show_plan && pgqp_global_show_plan && pgqp_show_plan))
+			{
+				pg_read_barrier();
+				pgqp_respond(slot, cur, slot->caller, RESULT_DISABLE);
+			}
+			else if (nested_level <= 0)
+			{
+				pg_read_barrier();
+				pgqp_respond(slot, cur, slot->caller, RESULT_NO_QUERY);
+			}
+			else
+				pgqp_request_pending = true;
 		}
 	}
 
-	got_siguser2 = true;
+	/* Wake up this process if it is waiting on its latch, e.g. in Gather. */
+	SetLatch(MyLatch);
+
+	errno = save_errno;
+}
+
+
+/*
+ * Build the query strings and the query plans of all nested levels, and
+ * write them into the dsm segment specified by handle.
+ *
+ * This is called from pgqp_serve_request() inside PG_TRY().
+ */
+static int
+pgqp_write_plans(dsm_handle handle, uint32 gen)
+{
+	int			nlevels = Min(nested_level, MAX_NESTED_LEVEL);
+	int			i;
+	const char *query[MAX_NESTED_LEVEL];
+	char	   *text[MAX_NESTED_LEVEL];
+	char	   *json[MAX_NESTED_LEVEL];
+	uint32		len[MAX_NESTED_LEVEL][3];
+	uint64		planid[MAX_NESTED_LEVEL];
+	Size		required = 0;
+	pgqpSegHeader *hdr;
+	int			result = RESULT_OK;
 
 	/*
-	 * Get the query plans and Write them into pgqp->qpd on the shared memory.
+	 * Check the running queryDesc and its planstate of each nested level.
+	 */
+	if (nlevels <= 0)
+		return RESULT_NO_QUERY;
+	for (i = 0; i < nlevels; i++)
+		if (qp_run_qd[i] == NULL || qp_run_qd[i]->planstate == NULL)
+			return RESULT_NO_QUERY;
+
+	/*
+	 * make_plan_string() explains qp_qd[], so point it to the running
+	 * queries.  pgqp_serve_request() restores qp_qd[] afterwards.
+	 */
+	for (i = 0; i < nlevels; i++)
+		qp_qd[i] = qp_run_qd[i];
+
+	/*
+	 * Build the strings in the current memory context (a temporary context
+	 * created by the caller of this function).
 	 */
 	pgqp_received_signal = true;
-
-	for (i = 0; i < nested_level; i++)
+	for (i = 0; i < nlevels; i++)
 	{
-		if (i < MAX_NESTED_LEVEL)
-		{
-			/*
-			 * Write the query string to pgqp->queryPlan_query[]
-			 */
-			set_query(&pgqp->qpd, i, queryId[i], true);
+		query[i] = qp_qd[i]->sourceText ? qp_qd[i]->sourceText : "";
+		len[i][PRINT_QUERY] = strlen(query[i]);
 
-			/*
-			 * Get two kinds of query plans and Set them to
-			 * pgqp->queryPlan_plan[] and pgqp->queryPlan_json[]
-			 */
-			queryDesc = qp_qd[i];
-			oldcxt = MemoryContextSwitchTo(queryDesc->estate->es_query_cxt);
-			qp_es[i] = NewExplainState();
+		qp_es[i] = NewExplainState();
 
-			set_plan(&pgqp->qpd, i, true, PRINT_PLAN);
-			set_plan(&pgqp->qpd, i, true, PRINT_PLAN_JSON);
+		make_plan_string(i, PRINT_PLAN, NULL);
+		text[i] = pnstrdup(qp_es[i]->str->data, qp_es[i]->str->len);
+		len[i][PRINT_PLAN] = qp_es[i]->str->len;
 
-			MemoryContextSwitchTo(oldcxt);
-		}
+		planid[i] = 0;
+		make_plan_string(i, PRINT_PLAN_JSON, &planid[i]);
+		json[i] = pnstrdup(qp_es[i]->str->data, qp_es[i]->str->len);
+		len[i][PRINT_PLAN_JSON] = qp_es[i]->str->len;
+
+		required += MAXALIGN(sizeof(pgqpSegEntry)
+							 + len[i][PRINT_QUERY] + 1
+							 + len[i][PRINT_PLAN] + 1
+							 + len[i][PRINT_PLAN_JSON] + 1);
 	}
-
-
-	pgqp->qpd.encoding = GetDatabaseEncoding();
-
-	/*
-	 * Set the database and user names
-	 */
-	memset((void *) pgqp->qi.database_name, '\0', sizeof(qi.database_name));
-	memset((void *) pgqp->qi.user_name, '\0', sizeof(qi.user_name));
-	memcpy((void *) pgqp->qi.database_name, qi.database_name, strlen(qi.database_name));
-	memcpy((void *) pgqp->qi.user_name, qi.user_name, strlen(qi.user_name));
-
-	PROCESS_FINISHED();
-
-final:
-
 	pgqp_received_signal = false;
 
 	/*
-	 * Set the caller's latch to wake up the caller process.
+	 * Attach the caller's segment. If it does not exist anymore, the caller
+	 * has already given up this request.
 	 */
-	if (pgqp->latch != NULL)
-		SetLatch(pgqp->latch);
+	pgqp_serving_seg = dsm_attach(handle);
+	if (pgqp_serving_seg == NULL)
+		return RESULT_ERROR;
 
-	sigprocmask(SIG_SETMASK, &UnBlockSig, NULL);
+	hdr = (pgqpSegHeader *) dsm_segment_address(pgqp_serving_seg);
+	if (hdr->magic != PGQP_SEGMENT_MAGIC || hdr->generation != gen)
+	{
+		dsm_detach(pgqp_serving_seg);
+		pgqp_serving_seg = NULL;
+		return RESULT_ERROR;
+	}
 
-	errno = save_errno;
+	hdr->encoding = GetDatabaseEncoding();
+	strlcpy(hdr->database_name, qi.database_name, NAMEDATALEN);
+	strlcpy(hdr->user_name, qi.user_name, NAMEDATALEN);
+
+	if (required > hdr->capacity)
+	{
+		/* Tell the caller the required size; it will retry. */
+		hdr->required = required;
+		hdr->nlevels = 0;
+		hdr->used = 0;
+		result = RESULT_TOO_SMALL;
+	}
+	else
+	{
+		char	   *data = PGQP_SEG_DATA(hdr);
+		Size		off = 0;
+
+		for (i = 0; i < nlevels; i++)
+		{
+			pgqpSegEntry *e = (pgqpSegEntry *) (data + off);
+			char	   *p = (char *) e + sizeof(pgqpSegEntry);
+
+			e->queryId = qp_run_qd[i]->plannedstmt->queryId;
+			e->planId = planid[i];
+			e->len[PRINT_QUERY] = len[i][PRINT_QUERY];
+			e->len[PRINT_PLAN] = len[i][PRINT_PLAN];
+			e->len[PRINT_PLAN_JSON] = len[i][PRINT_PLAN_JSON];
+
+			memcpy(p, query[i], len[i][PRINT_QUERY]);
+			p += len[i][PRINT_QUERY];
+			*p++ = '\0';
+			memcpy(p, text[i], len[i][PRINT_PLAN]);
+			p += len[i][PRINT_PLAN];
+			*p++ = '\0';
+			memcpy(p, json[i], len[i][PRINT_PLAN_JSON]);
+			p += len[i][PRINT_PLAN_JSON];
+			*p++ = '\0';
+
+			off += MAXALIGN(sizeof(pgqpSegEntry)
+							+ len[i][PRINT_QUERY] + 1
+							+ len[i][PRINT_PLAN] + 1
+							+ len[i][PRINT_PLAN_JSON] + 1);
+		}
+		hdr->nlevels = nlevels;
+		hdr->used = off;
+	}
+	hdr->result = result;
+
+	dsm_detach(pgqp_serving_seg);
+	pgqp_serving_seg = NULL;
+
+	return result;
+}
+
+
+/*
+ * Serve the pending pg_query_plan() request.
+ *
+ * This is called at a safe point, i.e. at the entry of a plan node, so any
+ * ordinary backend operation (palloc, catalog access, dsm_attach, ...) can
+ * be used here.
+ */
+static void
+pgqp_serve_request(void)
+{
+	pgqpRequestSlot *slot;
+	uint32		cur;
+	ProcNumber	caller;
+	dsm_handle	handle;
+	int			result = RESULT_ERROR;
+	MemoryContext tmpcxt;
+	MemoryContext oldcxt;
+	ExplainState *saved_es[MAX_NESTED_LEVEL];
+	QueryDesc  *saved_qd[MAX_NESTED_LEVEL];
+
+	pgqp_request_pending = false;
+
+	if (pgqp_serving_request || (slot = my_request_slot()) == NULL)
+		return;
+
+	cur = pg_atomic_read_u32(&slot->state);
+	if (PGQP_SLOT_STATE(cur) != PGQP_SLOT_PENDING)
+		return;
+	pg_read_barrier();
+	caller = slot->caller;
+	handle = slot->handle;
+
+	/* The showing query plan feature may have been disabled. */
+	if (!(enable_show_plan && pgqp_global_show_plan && pgqp_show_plan))
+	{
+		pgqp_respond(slot, cur, caller, RESULT_DISABLE);
+		return;
+	}
+
+	pgqp_serving_request = true;
+	memcpy(saved_es, qp_es, sizeof(saved_es));
+	memcpy(saved_qd, qp_qd, sizeof(saved_qd));
+
+	tmpcxt = AllocSetContextCreate(TopMemoryContext,
+								   "pg_query_plan request",
+								   ALLOCSET_DEFAULT_SIZES);
+	oldcxt = MemoryContextSwitchTo(tmpcxt);
+
+	PG_TRY();
+	{
+		result = pgqp_write_plans(handle, PGQP_SLOT_GEN(cur));
+	}
+	PG_CATCH();
+	{
+		ErrorData  *edata;
+
+		MemoryContextSwitchTo(oldcxt);
+		pgqp_received_signal = false;
+		if (pgqp_serving_seg != NULL)
+		{
+			dsm_detach(pgqp_serving_seg);
+			pgqp_serving_seg = NULL;
+		}
+		memcpy(qp_es, saved_es, sizeof(saved_es));
+		memcpy(qp_qd, saved_qd, sizeof(saved_qd));
+		pgqp_serving_request = false;
+
+		/* Tell the caller that this request failed. */
+		pgqp_respond(slot, cur, caller, RESULT_ERROR);
+
+		/*
+		 * A query cancel (including statement_timeout) must not be swallowed,
+		 * so re-throw it.  Other errors are only reported as a warning in
+		 * order not to abort the running query because of a monitoring
+		 * request.
+		 */
+		edata = CopyErrorData();
+		if (edata->sqlerrcode == ERRCODE_QUERY_CANCELED)
+		{
+			FreeErrorData(edata);
+			MemoryContextDelete(tmpcxt);
+			PG_RE_THROW();
+		}
+		FlushErrorState();
+		MemoryContextDelete(tmpcxt);
+		ereport(WARNING,
+				(errmsg("pg_query_plan: could not build the query plan: %s",
+						edata->message)));
+		FreeErrorData(edata);
+		return;
+	}
+	PG_END_TRY();
+
+	MemoryContextSwitchTo(oldcxt);
+	MemoryContextDelete(tmpcxt);
+	memcpy(qp_es, saved_es, sizeof(saved_es));
+	memcpy(qp_qd, saved_qd, sizeof(saved_qd));
+	pgqp_serving_request = false;
+
+	pgqp_respond(slot, cur, caller, result);
+}
+
+
+/*
+ * ExecProcNodeReal wrapper: the safe point to serve pg_query_plan() requests.
+ */
+static TupleTableSlot *
+pgqp_ExecProcNode(PlanState *node)
+{
+	pgqpNodeMap *map;
+
+	if (unlikely(pgqp_request_pending) && CritSectionCount == 0)
+		pgqp_serve_request();
+
+	for (map = pgqp_node_maps; map != NULL; map = map->next)
+	{
+		if (likely(map->estate == node->state))
+			return map->orig[node->plan->plan_node_id] (node);
+	}
+
+	elog(ERROR, "pg_query_plan: could not find the original ExecProcNode function");
+	return NULL;				/* keep compiler quiet */
+}
+
+
+/*
+ * Reset callback of es_query_cxt: unlink the map.
+ */
+static void
+pgqp_node_map_reset(void *arg)
+{
+	pgqpNodeMap *map = (pgqpNodeMap *) arg;
+	pgqpNodeMap **p;
+
+	for (p = &pgqp_node_maps; *p != NULL; p = &(*p)->next)
+	{
+		if (*p == map)
+		{
+			*p = map->next;
+			break;
+		}
+	}
+}
+
+
+static bool
+pgqp_max_node_id_walker(PlanState *ps, int *maxid)
+{
+	if (ps->plan != NULL && ps->plan->plan_node_id > *maxid)
+		*maxid = ps->plan->plan_node_id;
+	return planstate_tree_walker(ps, pgqp_max_node_id_walker, maxid);
+}
+
+
+static bool
+pgqp_wrap_walker(PlanState *ps, pgqpNodeMap *map)
+{
+	if (ps->plan != NULL && ps->ExecProcNodeReal != NULL
+		&& ps->ExecProcNodeReal != pgqp_ExecProcNode)
+	{
+		int			id = ps->plan->plan_node_id;
+
+		/*
+		 * Wrap the node only if its plan_node_id is valid and not used by
+		 * another node with a different function.
+		 */
+		if (id >= 0 && id < map->nnodes
+			&& (map->orig[id] == NULL || map->orig[id] == ps->ExecProcNodeReal))
+		{
+			map->orig[id] = ps->ExecProcNodeReal;
+			ps->ExecProcNodeReal = pgqp_ExecProcNode;
+		}
+	}
+	return planstate_tree_walker(ps, pgqp_wrap_walker, map);
+}
+
+
+/*
+ * Replace ExecProcNodeReal of every plan node with pgqp_ExecProcNode().
+ *
+ * ExecProcNodeFirst() and ExecProcNodeInstr() call node->ExecProcNodeReal,
+ * so replacing it after ExecInitNode() is enough to hook every invocation.
+ */
+static void
+pgqp_install_node_wrappers(QueryDesc *queryDesc)
+{
+	EState	   *estate = queryDesc->estate;
+	pgqpNodeMap *map;
+	MemoryContext oldcxt;
+	ListCell   *lc;
+	int			maxid = -1;
+
+	if (estate == NULL || queryDesc->planstate == NULL)
+		return;
+
+	pgqp_max_node_id_walker(queryDesc->planstate, &maxid);
+	foreach(lc, estate->es_subplanstates)
+	{
+		PlanState  *ps = (PlanState *) lfirst(lc);
+
+		if (ps != NULL)
+			pgqp_max_node_id_walker(ps, &maxid);
+	}
+	if (maxid < 0)
+		return;
+
+	oldcxt = MemoryContextSwitchTo(estate->es_query_cxt);
+	map = (pgqpNodeMap *) palloc0(sizeof(pgqpNodeMap));
+	map->estate = estate;
+	map->nnodes = maxid + 1;
+	map->orig = (ExecProcNodeMtd *) palloc0(sizeof(ExecProcNodeMtd) * map->nnodes);
+	map->cb.func = pgqp_node_map_reset;
+	map->cb.arg = map;
+	MemoryContextRegisterResetCallback(estate->es_query_cxt, &map->cb);
+	MemoryContextSwitchTo(oldcxt);
+
+	/* Link the map before wrapping so that wrapped nodes can always find it */
+	map->next = pgqp_node_maps;
+	pgqp_node_maps = map;
+
+	pgqp_wrap_walker(queryDesc->planstate, map);
+	foreach(lc, estate->es_subplanstates)
+	{
+		PlanState  *ps = (PlanState *) lfirst(lc);
+
+		if (ps != NULL)
+			pgqp_wrap_walker(ps, map);
+	}
 }
 
 
@@ -856,6 +1245,14 @@ pgqp_ExecutorStart(QueryDesc *queryDesc, int eflags)
 		prev_ExecutorStart(queryDesc, eflags);
 	else
 		standard_ExecutorStart(queryDesc, eflags);
+
+	/*
+	 * Install the safe point for pg_query_plan() requests into every plan
+	 * node.
+	 */
+	if ((MyBackendType == B_BACKEND || IsParallelWorker())
+		&& !(eflags & EXEC_FLAG_EXPLAIN_ONLY))
+		pgqp_install_node_wrappers(queryDesc);
 }
 
 
@@ -866,6 +1263,8 @@ static void
 pgqp_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction,
 				 uint64 count)
 {
+	if (nested_level >= 0 && nested_level < MAX_NESTED_LEVEL)
+		qp_run_qd[nested_level] = queryDesc;
 	nested_level++;
 
 #ifdef __ADAPT_WORK_MEM__
@@ -942,6 +1341,8 @@ pgqp_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction,
 static void
 pgqp_ExecutorFinish(QueryDesc *queryDesc)
 {
+	if (nested_level >= 0 && nested_level < MAX_NESTED_LEVEL)
+		qp_run_qd[nested_level] = queryDesc;
 	nested_level++;
 	PG_TRY();
 	{
@@ -1191,25 +1592,301 @@ get_planid(PG_FUNCTION_ARGS)
 
 
 /*
+ * Release the request slot held by this process, if any.
+ *
+ * The slot is reset to PGQP_SLOT_IDLE only if it still belongs to our
+ * request (i.e. the generation matches).  If the target responds at the
+ * same moment, the CAS fails and we simply retry.
+ */
+static void
+pgqp_release_held_slot(void)
+{
+	pgqpRequestSlot *slot;
+
+	if (pgqp_held_slot < 0 || pgqp == NULL)
+		return;
+
+	slot = &pgqp->slots[pgqp_held_slot];
+	for (;;)
+	{
+		uint32		cur = pg_atomic_read_u32(&slot->state);
+
+		if (PGQP_SLOT_GEN(cur) != pgqp_held_gen
+			|| PGQP_SLOT_STATE(cur) == PGQP_SLOT_IDLE)
+			break;
+		if (pg_atomic_compare_exchange_u32(&slot->state, &cur,
+										   PGQP_SLOT_MAKE(pgqp_held_gen,
+														  PGQP_SLOT_IDLE,
+														  RESULT_OK)))
+			break;
+	}
+	pgqp_held_slot = -1;
+}
+
+
+static void
+pgqp_caller_exit(int code, Datum arg)
+{
+	pgqp_release_held_slot();
+}
+
+
+/*
+ * Try to claim the request slot.  Returns true and sets *gen on success.
+ *
+ * A slot that is not idle is normally in use by another caller.  However,
+ * if the caller that owns the slot has exited without releasing it, the
+ * slot is taken over.
+ */
+static bool
+pgqp_claim_slot(pgqpRequestSlot *slot, uint32 *gen)
+{
+	uint32		cur = pg_atomic_read_u32(&slot->state);
+
+	for (;;)
+	{
+		uint32		newval;
+
+		if (PGQP_SLOT_STATE(cur) != PGQP_SLOT_IDLE)
+		{
+			pid_t		owner;
+
+			/*
+			 * caller_pid is fixed before the slot becomes PENDING, so check
+			 * it only in PENDING or DONE.
+			 */
+			if (PGQP_SLOT_STATE(cur) == PGQP_SLOT_CLAIMED)
+				return false;
+			pg_read_barrier();
+			owner = slot->caller_pid;
+			if (owner == InvalidPid || is_alive(owner))
+				return false;
+		}
+
+		newval = PGQP_SLOT_MAKE(PGQP_NEXT_GEN(PGQP_SLOT_GEN(cur)),
+								PGQP_SLOT_CLAIMED, RESULT_OK);
+		if (pg_atomic_compare_exchange_u32(&slot->state, &cur, newval))
+		{
+			*gen = PGQP_SLOT_GEN(newval);
+			return true;
+		}
+		/* cur has been updated by the CAS; check again */
+	}
+}
+
+
+/*
+ * Wait for the target's response, at most PGQP_REQUEST_TIMEOUT_MS.
+ *
+ * Returns the result (qpResultState) set by the target, PGQP_REQ_TIMEOUT
+ * or PGQP_REQ_GONE.
+ */
+static int
+pgqp_wait_response(pgqpRequestSlot *slot, uint32 gen, PGPROC *proc, pid_t pid)
+{
+	TimestampTz start = GetCurrentTimestamp();
+
+	for (;;)
+	{
+		uint32		cur = pg_atomic_read_u32(&slot->state);
+
+		if (PGQP_SLOT_GEN(cur) != gen)
+			return RESULT_ERROR;	/* should not happen */
+		if (PGQP_SLOT_STATE(cur) == PGQP_SLOT_DONE)
+		{
+			pg_read_barrier();
+			return PGQP_SLOT_RESULT(cur);
+		}
+
+		if (proc->pid != pid)
+			return PGQP_REQ_GONE;
+
+		if (TimestampDifferenceExceeds(start, GetCurrentTimestamp(),
+									   PGQP_REQUEST_TIMEOUT_MS))
+			return PGQP_REQ_TIMEOUT;
+
+		(void) WaitLatch(MyLatch,
+						 WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+						 PGQP_WAIT_INTERVAL_MS, PG_WAIT_EXTENSION);
+		ResetLatch(MyLatch);
+		CHECK_FOR_INTERRUPTS();
+	}
+}
+
+
+/*
+ * Sleep for the busy retry interval.
+ */
+static void
+pgqp_sleep_for_retry(void)
+{
+	(void) WaitLatch(MyLatch,
+					 WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+					 PGQP_BUSY_RETRY_INTERVAL_MS, PG_WAIT_EXTENSION);
+	ResetLatch(MyLatch);
+	CHECK_FOR_INTERRUPTS();
+}
+
+
+/*
+ * Request the query plans of the process (procno, pid).
+ *
+ * On RESULT_OK, *segp is the attached dsm segment that contains the plans;
+ * the caller must detach it.  Otherwise, returns another qpResultState or
+ * one of PGQP_REQ_XXX.
+ *
+ * Retries at most PGQP_REQUEST_MAX_RETRY times in total when the slot is
+ * busy or the segment is too small.
+ */
+static int
+pgqp_request_plans(ProcNumber procno, pid_t pid, dsm_segment **segp)
+{
+	pgqpRequestSlot *slot = &pgqp->slots[procno];
+	PGPROC	   *proc = GetPGProcByNumber(procno);
+	Size		capacity = PGQP_INITIAL_SEGMENT_SIZE;
+	int			retry = 0;
+
+	*segp = NULL;
+
+	if (!pgqp_exit_callback_registered)
+	{
+		before_shmem_exit(pgqp_caller_exit, (Datum) 0);
+		pgqp_exit_callback_registered = true;
+	}
+
+	for (;;)
+	{
+		dsm_segment *seg;
+		pgqpSegHeader *hdr;
+		uint32		gen;
+		int			result;
+
+		CHECK_FOR_INTERRUPTS();
+
+		if (proc->pid != pid)
+			return PGQP_REQ_GONE;
+
+		/*
+		 * Create the segment for this request.  It is owned by this process
+		 * (via CurrentResourceOwner), so it is destroyed automatically on
+		 * error, and when both this process and the target have detached.
+		 */
+		seg = dsm_create(add_size(MAXALIGN(sizeof(pgqpSegHeader)), capacity), 0);
+		hdr = (pgqpSegHeader *) dsm_segment_address(seg);
+		memset(hdr, 0, sizeof(pgqpSegHeader));
+		hdr->magic = PGQP_SEGMENT_MAGIC;
+		hdr->capacity = capacity;
+		hdr->result = RESULT_ERROR;
+
+		if (!pgqp_claim_slot(slot, &gen))
+		{
+			dsm_detach(seg);
+			if (++retry > PGQP_REQUEST_MAX_RETRY)
+				return PGQP_REQ_BUSY;
+			pgqp_sleep_for_retry();
+			continue;
+		}
+		pgqp_held_slot = procno;
+		pgqp_held_gen = gen;
+
+		PG_TRY();
+		{
+			hdr->generation = gen;
+			slot->caller = MyProcNumber;
+			slot->caller_pid = MyProcPid;
+			slot->handle = dsm_segment_handle(seg);
+
+			/* Publish the request; the exchange is a full memory barrier. */
+			(void) pg_atomic_exchange_u32(&slot->state,
+										  PGQP_SLOT_MAKE(gen, PGQP_SLOT_PENDING,
+														 RESULT_OK));
+
+			if (proc->pid != pid || kill(pid, SIGUSR2) < 0)
+				result = PGQP_REQ_GONE;
+			else
+				result = pgqp_wait_response(slot, gen, proc, pid);
+		}
+		PG_CATCH();
+		{
+			pgqp_release_held_slot();
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+
+		pgqp_release_held_slot();
+
+		if (result == RESULT_TOO_SMALL)
+		{
+			/* Retry with the size that the target requires. */
+			capacity = Max(hdr->required, capacity);
+			dsm_detach(seg);
+			if (++retry > PGQP_REQUEST_MAX_RETRY)
+				return RESULT_TOO_SMALL;
+			continue;
+		}
+
+		if (result == RESULT_OK && hdr->result == RESULT_OK
+			&& hdr->generation == gen)
+		{
+			*segp = seg;
+			return RESULT_OK;
+		}
+
+		dsm_detach(seg);
+		return (result == RESULT_OK) ? RESULT_ERROR : result;
+	}
+}
+
+
+/*
+ * Convert a string in the segment to a text datum in the database encoding.
+ */
+static Datum
+pgqp_text_datum(const char *str, uint32 len, int encoding, bool *isnull)
+{
+	char	   *converted;
+
+	if (len == 0)
+	{
+		*isnull = true;
+		return (Datum) 0;
+	}
+
+	*isnull = false;
+	converted = (char *) pg_do_encoding_conversion((unsigned char *) str, len,
+												   encoding,
+												   GetDatabaseEncoding());
+	if (converted == str)
+		return PointerGetDatum(cstring_to_text_with_len(str, len));
+	return PointerGetDatum(cstring_to_text(converted));
+}
+
+
+/*
  * pg_query_plan function returns the specified process's query plan.
  *
  * Processing outline:
- * When this function is invoked on the backend process by a caller, the
- * process sets MyLatch to the pgqpSharedState on shared-memory and sends a
- * SIGUSR2 signal to the specified process (target process).
- * After sending the signal, the caller's backend waits till the end of
- * the target process' signal handler job.
  *
- * When receiving SIGUSR2, the target process switches to run the signal
- * handler function sig_get_query_plan(). The handler function gathers
- * all instruments data and writes them to the pgqpSharedState on shared-memory.
- * After writing all, the target process executes the SetLatch() function to
- * wake the caller's backend up and resumes the process that was going
- * on before the signal was received.
+ * Caller (the process that invokes this function):
+ *  1. Creates a dsm segment for the request.
+ *  2. Claims the request slot of the target, which is indexed by the
+ *     target's ProcNumber, writes the segment handle into it, makes it
+ *     PENDING and sends SIGUSR2 to the target.
+ *  3. Waits on its latch until the slot becomes DONE, at most
+ *     PGQP_REQUEST_TIMEOUT_MS.
+ *  4. Reads the query plans from the segment and returns them.
  *
- * When the caller's backend wakes up by receiving the latch, the backend process
- * reads the target process's query plan on the pgqpSharedState and displays it.
+ * Target:
+ *  1. The signal handler only sets a flag (or responds immediately if no
+ *     query is running or the feature is disabled).
+ *  2. At the next invocation of any plan node, pgqp_ExecProcNode() builds
+ *     the query plans, attaches the segment, writes them, detaches it, makes
+ *     the slot DONE and sets the caller's latch.
  *
+ * Unlike the former implementation, no global lock is held while waiting,
+ * so requests to different processes can run concurrently.  When the slot
+ * of the target is busy (another caller is requesting it), the request is
+ * retried at most PGQP_REQUEST_MAX_RETRY times.
  */
 Datum
 pg_query_plan(PG_FUNCTION_ARGS)
@@ -1226,6 +1903,9 @@ pg_query_plan(PG_FUNCTION_ARGS)
 	bool		_exist = false;
 	bool		has_data = false;
 	bool		is_enabled = true;
+	bool		warned = false;		/* a warning about a failed request has
+									 * been emitted */
+	bool		leader_gone = false;	/* the target exited while waiting */
 
 	if (pid == MyProcPid)
 		elog(ERROR, "This function cannot be run against itself.");
@@ -1258,6 +1938,20 @@ pg_query_plan(PG_FUNCTION_ARGS)
 	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
 		elog(ERROR, "return type must be a row type");
 
+	/*
+	 * The function must be defined with the 10 output columns.  An old
+	 * definition without planid would silently shift the columns (e.g. the
+	 * plan column would show the planid), so reject it.
+	 */
+#define PG_QUERY_PLAN_NUM_COLS 10
+	if (tupdesc->natts != PG_QUERY_PLAN_NUM_COLS)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
+				 errmsg("the definition of pg_query_plan() is outdated: it returns %d columns, but %d are expected",
+						tupdesc->natts, PG_QUERY_PLAN_NUM_COLS),
+				 errhint("Recreate the function with pg_query_plan--1.0.sql, which has the planid column.")));
+#undef PG_QUERY_PLAN_NUM_COLS
+
 	tupstore = tuplestore_begin_heap(true, false, work_mem);
 	rsinfo->returnMode = SFRM_Materialize;
 	rsinfo->setResult = tupstore;
@@ -1267,6 +1961,9 @@ pg_query_plan(PG_FUNCTION_ARGS)
 
 	/*
 	 * Main loop
+	 *
+	 * Note: The local backend status array is indexed from 1 to
+	 * num_backends; its entries are not indexed by ProcNumber.
 	 */
 	num_backends = pgstat_fetch_stat_numbackends();
 
@@ -1277,15 +1974,24 @@ pg_query_plan(PG_FUNCTION_ARGS)
 								 * plan_json */
 		Datum		values[PG_QUERY_PLAN_COLS];
 		bool		nulls[PG_QUERY_PLAN_COLS];
-		PgBackendStatus *beentry = NULL;
+		LocalPgBackendStatus *local_beentry;
+		PgBackendStatus *beentry;
+		ProcNumber	procno;
 		bool		parallel_worker;
+		dsm_segment *seg;
+		int			result;
 #undef PG_QUERY_PLAN_COLS
-		beentry = pgstat_get_beentry_by_proc_number(curr_backend);
-
-		if (beentry == NULL)
+		local_beentry = pgstat_get_local_beentry_by_index(curr_backend);
+		if (local_beentry == NULL)
 			continue;
+		beentry = &local_beentry->backendStatus;
+		procno = local_beentry->proc_number;
 
 		parallel_worker = is_parallel_worker(pid, beentry);
+
+		/* Only the target process and its parallel workers are processed. */
+		if (pid != beentry->st_procpid && !parallel_worker)
+			continue;
 
 		if (pid == beentry->st_procpid)
 			_exist = true;
@@ -1293,99 +1999,97 @@ pg_query_plan(PG_FUNCTION_ARGS)
 		if (!is_member_of_role(GetUserId(), beentry->st_userid))
 			elog(ERROR, "You do not have privileges to show the %d's query plan.", pid);
 
-		if ((pid == beentry->st_procpid || parallel_worker)
-			&& beentry->st_state == STATE_RUNNING
-			&& (beentry->st_backendType == B_BACKEND || beentry->st_backendType == B_BG_WORKER)
-			&& (GetCurrentTimestamp() - beentry->st_activity_start_timestamp > 1 * 1000000 /* 1[sec] */ ))
+		if (!(beentry->st_state == STATE_RUNNING
+			  && (beentry->st_backendType == B_BACKEND || beentry->st_backendType == B_BG_WORKER)
+			  && (GetCurrentTimestamp() - beentry->st_activity_start_timestamp > 1 * 1000000 /* 1[sec] */ )))
+			continue;
+
+		if (procno == INVALID_PROC_NUMBER || procno >= MaxBackends)
+			continue;
+
+		/*
+		 * Request the query plans of this process.
+		 */
+		result = pgqp_request_plans(procno, beentry->st_procpid, &seg);
+
+		switch (result)
 		{
-			int			j;
-
-			LWLockAcquire(pgqp->lock, LW_EXCLUSIVE);
-
-			/* Initialize pgqp. */
-			init_pgqp(&pgqp->qpd, &pgqp->qi);
-
-			/* Set MyLatch. */
-			pgqp->latch = MyLatch;
-
-			/* Set values to pgqp. */
-			pgqp->callerPID = MyProcPid;
-			pgqp->targetPID = pid;
-
-			/* Send a signal to invoke the target's signal handler function. */
-			kill(beentry->st_procpid, SIGUSR2);
-
-			/* Wait for finishing of the target' signal handler processing. */
-			while (true)
-			{
-				int			rc;
-
-				/* Check the process is still alive. */
-				if (!is_alive(beentry->st_procpid))
-					goto next;
-
-				rc = WaitLatch(pgqp->latch,
-							   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
-							   100L, PG_WAIT_EXTENSION);
-				ResetLatch(pgqp->latch);
-
-				/* Emergency bailout if postmaster has died. */
-				if (rc & WL_POSTMASTER_DEATH)
-					proc_exit(1);
-
-				/* Break this loop if the target's signal handler is finished. */
-				SpinLockAcquire(&pgqp->elock);
-				if (pgqp->finished == true)
-				{
-					SpinLockRelease(&pgqp->elock);
-					break;
-				}
-				SpinLockRelease(&pgqp->elock);
-			}					/* end while loop */
-
-			/* Check the result state */
-			if (pgqp->resultState == RESULT_DISABLE)
-			{
+			case RESULT_OK:
+				break;
+			case RESULT_DISABLE:
 				/* The showing query plan feature is disabled */
 				is_enabled = false;
-				goto next;
-			}
-			else if (pgqp->resultState == RESULT_NO_QUERY)
-			{
-				has_data = false;
-				goto next;
-			}
+				continue;
+			case RESULT_NO_QUERY:
+				continue;
+			case PGQP_REQ_GONE:
+				/* A parallel worker that has finished is simply skipped. */
+				if (!parallel_worker)
+					leader_gone = true;
+				continue;
+			case PGQP_REQ_BUSY:
+				elog(ERROR, "The process (pid=%d) is busy with another pg_query_plan request; gave up after %d retries.",
+					 beentry->st_procpid, PGQP_REQUEST_MAX_RETRY);
+				break;
+			case PGQP_REQ_TIMEOUT:
+				elog(WARNING, "The process (pid=%d) did not respond within %d [msec].",
+					 beentry->st_procpid, PGQP_REQUEST_TIMEOUT_MS);
+				warned = true;
+				continue;
+			case RESULT_TOO_SMALL:
+				elog(WARNING, "Could not get the query plan of the process (pid=%d): the plan kept growing after %d retries.",
+					 beentry->st_procpid, PGQP_REQUEST_MAX_RETRY);
+				warned = true;
+				continue;
+			default:
+				elog(WARNING, "Could not get the query plan of the process (pid=%d).",
+					 beentry->st_procpid);
+				warned = true;
+				continue;
+		}
 
-			/*
-			 * Read the query plan data from pgqp->qpd
-			 */
-			Assert(pgqp->finished == true);
-			if (pid != pgqp->targetPID || MyProcPid != pgqp->callerPID)
-			{
-				elog(ERROR, "Could not get the requested data.");
-				return (Datum) 0;
-			}
+		/*
+		 * Read the query plan data from the segment
+		 */
+		{
+			pgqpSegHeader *hdr = (pgqpSegHeader *) dsm_segment_address(seg);
+			char	   *data = PGQP_SEG_DATA(hdr);
+			Size		off = 0;
+			int			j;
 
-			if (pgqp->qpd.totalLen[PRINT_PLAN] > 0 || pgqp->qpd.totalLen[PRINT_PLAN_JSON] > 0)
-				has_data |= true;
-
-			for (j = 0; j <= pgqp->qpd.nested_level[PRINT_PLAN]; j++)
-				/* The values of all nested_level[] are equal. */
+			for (j = 0; j < hdr->nlevels; j++)
 			{
+				pgqpSegEntry *e = (pgqpSegEntry *) (data + off);
+				char	   *q;
+				char	   *t;
+				char	   *js;
+				Size		entry_size;
 				int			k = 0;
-				bool		is_null;
-				char		queryid[32];
-				char		planid[32];
+				char		buf[32];
 
-				/* Set values */
+				entry_size = MAXALIGN(sizeof(pgqpSegEntry)
+									  + (Size) e->len[PRINT_QUERY] + 1
+									  + (Size) e->len[PRINT_PLAN] + 1
+									  + (Size) e->len[PRINT_PLAN_JSON] + 1);
+				if (off + entry_size > hdr->used || hdr->used > hdr->capacity)
+				{
+					elog(WARNING, "Broken query plan data from the process (pid=%d).",
+						 beentry->st_procpid);
+					break;
+				}
+				q = (char *) e + sizeof(pgqpSegEntry);
+				t = q + e->len[PRINT_QUERY] + 1;
+				js = t + e->len[PRINT_PLAN] + 1;
+				off += entry_size;
+
 				memset(values, 0, sizeof(values));
 				memset(nulls, 0, sizeof(nulls));
 
 				/* pid */
-				values[k++] = ObjectIdGetDatum(beentry->st_procpid);
+				values[k++] = Int32GetDatum(beentry->st_procpid);
 
 				/* database */
-				values[k++] = CStringGetTextDatum(pgqp->qi.database_name);
+				values[k++] = CStringGetTextDatum(hdr->database_name);
 
 				/* worker_type */
 				if (parallel_worker)
@@ -1394,11 +2098,11 @@ pg_query_plan(PG_FUNCTION_ARGS)
 					values[k++] = CStringGetTextDatum("leader");
 
 				/* nested_level */
-				values[k++] = ObjectIdGetDatum(j);
+				values[k++] = Int32GetDatum(j);
 
 				/* queryid */
-				sprintf(queryid, "%llu", pgqp->qpd.queryId[j]);
-				values[k++] = CStringGetTextDatum(queryid);
+				snprintf(buf, sizeof(buf), UINT64_FORMAT, e->queryId);
+				values[k++] = CStringGetTextDatum(buf);
 
 				/* start time */
 				if (beentry->st_activity_start_timestamp != 0)
@@ -1407,30 +2111,27 @@ pg_query_plan(PG_FUNCTION_ARGS)
 					nulls[k++] = true;
 
 				/* query */
-				values[k] = CStringGetTextDatum(get_query_plan(&pgqp->qpd, PRINT_QUERY, &is_null, j));
-				nulls[k++] = is_null;
+				values[k] = pgqp_text_datum(q, e->len[PRINT_QUERY], hdr->encoding, &nulls[k]);
+				k++;
 
 				/* planid */
-				sprintf(planid, "%llu", pgqp->qpd.planId[j]);
-				values[k++] = CStringGetTextDatum(planid);
+				snprintf(buf, sizeof(buf), UINT64_FORMAT, e->planId);
+				values[k++] = CStringGetTextDatum(buf);
 
 				/* query plan in text */
-				values[k] = CStringGetTextDatum(get_query_plan(&pgqp->qpd, PRINT_PLAN, &is_null, j));
-				nulls[k++] = is_null;
+				values[k] = pgqp_text_datum(t, e->len[PRINT_PLAN], hdr->encoding, &nulls[k]);
+				k++;
 
 				/* query plan in json */
-				values[k] = CStringGetTextDatum(get_query_plan(&pgqp->qpd, PRINT_PLAN_JSON, &is_null, j));
-				nulls[k++] = is_null;
+				values[k] = pgqp_text_datum(js, e->len[PRINT_PLAN_JSON], hdr->encoding, &nulls[k]);
+				k++;
 
 				tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+				has_data = true;
+			}
+		}
 
-			}					/* end for loop */
-
-	next:
-			/* Release the exclusive lock */
-			LWLockRelease(pgqp->lock);
-
-		}						/* end if */
+		dsm_detach(seg);
 	}							/* end for loop */
 
 	if (!_exist)
@@ -1439,8 +2140,17 @@ pg_query_plan(PG_FUNCTION_ARGS)
 	if (!is_enabled)
 		elog(ERROR, "The showing query plan feature is disabled in the process (pid=%d).", pid);
 
-	if (!has_data)
-		elog(INFO, "The process (pid=%d) is in idle state.", pid);
+	/*
+	 * Report why no data is returned.  If a warning has already explained
+	 * the failure (e.g. timeout), the process is not idle, so say nothing.
+	 */
+	if (!has_data && !warned)
+	{
+		if (leader_gone)
+			elog(INFO, "The process (pid=%d) exited before responding.", pid);
+		else
+			elog(INFO, "The process (pid=%d) is in idle state.", pid);
+	}
 
 	return (Datum) 0;
 }

@@ -18,6 +18,8 @@ extern void set_query(struct queryPlanData *qpd, const int nested_level,
 					  const uint64 queryId, const bool nested);
 extern void set_plan(struct queryPlanData *qpd, const int nested_level,
 					 const bool nested, const PrintFormat format);
+extern void make_plan_string(const int nested_level, const PrintFormat format,
+							 uint64 *planid);
 extern char *get_query_plan(struct queryPlanData *qpd, const PrintFormat format,
 							bool *is_null, const int nested_level);
 extern void init_qpd(struct queryPlanData *qpd);
