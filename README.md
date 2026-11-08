@@ -1,6 +1,8 @@
 pg_plan_inspector
 =================
 
+**This product will undergo significant changes in the near future. [pg_query_plan](https://github.com/s-hironobu/pg_query_plan) has already been spun off as a separate product.**
+
 `pg_plan_inspector` is being developed as a framework to monitor and improve the performance of PostgreSQL using Machine Learning methods.
 
 One movie is worth a thousand words.
