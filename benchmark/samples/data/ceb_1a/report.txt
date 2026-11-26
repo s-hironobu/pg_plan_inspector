@@ -1,0 +1,26 @@
+== 1. IMDb data (schema imdb, from benchmark/lib/imdb.py)
+   schema imdb: the 7 tables of CEB 1a, about 57,835,996 rows
+== 2. capture train.sql (500 queries) with PostgreSQL alone, collect
+   1541s; dataset: {'plans': 500, 'nodes': 9826, 'requests': 0, 'stats': 7}
+== 3. fit feedback, matcomp, hres, litecard, nngp, grasp
+   feedback                              1.6s
+   matcomp                             141.1s
+   hres                                  0.9s
+   litecard                              7.2s
+   nngp                                  6.1s
+   grasp:epochs=100,restarts=1         420.0s
+== 4. run test.sql (160 queries: 100 A, 60 B) x 7 x 3 run(s), timeout 60s
+   run 1/3 done (4166s)
+   run 2/3 done (7919s)
+   run 3/3 done (11675s)
+== 5. results
+   execution time: sum over the queries of the median of 3 run(s), ms; 'changed' = queries whose plan differs from PostgreSQL's; 'timeouts' = runs canceled at 60s or failed (counted as 60s)
+   estimator         A ms  vs pg      B ms  vs pg    all ms  vs pg  changed timeouts  q-error median      p90
+   hres            242556   0.87    112885   0.96    355441   0.89      132        0            1.84     54.9
+   feedback        245014   0.88    112659   0.96    357674   0.90      132        0            1.72     28.8
+   postgres        279479   1.00    117840   1.00    397319   1.00        0        0           10.39   1574.5
+   nngp            274543   0.98    159028   1.35    433571   1.09      160        0            2.00     25.9
+   litecard        339185   1.21    141306   1.20    480491   1.21      160        0            1.84    315.5
+   matcomp         341881   1.22    161066   1.37    502946   1.27      160        0            1.55     26.1
+   grasp           493169   1.76    671227   5.70   1164396   2.93      160        3            1.75     27.9
+   per query: /home/vagrant/works/pgpi/benchmark/data/ceb_1a/per_query.tsv

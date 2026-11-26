@@ -1,0 +1,15 @@
+nngp: fitted on stats-train, scored on stats-nngp; each node asked alone; q-error of the answer and of PostgreSQL's estimate on the same nodes
+
+point       source                n  share      gmean   median       p90   | postgres    gmean   median       p90
+base        nngp                468   100%       1.93     1.34       5.2   |              1.07     1.00       1.0
+join2       abstain               9     3%       5.27     5.67      15.4   |              5.27     5.67      15.4
+join2       nngp                279    97%       5.32     2.92      40.4   |              2.92     1.95      13.4
+join3       abstain              15     7%       2.54     1.54       9.2   |              2.54     1.54       9.2
+join3       nngp                210    93%       7.73     4.42      81.2   |              6.55     4.84      36.6
+join4       abstain              30    19%      17.95    14.80      68.9   |             17.95    14.80      68.9
+join4       nngp                126    81%       8.44     3.28     299.3   |             18.24    12.92    1159.9
+join5       abstain               6     9%     298.20   356.34     551.4   |            298.20   356.34     551.4
+join5       nngp                 60    91%      19.94    11.06     332.6   |             37.73    16.17    7729.3
+join6       abstain              12    40%       7.64    12.12      29.7   |              7.64    12.12      29.7
+join6       nngp                 18    60%       5.91     4.72      30.0   |              8.48     8.64      42.5
+param_base  abstain             345   100%       2.09     1.84       5.9   |              2.09     1.84       5.9

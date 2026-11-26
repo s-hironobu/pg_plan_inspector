@@ -1,0 +1,156 @@
+ceb-grasp against ceb-postgres: 160 queries, total 1164396 ms against 397319 ms (2.93); 111 queries at least 100 ms slower, together 831241 ms of the difference
+
+== 1. +59094 ms: 60000 ms against 906 ms (66.2x), a different plan (canceled, counted 60000 ms)
+   SELECT COUNT(*) FROM title as t, kind_type as kt, info_type as it1, movie_info as mi1, movie_info as mi2, info_type as it2, cast_info as ci, role_type as rt, name as n WHERE t.id = ci.movie_id AND t.id = mi1.movie_id AND t.id = mi2.movie_id AND mi1.movie_id = mi2.movie_id AND mi1.info_type_id = it1.
+   plan with ceb-grasp (seqid 6505):
+      Aggregate
+        Nested Loop [imdb.cast_info imdb.info_type imdb.info_type imdb.kind_type imdb.movie_info imdb.movie_info imdb.name imdb.role_type imdb.title]  est 5731  actual 20  q 287^ (stopped early)
+          Index Only Scan [imdb.info_type]  est 1  actual 1 (stopped early)
+          Nested Loop [imdb.cast_info imdb.info_type imdb.kind_type imdb.movie_info imdb.movie_info imdb.name imdb.role_type imdb.title]  est 5425  actual 20  q 271^ (stopped early)
+            Index Only Scan [imdb.info_type]  est 1  actual 1 (stopped early)
+            Nested Loop [imdb.cast_info imdb.kind_type imdb.movie_info imdb.movie_info imdb.name imdb.role_type imdb.title]  est 5953  actual 20  q 298^ (stopped early)
+              Nested Loop [imdb.cast_info imdb.kind_type imdb.movie_info imdb.name imdb.role_type imdb.title]  est 2086  actual 39238  q 19v (stopped early)
+                Nested Loop [imdb.cast_info imdb.kind_type imdb.name imdb.role_type imdb.title]  est 3491  actual 6.47e+06  q 1854v (stopped early)
+                  Hash Join [imdb.cast_info imdb.kind_type imdb.role_type imdb.title]  est 8618  actual 6.48e+06  q 752v (stopped early)
+                    Nested Loop [imdb.cast_info imdb.kind_type imdb.title]  est 562322  actual 1.97e+07  q 35v (stopped early)
+                      Hash Join [imdb.kind_type imdb.title]  est 29536  actual 1.36e+06  q 46v (stopped early)
+                        Seq Scan [imdb.title]  est 477654  actual 1.56e+06  q 3v (stopped early)
+                        Hash
+                          Seq Scan [imdb.kind_type]  est 3  actual 5
+                      Index Scan [imdb.cast_info]  est 19  actual 15 x1.35655e+06 (stopped early)
+                    Hash
+                      Seq Scan [imdb.role_type]  est 2  actual 2
+                  Index Scan [imdb.name]  est 1  actual 1 x6.48008e+06 (stopped early)
+                Index Scan [imdb.movie_info]  est 1  actual 0 x6.47346e+06 (stopped early)
+              Index Scan [imdb.movie_info]  est 1  actual 0 x39238
+   plan with ceb-postgres (seqid 8746):
+      Aggregate
+        Nested Loop [imdb.cast_info imdb.info_type imdb.info_type imdb.kind_type imdb.movie_info imdb.movie_info imdb.name imdb.role_type imdb.title]  est 1  actual 304  q 304v
+          Nested Loop [imdb.cast_info imdb.info_type imdb.info_type imdb.kind_type imdb.movie_info imdb.movie_info imdb.role_type imdb.title]  est 2  actual 304  q 152v
+            Nested Loop [imdb.cast_info imdb.info_type imdb.info_type imdb.kind_type imdb.movie_info imdb.movie_info imdb.title]  est 14  actual 678  q 48v
+              Nested Loop [imdb.info_type imdb.info_type imdb.kind_type imdb.movie_info imdb.movie_info imdb.title]  est 1  actual 8  q 8v
+                Nested Loop [imdb.info_type imdb.kind_type imdb.movie_info imdb.movie_info imdb.title]  est 1  actual 8  q 8v
+                  Nested Loop [imdb.kind_type imdb.movie_info imdb.movie_info imdb.title]  est 1  actual 8  q 8v
+                    Nested Loop [imdb.kind_type imdb.movie_info imdb.title]  est 754  actual 6941  q 9v
+                      Nested Loop [imdb.movie_info imdb.title]  est 1056  actual 16163  q 15v
+                        Seq Scan [imdb.movie_info]  est 1515  actual 19623  q 13v
+                        Index Scan [imdb.title]  est 1  actual 1 x19623 (stopped early)
+                      Materialize
+                        Seq Scan [imdb.kind_type]  est 5  actual 5
+                    Index Scan [imdb.movie_info]  est 1  actual 0 x6941
+                  Index Only Scan [imdb.info_type]  est 1  actual 1 x8
+                Index Only Scan [imdb.info_type]  est 1  actual 1 x8
+              Index Scan [imdb.cast_info]  est 37  actual 85 x8  q 2v
+            Materialize
+              Seq Scan [imdb.role_type]  est 2  actual 2
+          Index Scan [imdb.name]  est 1  actual 1 x304 (stopped early)
+   worst estimates with ceb-grasp:
+      q    1854.3 under Nested Loop [imdb.cast_info imdb.kind_type imdb.name imdb.role_type imdb.title]  est 3491  actual 6.47e+06
+      q     751.9 under Hash Join [imdb.cast_info imdb.kind_type imdb.role_type imdb.title]  est 8618  actual 6.48e+06
+      q     297.6 over  Nested Loop [imdb.cast_info imdb.kind_type imdb.movie_info imdb.movie_info imdb.name imdb.role_type imdb.title]  est 5953  actual 20
+      q     286.6 over  Nested Loop [imdb.cast_info imdb.info_type imdb.info_type imdb.kind_type imdb.movie_info imdb.movie_info imdb.name imdb.role_type imdb.title]  est 5731  actual 20
+      q     271.2 over  Nested Loop [imdb.cast_info imdb.info_type imdb.kind_type imdb.movie_info imdb.movie_info imdb.name imdb.role_type imdb.title]  est 5425  actual 20
+
+== 2. +49549 ms: 50359 ms against 809 ms (62.2x), a different plan
+   SELECT COUNT(*) FROM title as t, kind_type as kt, info_type as it1, movie_info as mi1, movie_info as mi2, info_type as it2, cast_info as ci, role_type as rt, name as n WHERE t.id = ci.movie_id AND t.id = mi1.movie_id AND t.id = mi2.movie_id AND mi1.movie_id = mi2.movie_id AND mi1.info_type_id = it1.
+   plan with ceb-grasp (seqid 7572):
+      Aggregate
+        Nested Loop [imdb.cast_info imdb.info_type imdb.info_type imdb.kind_type imdb.movie_info imdb.movie_info imdb.name imdb.role_type imdb.title]  est 2404  actual 1669
+          Index Only Scan [imdb.info_type]  est 1  actual 1
+          Nested Loop [imdb.cast_info imdb.info_type imdb.kind_type imdb.movie_info imdb.movie_info imdb.name imdb.role_type imdb.title]  est 2468  actual 1669
+            Nested Loop [imdb.cast_info imdb.info_type imdb.kind_type imdb.movie_info imdb.name imdb.role_type imdb.title]  est 2741  actual 3063
+              Index Only Scan [imdb.info_type]  est 1  actual 1
+              Nested Loop [imdb.cast_info imdb.kind_type imdb.movie_info imdb.name imdb.role_type imdb.title]  est 2785  actual 3063
+                Hash Join [imdb.cast_info imdb.kind_type imdb.name imdb.role_type imdb.title]  est 25222  actual 5.45e+06  q 216v
+                  Hash Join [imdb.cast_info imdb.kind_type imdb.name imdb.title]  est 33337  actual 5.93e+06  q 178v
+                    Nested Loop [imdb.cast_info imdb.kind_type imdb.title]  est 758888  actual 2.35e+07  q 31v
+                      Hash Join [imdb.kind_type imdb.title]  est 39861  actual 1.61e+06  q 40v
+                        Seq Scan [imdb.title]  est 644622  actual 2.02e+06  q 3v
+                        Hash
+                          Seq Scan [imdb.kind_type]  est 3  actual 5
+                      Index Scan [imdb.cast_info]  est 19  actual 15 x1.6106e+06
+                    Hash
+                      Seq Scan [imdb.name]  est 3127  actual 961555  q 308v
+                  Hash
+                    Seq Scan [imdb.role_type]  est 2  actual 4  q 2v
+                Index Scan [imdb.movie_info]  est 1  actual 0 x5.44548e+06
+            Index Scan [imdb.movie_info]  est 1  actual 1 x3063
+   plan with ceb-postgres (seqid 6455):
+      Aggregate
+        Nested Loop [imdb.cast_info imdb.info_type imdb.info_type imdb.kind_type imdb.movie_info imdb.movie_info imdb.name imdb.role_type imdb.title]  est 1  actual 1669  q 1669v
+          Nested Loop [imdb.cast_info imdb.info_type imdb.info_type imdb.kind_type imdb.movie_info imdb.movie_info imdb.role_type imdb.title]  est 5  actual 5518  q 1104v
+            Nested Loop [imdb.cast_info imdb.info_type imdb.info_type imdb.kind_type imdb.movie_info imdb.movie_info imdb.title]  est 14  actual 8481  q 606v
+              Nested Loop [imdb.info_type imdb.info_type imdb.kind_type imdb.movie_info imdb.movie_info imdb.title]  est 1  actual 237  q 237v
+                Nested Loop [imdb.info_type imdb.kind_type imdb.movie_info imdb.movie_info imdb.title]  est 1  actual 237  q 237v
+                  Nested Loop [imdb.kind_type imdb.movie_info imdb.movie_info imdb.title]  est 1  actual 237  q 237v
+                    Nested Loop [imdb.kind_type imdb.movie_info imdb.title]  est 5  actual 575  q 115v
+                      Nested Loop [imdb.movie_info imdb.title]  est 7  actual 575  q 82v
+                        Seq Scan [imdb.movie_info]  est 9  actual 1323  q 147v
+                        Index Scan [imdb.title]  est 1  actual 0 x1323 (stopped early)
+                      Materialize
+                        Seq Scan [imdb.kind_type]  est 5  actual 5 (stopped early)
+                    Index Scan [imdb.movie_info]  est 1  actual 0 x575
+                  Index Only Scan [imdb.info_type]  est 1  actual 1 x237
+                Index Only Scan [imdb.info_type]  est 1  actual 1 x237
+              Index Scan [imdb.cast_info]  est 37  actual 36 x237
+            Materialize
+              Seq Scan [imdb.role_type]  est 4  actual 4
+          Index Scan [imdb.name]  est 1  actual 0 x5518 (stopped early)
+   worst estimates with ceb-grasp:
+      q     307.5 under Seq Scan [imdb.name]  est 3127  actual 961555
+      q     215.9 under Hash Join [imdb.cast_info imdb.kind_type imdb.name imdb.role_type imdb.title]  est 25222  actual 5.45e+06
+      q     178.0 under Hash Join [imdb.cast_info imdb.kind_type imdb.name imdb.title]  est 33337  actual 5.93e+06
+      q      40.4 under Hash Join [imdb.kind_type imdb.title]  est 39861  actual 1.61e+06
+      q      30.9 under Nested Loop [imdb.cast_info imdb.kind_type imdb.title]  est 758888  actual 2.35e+07
+
+== 3. +46052 ms: 49985 ms against 3933 ms (12.7x), a different plan
+   SELECT COUNT(*) FROM title as t, kind_type as kt, info_type as it1, movie_info as mi1, movie_info as mi2, info_type as it2, cast_info as ci, role_type as rt, name as n WHERE t.id = ci.movie_id AND t.id = mi1.movie_id AND t.id = mi2.movie_id AND mi1.movie_id = mi2.movie_id AND mi1.info_type_id = it1.
+   plan with ceb-grasp (seqid 8561):
+      Aggregate
+        Nested Loop [imdb.cast_info imdb.info_type imdb.info_type imdb.kind_type imdb.movie_info imdb.movie_info imdb.name imdb.role_type imdb.title]  est 425520  actual 379319
+          Index Only Scan [imdb.info_type]  est 1  actual 1
+          Nested Loop [imdb.cast_info imdb.info_type imdb.kind_type imdb.movie_info imdb.movie_info imdb.name imdb.role_type imdb.title]  est 430700  actual 379319
+            Nested Loop [imdb.cast_info imdb.info_type imdb.kind_type imdb.movie_info imdb.name imdb.role_type imdb.title]  est 325146  actual 2.85e+06  q 9v
+              Index Only Scan [imdb.info_type]  est 1  actual 1
+              Nested Loop [imdb.cast_info imdb.kind_type imdb.movie_info imdb.name imdb.role_type imdb.title]  est 330317  actual 2.85e+06  q 9v
+                Hash Join [imdb.cast_info imdb.kind_type imdb.name imdb.role_type imdb.title]  est 299425  actual 4.60e+06  q 15v
+                  Hash Join [imdb.cast_info imdb.kind_type imdb.name imdb.title]  est 1.13e+06  actual 5.49e+06  q 5v
+                    Nested Loop [imdb.cast_info imdb.kind_type imdb.title]  est 2.79e+06  actual 1.14e+07  q 4v
+                      Hash Join [imdb.kind_type imdb.title]  est 146705  actual 689610  q 5v
+                        Seq Scan [imdb.title]  est 644622  actual 2.02e+06  q 3v
+                        Hash
+                          Seq Scan [imdb.kind_type]  est 3  actual 4
+                      Index Scan [imdb.cast_info]  est 19  actual 16 x689610
+                    Hash
+                      Seq Scan [imdb.name]  est 28713  actual 1.74e+06  q 61v
+                  Hash
+                    Seq Scan [imdb.role_type]  est 2  actual 5  q 2v
+                Index Scan [imdb.movie_info]  est 1  actual 1 x4.5976e+06
+            Index Scan [imdb.movie_info]  est 1  actual 0 x2.84656e+06
+   plan with ceb-postgres (seqid 8559):
+      Aggregate
+        Nested Loop [imdb.cast_info imdb.info_type imdb.info_type imdb.kind_type imdb.movie_info imdb.movie_info imdb.name imdb.role_type imdb.title]  est 298  actual 379319  q 1273v
+          Nested Loop [imdb.cast_info imdb.info_type imdb.info_type imdb.kind_type imdb.movie_info imdb.movie_info imdb.role_type imdb.title]  est 717  actual 621963  q 867v
+            Nested Loop [imdb.cast_info imdb.info_type imdb.info_type imdb.kind_type imdb.movie_info imdb.movie_info imdb.title]  est 1720  actual 889792  q 517v
+              Nested Loop [imdb.info_type imdb.info_type imdb.kind_type imdb.movie_info imdb.movie_info imdb.title]  est 120  actual 34423  q 287v
+                Index Only Scan [imdb.info_type]  est 1  actual 1
+                Nested Loop [imdb.info_type imdb.kind_type imdb.movie_info imdb.movie_info imdb.title]  est 120  actual 34423  q 287v
+                  Index Only Scan [imdb.info_type]  est 1  actual 1
+                  Nested Loop [imdb.kind_type imdb.movie_info imdb.movie_info imdb.title]  est 120  actual 34423  q 287v
+                    Nested Loop [imdb.kind_type imdb.movie_info imdb.title]  est 6753  actual 91628  q 14v
+                      Nested Loop [imdb.movie_info imdb.title]  est 11818  actual 126704  q 11v
+                        Seq Scan [imdb.movie_info]  est 14855  actual 177351  q 12v
+                        Index Scan [imdb.title]  est 1  actual 1 x177351 (stopped early)
+                      Materialize
+                        Seq Scan [imdb.kind_type]  est 4  actual 4
+                    Index Scan [imdb.movie_info]  est 1  actual 0 x91628
+              Index Scan [imdb.cast_info]  est 37  actual 26 x34423
+            Materialize
+              Seq Scan [imdb.role_type]  est 5  actual 5
+          Index Scan [imdb.name]  est 1  actual 1 x621963 (stopped early)
+   worst estimates with ceb-grasp:
+      q      60.6 under Seq Scan [imdb.name]  est 28713  actual 1.74e+06
+      q      15.4 under Hash Join [imdb.cast_info imdb.kind_type imdb.name imdb.role_type imdb.title]  est 299425  actual 4.60e+06
+      q       8.8 under Nested Loop [imdb.cast_info imdb.info_type imdb.kind_type imdb.movie_info imdb.name imdb.role_type imdb.title]  est 325146  actual 2.85e+06
+      q       8.6 under Nested Loop [imdb.cast_info imdb.kind_type imdb.movie_info imdb.name imdb.role_type imdb.title]  est 330317  actual 2.85e+06
+      q       4.9 under Hash Join [imdb.cast_info imdb.kind_type imdb.name imdb.title]  est 1.13e+06  actual 5.49e+06

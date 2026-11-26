@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pgpi"
+version = "0.11.0"
+description = "pg_plan_inspector 2: adaptive query optimization research framework for PostgreSQL 19"
+requires-python = ">=3.10"
+dependencies = ["pyarrow>=14", "psycopg>=3.1", "numpy>=1.22"]
+
+[project.optional-dependencies]
+duckdb = ["duckdb"]
+pandas = ["pandas"]
+test = ["pytest"]
+torch = ["torch>=2.0"]         # grasp
+
+[tool.setuptools]
+packages = ["pgpi", "pgpi.estimator_plugins"]

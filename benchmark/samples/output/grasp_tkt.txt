@@ -1,0 +1,12 @@
+ceb-train: n 127  grasp median 1.7 max 31 (under 108)  postgres median 3.7
+   q -31  est 5552  actual 169541   (t.production_year <= '1975'::integer) AND ('1925'::integer < t.production_year) AND (kt.kind = 'episode'::text)
+   q -22  est 7701  actual 169544   (t.production_year <= '1975'::integer) AND ('1875'::integer < t.production_year) AND (kt.kind = 'episode'::text)
+   q +20  est 897  actual 45   (t.production_year <= '1975'::integer) AND ('1925'::integer < t.production_year) AND (kt.kind = 'video movie'::text)
+ceb-postgres: n 63  grasp median 1.6 max 7 (under 54)  postgres median 3.4
+   q -7  est 58659  actual 433923   (t.production_year <= '1975'::integer) AND (t.production_year >= '1875'::integer) AND (kt.kind = ANY ('{episode,movie,"tv series","video game"}'::text[]))
+   q -7  est 58659  actual 433923   (t.production_year <= '1975'::integer) AND (t.production_year >= '1875'::integer) AND (kt.kind = ANY ('{episode,movie,"tv series","video game"}'::text[]))
+   q -7  est 58659  actual 433923   (t.production_year <= '1975'::integer) AND (t.production_year >= '1875'::integer) AND (kt.kind = ANY ('{episode,movie,"tv series","video game"}'::text[]))
+ceb-grasp: n 279  grasp median 4.3 max 26 (under 273)  postgres median 3.7
+   q -26  est 54981  actual 1426771   (t.production_year <= '2015'::integer) AND ('1975'::integer < t.production_year) AND (kt.kind = ANY ('{episode,"video movie"}'::text[]))
+   q -26  est 54981  actual 1426771   (t.production_year <= '2015'::integer) AND ('1975'::integer < t.production_year) AND (kt.kind = ANY ('{episode,"video movie"}'::text[]))
+   q -26  est 54981  actual 1426771   (t.production_year <= '2015'::integer) AND ('1975'::integer < t.production_year) AND (kt.kind = ANY ('{episode,"video movie"}'::text[]))

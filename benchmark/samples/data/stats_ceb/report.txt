@@ -1,0 +1,25 @@
+== 1. STATS data (schema stats)
+== 2. capture train.sql (544 queries) with PostgreSQL alone, collect
+   90s; dataset: {'plans': 544, 'nodes': 4950, 'requests': 0, 'stats': 8}
+== 3. fit feedback, matcomp, hres, litecard, nngp, grasp
+   feedback                              0.9s
+   matcomp                              13.1s
+   hres                                  0.3s
+   litecard                              1.5s
+   nngp                                  0.7s
+   grasp:epochs=100,restarts=1        1765.9s
+== 4. run test.sql (89 queries: 57 A, 32 B) x 7 x 3 run(s), timeout 30s
+   run 1/3 done (509s)
+   run 2/3 done (922s)
+   run 3/3 done (1335s)
+== 5. results
+   execution time: sum over the queries of the median of 3 run(s), ms; 'changed' = queries whose plan differs from PostgreSQL's; 'timeouts' = runs canceled at 30s or failed (counted as 30s)
+   estimator         A ms  vs pg      B ms  vs pg    all ms  vs pg  changed timeouts  q-error median      p90
+   hres             27378   0.94     15038   0.97     42417   0.95       22        0            1.32     18.4
+   postgres         29241   1.00     15571   1.00     44812   1.00        0        0            1.25     15.9
+   nngp             24180   0.83     21771   1.40     45951   1.03       73        0            2.06     30.0
+   feedback         31362   1.07     15899   1.02     47261   1.05       35        0            1.62     28.2
+   litecard         35290   1.21     15363   0.99     50653   1.13       49        0            1.50     66.6
+   matcomp          41618   1.42     18824   1.21     60443   1.35       66        0            2.17    122.0
+   grasp            58031   1.98     54198   3.48    112229   2.50       83        3            5.54   2422.7
+   per query: /home/vagrant/works/pgpi/benchmark/data/stats_ceb/per_query.tsv

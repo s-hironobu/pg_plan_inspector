@@ -1,0 +1,97 @@
+stats-nngp against stats-postgres: 89 queries, total 45951 ms against 44812 ms (1.03); 10 queries at least 100 ms slower, together 9552 ms of the difference
+
+== 1. +5173 ms: 6276 ms against 1103 ms (5.7x), a different plan
+   SELECT COUNT(*) FROM comments as c, posts as p, postHistory as ph, votes as v, users as u WHERE v.UserId = u.Id AND c.UserId = u.Id AND p.OwnerUserId = u.Id AND ph.UserId = u.Id AND c.Score=2 AND p.AnswerCount>=0 AND p.AnswerCount<=9 AND p.CreationDate>='2010-07-20 18:17:25'::timestamp AND p.Creatio
+   plan with stats-nngp (seqid 70421):
+      Aggregate
+        Merge Join [stats.comments stats.posthistory stats.posts stats.users stats.votes]  est 4.62e+08  actual 2.86e+06  q 161^
+          Nested Loop [stats.comments stats.posthistory stats.users stats.votes]  est 5728  actual 212898  q 37v
+            Merge Join [stats.comments stats.users stats.votes]  est 740  actual 925
+              Nested Loop [stats.comments stats.votes]  est 558959  actual 35784  q 16^ (stopped early)
+                Index Scan [stats.comments]  est 12516  actual 8200 (stopped early)
+                Memoize
+                  Index Scan [stats.votes]  est 1  actual 1 x987 (stopped early)
+              Index Scan [stats.users]  est 10555  actual 37636  q 4v
+            Index Scan [stats.posthistory]  est 26  actual 230 x925  q 9v
+          Index Scan [stats.posts]  est 17467  actual 2.90e+06  q 166v (stopped early)
+   plan with stats-postgres (seqid 70417):
+      Aggregate
+        Merge Join [stats.comments stats.posthistory stats.posts stats.users stats.votes]  est 4.52e+07  actual 2.86e+06  q 16^
+          Merge Join [stats.posthistory stats.posts stats.votes]  est 2.76e+06  actual 8.92e+06  q 3v (stopped early)
+            Index Scan [stats.posts]  est 41373  actual 40824 (stopped early)
+            Materialize
+              Merge Join [stats.posthistory stats.votes]  est 67055  actual 590760  q 9v (stopped early)
+                Index Scan [stats.votes]  est 1748  actual 1096 (stopped early)
+                Index Scan [stats.posthistory]  est 299245  actual 773044  q 3v (stopped early)
+          Sort
+            Hash Join [stats.comments stats.users]  est 7623  actual 1933  q 4^
+              Seq Scan [stats.comments]  est 8314  actual 8362
+              Hash
+                Seq Scan [stats.users]  est 37629  actual 37636
+   worst estimates with stats-nngp:
+      q     166.1 under Index Scan [stats.posts]  est 17467  actual 2.90e+06
+      q     161.3 over  Merge Join [stats.comments stats.posthistory stats.posts stats.users stats.votes]  est 4.62e+08  actual 2.86e+06
+      q      37.2 under Nested Loop [stats.comments stats.posthistory stats.users stats.votes]  est 5728  actual 212898
+      q      15.6 over  Nested Loop [stats.comments stats.votes]  est 558959  actual 35784
+      q       8.9 under Index Scan [stats.posthistory]  est 26  actual 230
+
+== 2. +1503 ms: 1710 ms against 208 ms (8.2x), a different plan
+   SELECT COUNT(*) FROM postHistory as ph, posts as p, users as u, badges as b WHERE b.UserId = u.Id AND p.OwnerUserId = u.Id AND ph.UserId = u.Id AND ph.PostHistoryTypeId=5 AND p.ViewCount>=0 AND p.ViewCount<=2024 AND u.Reputation>=1 AND u.Reputation<=750 AND b.Date>='2010-07-20 10:34:10'::timestamp
+   plan with stats-nngp (seqid 69239):
+      Aggregate
+        Nested Loop [stats.badges stats.posthistory stats.posts stats.users]  est 360  actual 1.94e+06  q 5380v
+          Nested Loop [stats.badges stats.posts stats.users]  est 37  actual 203957  q 5512v
+            Hash Join [stats.badges stats.users]  est 232  actual 65475  q 282v
+              Seq Scan [stats.badges]  est 102605  actual 79511
+              Hash
+                Seq Scan [stats.users]  est 5684  actual 39923  q 7v
+            Index Scan [stats.posts]  est 3  actual 3 x65475
+          Index Scan [stats.posthistory]  est 6  actual 9 x203957
+   plan with stats-postgres (seqid 69863):
+      Aggregate
+        Nested Loop [stats.badges stats.posthistory stats.posts stats.users]  est 1.03e+07  actual 1.94e+06  q 5^
+          Hash Join [stats.badges stats.posthistory stats.users]  est 127539  actual 181824
+            Seq Scan [stats.badges]  est 79727  actual 79511
+            Hash
+              Hash Join [stats.posthistory stats.users]  est 64508  actual 22618  q 3^
+                Seq Scan [stats.posthistory]  est 69945  actual 69427
+                Hash
+                  Seq Scan [stats.users]  est 39894  actual 39923
+          Memoize
+            Index Scan [stats.posts]  est 3  actual 3 x7205
+   worst estimates with stats-nngp:
+      q    5512.4 under Nested Loop [stats.badges stats.posts stats.users]  est 37  actual 203957
+      q    5380.4 under Nested Loop [stats.badges stats.posthistory stats.posts stats.users]  est 360  actual 1.94e+06
+      q     282.2 under Hash Join [stats.badges stats.users]  est 232  actual 65475
+      q       7.0 under Seq Scan [stats.users]  est 5684  actual 39923
+      q       1.6 under Index Scan [stats.posthistory]  est 6  actual 9
+
+== 3. +1486 ms: 4560 ms against 3074 ms (1.5x), a different plan
+   SELECT COUNT(*) FROM comments as c, posts as p, votes as v, users as u WHERE u.Id = p.OwnerUserId AND u.Id = c.UserId AND u.Id = v.UserId AND c.CreationDate>='2010-07-27 12:03:40'::timestamp AND p.Score>=0 AND p.Score<=28 AND p.ViewCount>=0 AND p.ViewCount<=6517 AND p.AnswerCount>=0 AND p.AnswerCoun
+   plan with stats-nngp (seqid 69596):
+      Aggregate
+        Merge Join [stats.comments stats.posts stats.users stats.votes]  est 580192  actual 5.64e+07  q 97v
+          Nested Loop [stats.comments stats.posts stats.users]  est 28801  actual 697548  q 24v
+            Merge Join [stats.posts stats.users]  est 2125  actual 11436  q 5v
+              Index Scan [stats.users]  est 54476  actual 39909 (stopped early)
+              Sort
+                Seq Scan [stats.posts]  est 2709  actual 12147  q 4v
+            Index Scan [stats.comments]  est 25  actual 61 x11436  q 2v
+          Index Only Scan [stats.votes]  est 514969  actual 5.64e+07  q 109v (stopped early)
+   plan with stats-postgres (seqid 69598):
+      Aggregate
+        Hash Join [stats.comments stats.posts stats.users stats.votes]  est 3.16e+07  actual 5.64e+07
+          Seq Scan [stats.comments]  est 172619  actual 173735
+          Hash
+            Nested Loop [stats.posts stats.users stats.votes]  est 55604  actual 129111  q 2v
+              Merge Join [stats.users stats.votes]  est 33706  actual 32349
+                Index Only Scan [stats.votes]  est 328064  actual 34790  q 9^ (stopped early)
+                Index Scan [stats.users]  est 39953  actual 39940 (stopped early)
+              Memoize
+                Index Scan [stats.posts]  est 1  actual 1 x5393
+   worst estimates with stats-nngp:
+      q     109.5 under Index Only Scan [stats.votes]  est 514969  actual 5.64e+07
+      q      97.1 under Merge Join [stats.comments stats.posts stats.users stats.votes]  est 580192  actual 5.64e+07
+      q      24.2 under Nested Loop [stats.comments stats.posts stats.users]  est 28801  actual 697548
+      q       5.4 under Merge Join [stats.posts stats.users]  est 2125  actual 11436
+      q       4.5 under Seq Scan [stats.posts]  est 2709  actual 12147

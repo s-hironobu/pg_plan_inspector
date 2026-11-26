@@ -1,0 +1,26 @@
+== 1. IMDb data (schema imdb, from benchmark/lib/imdb.py)
+   schema imdb: the 6 tables of JOB-light, about 62,107,384 rows
+== 2. capture train.sql (630 queries) with PostgreSQL alone, collect
+   1304s; dataset: {'plans': 630, 'nodes': 3233, 'requests': 0, 'stats': 6}
+== 3. fit feedback, matcomp, hres, litecard, nngp, grasp
+   feedback                              1.5s
+   matcomp                              13.5s
+   hres                                  0.2s
+   litecard                              0.6s
+   nngp                                  0.2s
+   grasp:epochs=100,restarts=1         139.9s
+== 4. run test.sql (70 queries: 35 A, 35 B) x 7 x 3 run(s), timeout 60s
+   run 1/3 done (3552s)
+   run 2/3 done (7023s)
+   run 3/3 done (10517s)
+== 5. results
+   execution time: sum over the queries of the median of 3 run(s), ms; 'changed' = queries whose plan differs from PostgreSQL's; 'timeouts' = runs canceled at 60s or failed (counted as 60s)
+   estimator         A ms  vs pg      B ms  vs pg    all ms  vs pg  changed timeouts  q-error median      p90
+   hres            126972   1.03    334985   0.99    461958   1.00       13        6            1.28      9.8
+   postgres        123467   1.00    339537   1.00    463004   1.00        0        6            1.31     12.5
+   matcomp         125444   1.02    348439   1.03    473883   1.02       23        6            1.25      9.0
+   feedback        125235   1.01    361094   1.06    486329   1.05       20        6            1.39     12.6
+   litecard        129044   1.05    358103   1.05    487148   1.05       44        6            1.49     25.0
+   nngp            117973   0.96    416607   1.23    534581   1.15       47        6            2.96     61.0
+   grasp           186682   1.51    394301   1.16    580983   1.25       45        6            1.74     24.0
+   per query: /home/vagrant/works/pgpi/benchmark/data/job_light/per_query.tsv

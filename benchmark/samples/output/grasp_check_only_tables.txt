@@ -1,0 +1,79 @@
+43 distinct questions on imdb.kind_type imdb.title; worst first
+
+q +2  grasp 1.04e+03  actual 442  postgres 7.44e+03   [ceb-train]
+     c(t) grasp 4.97e+04  actual 5.17e+04   ('1928'::integer < t.production_year) AND (t.production_year <= '1949'::integer)
+     c(kt) grasp 0.993  actual 1   (kt.kind = 'tv movie'::text)
+     overlap kt.id = t.kind_id: grasp 0.021  actual 0.00855
+q -1  grasp 1.24e+04  actual 1.76e+04  postgres 5.07e+04   [ceb-train]
+     c(t) grasp 3.47e+05  actual 3.48e+05   ('1925'::integer < t.production_year) AND (t.production_year <= '1975'::integer)
+     c(kt) grasp 0.993  actual 1   (kt.kind = 'tv movie'::text)
+     overlap kt.id = t.kind_id: grasp 0.0359  actual 0.0506
+q -1  grasp 1.31e+04  actual 1.76e+04  postgres 6.52e+04   [ceb-train]
+     c(t) grasp 4.56e+05  actual 4.52e+05   ('1875'::integer < t.production_year) AND (t.production_year <= '1975'::integer)
+     c(kt) grasp 0.993  actual 1   (kt.kind = 'tv movie'::text)
+     overlap kt.id = t.kind_id: grasp 0.0289  actual 0.039
+q -1  grasp 1.32e+05  actual 1.66e+05  postgres 1.01e+05   [ceb-train]
+     c(t) grasp 3.47e+05  actual 3.48e+05   ('1925'::integer < t.production_year) AND (t.production_year <= '1975'::integer)
+     c(kt) grasp 1.99  actual 2   (kt.kind = ANY ('{movie,"tv movie"}'::text[]))
+     overlap kt.id = t.kind_id: grasp 0.192  actual 0.239
+q +1  grasp 2.85e+04  actual 2.37e+04  postgres 1.11e+05   [ceb-train]
+     c(t) grasp 3.88e+05  actual 3.86e+05   ('1981'::integer < t.production_year) AND (t.production_year <= '1997'::integer)
+     c(kt) grasp 1.96  actual 2   (kt.kind = ANY ('{"tv series","video game"}'::text[]))
+     overlap kt.id = t.kind_id: grasp 0.0375  actual 0.0307
+q +1  grasp 2.3e+05  actual 1.93e+05  postgres 1.56e+05   [ceb-train]
+     c(t) grasp 5.51e+05  actual 5.38e+05   ('1950'::integer < t.production_year) AND (t.production_year <= '1990'::integer)
+     c(kt) grasp 1.99  actual 2   (kt.kind = ANY ('{movie,"tv movie"}'::text[]))
+     overlap kt.id = t.kind_id: grasp 0.209  actual 0.18
+q -1  grasp 3.73e+04  actual 4.43e+04  postgres 1.66e+05   [ceb-train]
+     c(t) grasp 3.88e+05  actual 3.86e+05   ('1981'::integer < t.production_year) AND (t.production_year <= '1997'::integer)
+     c(kt) grasp 2.99  actual 3   (kt.kind = ANY ('{"tv series","video game","video movie"}'::text[]))
+     overlap kt.id = t.kind_id: grasp 0.0321  actual 0.0382
+q +1  grasp 1.99e+05  actual 1.7e+05  postgres 6.52e+04   [ceb-train]
+     c(t) grasp 4.56e+05  actual 4.52e+05   ('1875'::integer < t.production_year) AND (t.production_year <= '1975'::integer)
+     c(kt) grasp 0.991  actual 1   (kt.kind = 'episode'::text)
+     overlap kt.id = t.kind_id: grasp 0.441  actual 0.375
+q -1  grasp 2.97e+05  actual 3.47e+05  postgres 1.56e+05   [ceb-train]
+     c(t) grasp 5.51e+05  actual 5.38e+05   ('1950'::integer < t.production_year) AND (t.production_year <= '1990'::integer)
+     c(kt) grasp 2.05  actual 2   (kt.kind = ANY ('{episode,"tv movie"}'::text[]))
+     overlap kt.id = t.kind_id: grasp 0.262  actual 0.323
+q -1  grasp 4.01e+05  actual 4.68e+05  postgres 1.56e+05   [ceb-train]
+     c(t) grasp 5.51e+05  actual 5.38e+05   ('1950'::integer < t.production_year) AND (t.production_year <= '1990'::integer)
+     c(kt) grasp 1.99  actual 2   (kt.kind = ANY ('{episode,movie}'::text[]))
+     overlap kt.id = t.kind_id: grasp 0.366  actual 0.435
+q -1  grasp 7.06e+04  actual 8.12e+04  postgres 5.53e+04   [ceb-train]
+     c(t) grasp 3.88e+05  actual 3.86e+05   ('1981'::integer < t.production_year) AND (t.production_year <= '1997'::integer)
+     c(kt) grasp 1.07  actual 1   (kt.kind = 'movie'::text)
+     overlap kt.id = t.kind_id: grasp 0.171  actual 0.21
+q -1  grasp 1.5e+05  actual 1.7e+05  postgres 5.07e+04   [ceb-train]
+     c(t) grasp 3.47e+05  actual 3.48e+05   ('1925'::integer < t.production_year) AND (t.production_year <= '1975'::integer)
+     c(kt) grasp 0.991  actual 1   (kt.kind = 'episode'::text)
+     overlap kt.id = t.kind_id: grasp 0.437  actual 0.488
+q +1  grasp 1.26e+04  actual 1.16e+04  postgres 1.01e+05   [ceb-train]
+     c(t) grasp 3.47e+05  actual 3.48e+05   ('1925'::integer < t.production_year) AND (t.production_year <= '1975'::integer)
+     c(kt) grasp 2.05  actual 2   (kt.kind = ANY ('{"tv series","video movie"}'::text[]))
+     overlap kt.id = t.kind_id: grasp 0.0177  actual 0.0166
+q +1  grasp 2.03e+05  actual 1.87e+05  postgres 1.3e+05   [ceb-train]
+     c(t) grasp 4.56e+05  actual 4.52e+05   ('1875'::integer < t.production_year) AND (t.production_year <= '1975'::integer)
+     c(kt) grasp 2.05  actual 2   (kt.kind = ANY ('{episode,"tv movie"}'::text[]))
+     overlap kt.id = t.kind_id: grasp 0.217  actual 0.207
+q -1  grasp 3.66e+04  actual 3.96e+04  postgres 1.11e+05   [ceb-train]
+     c(t) grasp 3.88e+05  actual 3.86e+05   ('1981'::integer < t.production_year) AND (t.production_year <= '1997'::integer)
+     c(kt) grasp 2.05  actual 2   (kt.kind = ANY ('{"tv series","video movie"}'::text[]))
+     overlap kt.id = t.kind_id: grasp 0.046  actual 0.0512
+
+by restriction set: n, median actual, median grasp, median q-error
+     1        442   1.04e+03      +2.3   (kt.kind = 'tv movie'::text) | ('1928'::integer < t.production_year) AND (t.production_year <= '1949'::integer)
+     1   1.76e+04   1.24e+04      -1.4   (kt.kind = 'tv movie'::text) | ('1925'::integer < t.production_year) AND (t.production_year <= '1975'::integer)
+     1   1.76e+04   1.31e+04      -1.3   (kt.kind = 'tv movie'::text) | ('1875'::integer < t.production_year) AND (t.production_year <= '1975'::integer)
+     1   1.66e+05   1.32e+05      -1.3   (kt.kind = ANY ('{movie,"tv movie"}'::text[])) | ('1925'::integer < t.production_year) AND (t.production_year <= '1975'::integer)
+     1   2.37e+04   2.85e+04      +1.2   (kt.kind = ANY ('{"tv series","video game"}'::text[])) | ('1981'::integer < t.production_year) AND (t.production_year <= '1997'::integer)
+     1   1.93e+05    2.3e+05      +1.2   (kt.kind = ANY ('{movie,"tv movie"}'::text[])) | ('1950'::integer < t.production_year) AND (t.production_year <= '1990'::integer)
+     1   4.43e+04   3.73e+04      -1.2   (kt.kind = ANY ('{"tv series","video game","video movie"}'::text[])) | ('1981'::integer < t.production_year) AND (t.production_year <= '1997'::integer
+     1    1.7e+05   1.99e+05      +1.2   (kt.kind = 'episode'::text) | ('1875'::integer < t.production_year) AND (t.production_year <= '1975'::integer)
+     1   3.47e+05   2.97e+05      -1.2   (kt.kind = ANY ('{episode,"tv movie"}'::text[])) | ('1950'::integer < t.production_year) AND (t.production_year <= '1990'::integer)
+     1   4.68e+05   4.01e+05      -1.2   (kt.kind = ANY ('{episode,movie}'::text[])) | ('1950'::integer < t.production_year) AND (t.production_year <= '1990'::integer)
+     1   8.12e+04   7.06e+04      -1.1   (kt.kind = 'movie'::text) | ('1981'::integer < t.production_year) AND (t.production_year <= '1997'::integer)
+     1    1.7e+05    1.5e+05      -1.1   (kt.kind = 'episode'::text) | ('1925'::integer < t.production_year) AND (t.production_year <= '1975'::integer)
+     1   1.16e+04   1.26e+04      +1.1   (kt.kind = ANY ('{"tv series","video movie"}'::text[])) | ('1925'::integer < t.production_year) AND (t.production_year <= '1975'::integer)
+     1   1.87e+05   2.03e+05      +1.1   (kt.kind = ANY ('{episode,"tv movie"}'::text[])) | ('1875'::integer < t.production_year) AND (t.production_year <= '1975'::integer)
+     1   3.96e+04   3.66e+04      -1.1   (kt.kind = ANY ('{"tv series","video movie"}'::text[])) | ('1981'::integer < t.production_year) AND (t.production_year <= '1997'::integer)

@@ -1,0 +1,15 @@
+# Object files
+*.o
+
+# Shared libraries
+*.so
+
+# Python cache directories
+__pycache__/
+
+# Build directories
+client/build/
+client/pgpi.egg-info/
+
+# macOS
+.DS_Store

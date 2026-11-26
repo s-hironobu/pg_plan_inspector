@@ -1,0 +1,4 @@
+comment = 'pg_plan_inspector 2: cardinality intervention (routes H and D) and observation'
+default_version = '0.4'
+module_pathname = '$libdir/pgpi'
+relocatable = true

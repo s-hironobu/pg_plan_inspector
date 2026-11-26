@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "created": "2026-11-22T12:14:11.233228+00:00",
+  "last_seqid": 8807,
+  "last_stats_at": "2026-11-22T11:48:31.437889+00:00",
+  "parts": 4,
+  "filter": {
+    "label": null,
+    "database": null
+  },
+  "anonymization": null,
+  "sources": [
+    "host=localhost user=vagrant dbname=testdb"
+  ],
+  "updated": "2026-11-22T15:38:36.598322+00:00"
+}
